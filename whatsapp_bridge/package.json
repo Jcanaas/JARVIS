@@ -1,0 +1,17 @@
+{
+  "name": "whatsapp-bridge",
+  "version": "0.1.0",
+  "description": "Bridge server exposing a small HTTP API for whatsapp-web.js to integrate with the Python agent.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "express": "^4.18.2",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.7"
+  }
+}

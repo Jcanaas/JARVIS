@@ -1,0 +1,55 @@
+# === Credentials & secrets — NEVER commit ===
+config/api_keys.json
+config/google_credentials.json
+config/google_token.json
+config/youtube_token.json
+config/ytmusic_oauth.json
+
+# === Personal memory / conversation data ===
+memory/conversation_history.json
+memory/long_term.json
+memory/notes.json
+memory/clipboard_history.json
+memory/gmail_cache.json
+memory/gmail_images/
+memory/gmail_render/
+
+# === WhatsApp bridge runtime/private data ===
+whatsapp_bridge/bridge_state.json
+whatsapp_bridge/bridge_state.json.tmp
+whatsapp_bridge/bridge_token
+whatsapp_bridge/bridge.log*
+whatsapp_bridge/.wwebjs_auth/
+whatsapp_bridge/.wwebjs_cache/
+whatsapp_bridge/node_modules/
+whatsapp_pending.json
+
+# === Large Windows binaries (bundled via installer, not tracked in git) ===
+mpv.exe
+mpv.com
+mpv.com.manifest
+d3dcompiler_43.dll
+mpv/
+7z/
+mpv_log.txt
+
+# === Claude Code / agent internal files ===
+.claude/
+.agents/
+
+# === Python caches ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# === Build / packaging artifacts ===
+dist/
+build/work/
+build/pyinstaller.log
+build/smoke_*.log
+node/
+*.spec.bak
+
+# === Logs ===
+*.log
