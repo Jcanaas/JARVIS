@@ -1,0 +1,70 @@
+<svg width="900" height="560" xmlns="http://www.w3.org/2000/svg" font-family="'Courier New', Consolas, monospace">
+  <!-- Background -->
+  <rect width="900" height="560" fill="#0D1117"/>
+
+  <!-- Title bar -->
+  <rect width="900" height="38" fill="#080E19"/>
+  <circle cx="18" cy="19" r="6" fill="#FB7185"/>
+  <circle cx="36" cy="19" r="6" fill="#FCD34D"/>
+  <circle cx="54" cy="19" r="6" fill="#4ADE80"/>
+  <text x="450" y="24" text-anchor="middle" fill="#7DD3FC" font-size="13" font-weight="bold" letter-spacing="2">JARVIS  —  Mark XXXIX</text>
+  <line x1="0" y1="38" x2="900" y2="38" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.25"/>
+
+  <!-- Listening indicator -->
+  <rect x="730" y="8" width="150" height="22" rx="11" fill="#38BDF8" fill-opacity="0.12" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.5"/>
+  <circle cx="746" cy="19" r="5" fill="#4ADE80"/>
+  <text x="757" y="23" fill="#4ADE80" font-size="10">EN ESPERA</text>
+
+  <!-- Chat scroll area -->
+  <!-- Message 1: User -->
+  <rect x="180" y="58" width="700" height="52" rx="10" fill="#0F2137"/>
+  <rect x="180" y="58" width="4" height="52" rx="2" fill="#7DD3FC"/>
+  <text x="196" y="79" fill="rgba(180,210,240,0.55)" font-size="10">Tu  14:23</text>
+  <text x="196" y="99" fill="#DFF5FF" font-size="13">Pon algo de musica de The Weeknd</text>
+
+  <!-- Message 2: Jarvis -->
+  <rect x="20" y="124" width="700" height="72" rx="10" fill="#0A1628" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.30"/>
+  <rect x="20" y="124" width="4" height="72" rx="2" fill="#38BDF8"/>
+  <text x="36" y="144" fill="#38BDF8" font-size="10" font-weight="bold" letter-spacing="1">JARVIS  14:23</text>
+  <text x="36" y="165" fill="#DFF5FF" font-size="13">Reproduciendo "Blinding Lights" de The Weeknd en YouTube Music.</text>
+  <text x="36" y="184" fill="#7DD3FC" font-size="11">Modo musical activado — cola de 14 canciones cargada.</text>
+
+  <!-- Message 3: User -->
+  <rect x="180" y="212" width="700" height="52" rx="10" fill="#0F2137"/>
+  <rect x="180" y="212" width="4" height="52" rx="2" fill="#7DD3FC"/>
+  <text x="196" y="232" fill="rgba(180,210,240,0.55)" font-size="10">Tu  14:25</text>
+  <text x="196" y="252" fill="#DFF5FF" font-size="13">Que tiempo hace manana en Madrid?</text>
+
+  <!-- Message 4: Jarvis -->
+  <rect x="20" y="278" width="700" height="92" rx="10" fill="#0A1628" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.30"/>
+  <rect x="20" y="278" width="4" height="92" rx="2" fill="#38BDF8"/>
+  <text x="36" y="298" fill="#38BDF8" font-size="10" font-weight="bold" letter-spacing="1">JARVIS  14:25</text>
+  <text x="36" y="320" fill="#DFF5FF" font-size="13">Manana en Madrid: Parcialmente nublado, 24 C.</text>
+  <text x="36" y="341" fill="#7DD3FC" font-size="11">Min 16 C — Max 27 C — Viento 12 km/h del SO — Sin precipitaciones.</text>
+  <text x="36" y="360" fill="rgba(125,211,252,0.6)" font-size="10">Fuente: OpenWeatherMap</text>
+
+  <!-- Message 5: User -->
+  <rect x="180" y="386" width="700" height="52" rx="10" fill="#0F2137"/>
+  <rect x="180" y="386" width="4" height="52" rx="2" fill="#7DD3FC"/>
+  <text x="196" y="406" fill="rgba(180,210,240,0.55)" font-size="10">Tu  14:26</text>
+  <text x="196" y="427" fill="#DFF5FF" font-size="13">Ponme un recordatorio manana a las 9 para la reunion con el equipo</text>
+
+  <!-- Message 6: Jarvis short -->
+  <rect x="20" y="452" width="700" height="52" rx="10" fill="#0A1628" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.30"/>
+  <rect x="20" y="452" width="4" height="52" rx="2" fill="#38BDF8"/>
+  <text x="36" y="472" fill="#38BDF8" font-size="10" font-weight="bold" letter-spacing="1">JARVIS  14:26</text>
+  <text x="36" y="493" fill="#DFF5FF" font-size="13">Recordatorio creado: "Reunion con el equipo" — manana 09:00. Tambien lo he anadido a Google Calendar.</text>
+
+  <!-- Input bar -->
+  <rect y="520" width="900" height="40" fill="#080E19"/>
+  <line x1="0" y1="520" x2="900" y2="520" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.15"/>
+  <rect x="12" y="527" width="808" height="28" rx="14" fill="#0F2137" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.35"/>
+  <text x="30" y="546" fill="rgba(180,210,240,0.35)" font-size="12">Escribe o usa el microfono...</text>
+
+  <!-- Mic button -->
+  <rect x="836" y="524" width="32" height="32" rx="16" fill="#38BDF8" fill-opacity="0.15" stroke="#38BDF8" stroke-width="1"/>
+  <rect x="849" y="531" width="6" height="10" rx="3" fill="#38BDF8"/>
+  <line x1="852" y1="541" x2="852" y2="546" stroke="#38BDF8" stroke-width="1.5"/>
+  <line x1="847" y1="543" x2="857" y2="543" stroke="#38BDF8" stroke-width="1.5"/>
+  <ellipse cx="852" cy="536" rx="4" ry="5" fill="none" stroke="#38BDF8" stroke-width="1.5"/>
+</svg>

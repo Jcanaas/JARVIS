@@ -1,0 +1,124 @@
+<svg width="900" height="560" xmlns="http://www.w3.org/2000/svg" font-family="'Courier New', Consolas, monospace">
+  <!-- Background -->
+  <rect width="900" height="560" fill="#0D1117"/>
+
+  <!-- Title bar -->
+  <rect width="900" height="38" fill="#080E19"/>
+  <circle cx="18" cy="19" r="6" fill="#FB7185"/>
+  <circle cx="36" cy="19" r="6" fill="#FCD34D"/>
+  <circle cx="54" cy="19" r="6" fill="#4ADE80"/>
+  <text x="450" y="24" text-anchor="middle" fill="#7DD3FC" font-size="13" font-weight="bold" letter-spacing="2">JARVIS  —  Gmail</text>
+  <line x1="0" y1="38" x2="900" y2="38" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.25"/>
+
+  <!-- Sidebar -->
+  <rect x="0" y="38" width="200" height="522" fill="#080E19"/>
+  <line x1="200" y1="38" x2="200" y2="560" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.15"/>
+
+  <!-- Sidebar items -->
+  <rect x="8" y="54" width="184" height="32" rx="6" fill="#38BDF8" fill-opacity="0.12" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.4"/>
+  <text x="24" y="74" fill="#38BDF8" font-size="12" font-weight="bold">Recibidos</text>
+  <rect x="168" y="60" width="20" height="20" rx="10" fill="#38BDF8"/>
+  <text x="178" y="74" text-anchor="middle" fill="#0D1117" font-size="10" font-weight="bold">12</text>
+
+  <rect x="8" y="96" width="184" height="30" rx="6" fill="none"/>
+  <text x="24" y="116" fill="rgba(180,210,240,0.6)" font-size="12">Enviados</text>
+
+  <rect x="8" y="134" width="184" height="30" rx="6" fill="none"/>
+  <text x="24" y="154" fill="rgba(180,210,240,0.6)" font-size="12">Borradores</text>
+  <text x="168" y="154" fill="rgba(180,210,240,0.4)" font-size="10">3</text>
+
+  <rect x="8" y="172" width="184" height="30" rx="6" fill="none"/>
+  <text x="24" y="192" fill="rgba(180,210,240,0.6)" font-size="12">Spam</text>
+
+  <line x1="16" y1="218" x2="184" y2="218" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.1"/>
+
+  <!-- Compose button -->
+  <rect x="8" y="232" width="184" height="34" rx="17" fill="#38BDF8"/>
+  <text x="100" y="253" text-anchor="middle" fill="#0D1117" font-size="12" font-weight="bold">+ Redactar</text>
+
+  <!-- Label: sin leer -->
+  <text x="16" y="290" fill="rgba(180,210,240,0.4)" font-size="9" letter-spacing="1">ETIQUETAS</text>
+  <rect x="8" y="300" width="8" height="8" rx="2" fill="#FB7185"/>
+  <text x="24" y="310" fill="rgba(180,210,240,0.6)" font-size="11">Trabajo</text>
+  <rect x="8" y="320" width="8" height="8" rx="2" fill="#4ADE80"/>
+  <text x="24" y="330" fill="rgba(180,210,240,0.6)" font-size="11">Personal</text>
+  <rect x="8" y="340" width="8" height="8" rx="2" fill="#FCD34D"/>
+  <text x="24" y="350" fill="rgba(180,210,240,0.6)" font-size="11">Facturas</text>
+
+  <!-- Main area -->
+  <!-- Toolbar -->
+  <rect x="200" y="38" width="700" height="40" fill="#0A1628"/>
+  <line x1="200" y1="78" x2="900" y2="78" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="216" y="62" fill="rgba(180,210,240,0.55)" font-size="11">Recibidos — 248 mensajes, 12 sin leer</text>
+
+  <!-- Email rows -->
+  <!-- Unread email 1 -->
+  <rect x="200" y="78" width="700" height="48" fill="#0A1628"/>
+  <rect x="200" y="78" width="3" height="48" fill="#38BDF8"/>
+  <line x1="200" y1="126" x2="900" y2="126" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.08"/>
+  <circle cx="222" cy="102" r="10" fill="#38BDF8" fill-opacity="0.2" stroke="#38BDF8" stroke-width="1"/>
+  <text x="222" y="106" text-anchor="middle" fill="#38BDF8" font-size="11" font-weight="bold">G</text>
+  <text x="244" y="97" fill="#DFF5FF" font-size="12" font-weight="bold">Google Workspace</text>
+  <text x="244" y="114" fill="rgba(180,210,240,0.55)" font-size="11">Tu almacenamiento esta casi lleno — Tienes 14,7 GB de 15 GB usados</text>
+  <text x="854" y="97" fill="rgba(180,210,240,0.4)" font-size="10" text-anchor="end">10:42</text>
+
+  <!-- Unread email 2 -->
+  <rect x="200" y="126" width="700" height="48" fill="#080E19"/>
+  <rect x="200" y="126" width="3" height="48" fill="#38BDF8"/>
+  <line x1="200" y1="174" x2="900" y2="174" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.08"/>
+  <circle cx="222" cy="150" r="10" fill="#A78BFA" fill-opacity="0.2" stroke="#A78BFA" stroke-width="1"/>
+  <text x="222" y="154" text-anchor="middle" fill="#A78BFA" font-size="11" font-weight="bold">J</text>
+  <text x="244" y="145" fill="#DFF5FF" font-size="12" font-weight="bold">Jefe — Juan Martinez</text>
+  <text x="244" y="162" fill="rgba(180,210,240,0.55)" font-size="11">Reunion de equipo mañana a las 10:00 — Confirmad asistencia por favor</text>
+  <text x="854" y="145" fill="rgba(180,210,240,0.4)" font-size="10" text-anchor="end">09:15</text>
+
+  <!-- Read email 3 -->
+  <rect x="200" y="174" width="700" height="48" fill="#0A1628"/>
+  <line x1="200" y1="222" x2="900" y2="222" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.08"/>
+  <circle cx="222" cy="198" r="10" fill="#4ADE80" fill-opacity="0.15" stroke="#4ADE80" stroke-width="1"/>
+  <text x="222" y="202" text-anchor="middle" fill="#4ADE80" font-size="11" font-weight="bold">A</text>
+  <text x="244" y="193" fill="rgba(180,210,240,0.75)" font-size="12">Amazon</text>
+  <text x="244" y="210" fill="rgba(180,210,240,0.45)" font-size="11">Tu pedido #114-5839201 ha sido enviado — Entrega estimada: manana</text>
+  <text x="854" y="193" fill="rgba(180,210,240,0.35)" font-size="10" text-anchor="end">Ayer</text>
+
+  <!-- Read email 4 -->
+  <rect x="200" y="222" width="700" height="48" fill="#080E19"/>
+  <line x1="200" y1="270" x2="900" y2="270" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.08"/>
+  <circle cx="222" cy="246" r="10" fill="#FCD34D" fill-opacity="0.15" stroke="#FCD34D" stroke-width="1"/>
+  <text x="222" y="250" text-anchor="middle" fill="#FCD34D" font-size="11" font-weight="bold">N</text>
+  <text x="244" y="241" fill="rgba(180,210,240,0.75)" font-size="12">Netflix</text>
+  <text x="244" y="258" fill="rgba(180,210,240,0.45)" font-size="11">Nueva serie recomendada para ti: "Adolescencia" esta ahora disponible</text>
+  <text x="854" y="241" fill="rgba(180,210,240,0.35)" font-size="10" text-anchor="end">Ayer</text>
+
+  <!-- Read email 5 -->
+  <rect x="200" y="270" width="700" height="48" fill="#0A1628"/>
+  <line x1="200" y1="318" x2="900" y2="318" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.08"/>
+  <circle cx="222" cy="294" r="10" fill="#FB7185" fill-opacity="0.15" stroke="#FB7185" stroke-width="1"/>
+  <text x="222" y="298" text-anchor="middle" fill="#FB7185" font-size="11" font-weight="bold">G</text>
+  <text x="244" y="289" fill="rgba(180,210,240,0.75)" font-size="12">GitHub</text>
+  <text x="244" y="306" fill="rgba(180,210,240,0.45)" font-size="11">[Jcanaas/JARVIS] Pull request mergeado — Release v1.2.0</text>
+  <text x="854" y="289" fill="rgba(180,210,240,0.35)" font-size="10" text-anchor="end">Lun</text>
+
+  <!-- Read email 6 -->
+  <rect x="200" y="318" width="700" height="48" fill="#080E19"/>
+  <line x1="200" y1="366" x2="900" y2="366" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.08"/>
+  <circle cx="222" cy="342" r="10" fill="#38BDF8" fill-opacity="0.15" stroke="#38BDF8" stroke-width="1"/>
+  <text x="222" y="346" text-anchor="middle" fill="#38BDF8" font-size="11" font-weight="bold">S</text>
+  <text x="244" y="337" fill="rgba(180,210,240,0.75)" font-size="12">Spotify</text>
+  <text x="244" y="354" fill="rgba(180,210,240,0.45)" font-size="11">Tu resumen mensual de Spotify esta listo — Mira lo que mas escuchaste</text>
+  <text x="854" y="337" fill="rgba(180,210,240,0.35)" font-size="10" text-anchor="end">Lun</text>
+
+  <!-- Fade out indicator -->
+  <defs>
+    <linearGradient id="fadeGmail" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0D1117" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#0D1117" stop-opacity="1"/>
+    </linearGradient>
+  </defs>
+  <rect x="200" y="366" width="700" height="194" fill="url(#fadeGmail)"/>
+
+  <!-- Status bar -->
+  <rect x="0" y="530" width="900" height="30" fill="#060D18"/>
+  <line x1="0" y1="530" x2="900" y2="530" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.15"/>
+  <text x="216" y="549" fill="rgba(180,210,240,0.4)" font-size="10">Ultima sincronizacion: hace 2 minutos</text>
+</svg>
