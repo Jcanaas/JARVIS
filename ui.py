@@ -3222,54 +3222,29 @@ class MusicModePanelV2(QWidget):
         self.shuffle_btn.clicked.connect(self._play_current_playlist_shuffled)
         self.shuffle_btn.setVisible(False)
         header_actions.addWidget(self.shuffle_btn)
-
-        # Export button
-        self.export_btn = QPushButton("Exportar")
-        self.export_btn.setObjectName("MusicHeaderAction")
-        self.export_btn.setIcon(_line_icon("download", "#DFF5FF", 17))
-        self.export_btn.setIconSize(QSize(17, 17))
-        self.export_btn.setToolTip("Exportar playlist a archivo Jarvis (.json)")
-        self.export_btn.clicked.connect(self._export_playlist_dialog)
-        self.export_btn.setVisible(False)
-        header_actions.addWidget(self.export_btn)
-
-        # Import button (always visible in header toolbar)
-        self.import_btn = QPushButton("Importar")
-        self.import_btn.setObjectName("MusicHeaderAction")
-        self.import_btn.setIcon(_line_icon("upload", "#DFF5FF", 17))
-        self.import_btn.setIconSize(QSize(17, 17))
-        self.import_btn.setToolTip("Importar y reproducir playlist exportada por Jarvis")
-        self.import_btn.clicked.connect(self._import_playlist_dialog)
-        header_actions.addWidget(self.import_btn)
-
         header_actions.addStretch()
-
-        # Crossfade toggle row
-        cf_row = QHBoxLayout()
-        cf_row.setSpacing(6)
-        self._cf_check = QPushButton("Crossfade")
-        self._cf_check.setObjectName("MusicCrossfadeBtn")
-        self._cf_check.setCheckable(True)
-        self._cf_check.setChecked(False)
-        self._cf_check.setToolTip("Activar/desactivar fundido entre canciones")
-        self._cf_check.toggled.connect(self._on_crossfade_toggled)
-        cf_row.addWidget(self._cf_check)
-        self._cf_spin = QSpinBox()
-        self._cf_spin.setObjectName("MusicCrossfadeSpin")
-        self._cf_spin.setRange(1, 15)
-        self._cf_spin.setValue(3)
-        self._cf_spin.setSuffix(" s")
-        self._cf_spin.setToolTip("Duración del fundido en segundos")
-        self._cf_spin.setFixedWidth(64)
-        self._cf_spin.setEnabled(False)
-        self._cf_spin.valueChanged.connect(self._on_crossfade_secs_changed)
-        cf_row.addWidget(self._cf_spin)
-        cf_row.addStretch()
-        header_text.addLayout(cf_row)
 
         header_text.addLayout(header_actions)
         header_text.addStretch()
         header_layout.addLayout(header_text, stretch=1)
+
+        # "⋯" settings button — top-right corner of the header banner
+        corner_col = QVBoxLayout()
+        corner_col.setContentsMargins(0, 0, 0, 0)
+        corner_col.setSpacing(0)
+        self._hdr_menu_btn = QPushButton("⋯")
+        self._hdr_menu_btn.setObjectName("MusicHeaderMenuBtn")
+        self._hdr_menu_btn.setToolTip("Opciones")
+        self._hdr_menu_btn.setFixedSize(32, 32)
+        self._hdr_menu_btn.clicked.connect(self._show_header_menu)
+        corner_col.addWidget(self._hdr_menu_btn, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        corner_col.addStretch()
+        header_layout.addLayout(corner_col)
+
+        # Crossfade state (no longer a visible widget — controlled via ⋯ menu)
+        self._cf_enabled: bool = False
+        self._cf_secs: int = 3
+
         browse_layout.addWidget(self.header)
 
         self.table = QTableWidget()
@@ -3450,37 +3425,21 @@ class MusicModePanelV2(QWidget):
                 background: rgba(56, 189, 248, 0.24);
                 border-color: rgba(125, 211, 252, 0.46);
             }}
-            QPushButton#MusicCrossfadeBtn {{
-                min-height: 26px;
-                background: rgba(30, 30, 40, 0.5);
-                color: rgba(180, 210, 240, 0.65);
-                border: 1px solid rgba(125, 211, 252, 0.15);
-                border-radius: 6px;
-                padding: 0 10px;
-                font-size: 10px;
-                font-weight: 700;
+            QPushButton#MusicHeaderMenuBtn {{
+                background: transparent;
+                color: rgba(180, 210, 240, 0.55);
+                border: none;
+                border-radius: 8px;
+                font-size: 18px;
+                font-weight: 900;
+                padding: 0;
             }}
-            QPushButton#MusicCrossfadeBtn:checked {{
-                background: rgba(56, 189, 248, 0.18);
-                color: #DFF5FF;
-                border-color: rgba(125, 211, 252, 0.38);
-            }}
-            QPushButton#MusicCrossfadeBtn:hover {{
-                border-color: rgba(125, 211, 252, 0.3);
+            QPushButton#MusicHeaderMenuBtn:hover {{
+                background: rgba(56, 189, 248, 0.14);
                 color: #DFF5FF;
             }}
-            QSpinBox#MusicCrossfadeSpin {{
-                background: rgba(8, 14, 25, 0.7);
-                color: rgba(180, 210, 240, 0.75);
-                border: 1px solid rgba(125, 211, 252, 0.18);
-                border-radius: 5px;
-                padding: 2px 4px;
-                font-size: 10px;
-                min-height: 22px;
-            }}
-            QSpinBox#MusicCrossfadeSpin:disabled {{
-                color: rgba(120, 150, 180, 0.35);
-                border-color: rgba(125, 211, 252, 0.08);
+            QPushButton#MusicHeaderMenuBtn:pressed {{
+                background: rgba(56, 189, 248, 0.22);
             }}
             QTableWidget#MusicTable {{
                 background: rgba(5, 11, 20, 0.90);
@@ -4418,7 +4377,6 @@ class MusicModePanelV2(QWidget):
             self._set_header(self._playlist_title(playlist), self._playlist_meta(playlist, len(self._items)), "Lista", playlist)
         is_playlist = bool(playlist) and table_kind == "playlist_tracks" and bool(self._items)
         self.shuffle_btn.setVisible(is_playlist)
-        self.export_btn.setVisible(is_playlist)
         self.status.setVisible(False)
         self._prefetch_thumbnails()
         self._prefetch_audio_streams(0, 4)
@@ -4442,7 +4400,6 @@ class MusicModePanelV2(QWidget):
             self._set_row_icon(row, data)
         self._set_header("Playlists", "Tu biblioteca de YouTube Music", "Playlists", {})
         self.shuffle_btn.setVisible(False)
-        self.export_btn.setVisible(False)
         self.status.setVisible(False)
         self._prefetch_thumbnails()
 
@@ -4463,47 +4420,86 @@ class MusicModePanelV2(QWidget):
             self._set_row_icon(row, data)
         self._set_header("Artistas", "Resultados de la busqueda", "Busqueda", {})
         self.shuffle_btn.setVisible(False)
-        self.export_btn.setVisible(False)
         self.status.setVisible(False)
         self._prefetch_thumbnails()
 
     # ------------------------------------------------------------------
-    # Crossfade helpers
+    # Header "⋯" settings menu
     # ------------------------------------------------------------------
 
-    def _on_crossfade_toggled(self, checked: bool):
-        self._cf_spin.setEnabled(checked)
-        self._send_playback("set_crossfade", {
-            "seconds": self._cf_spin.value(),
-            "enabled": checked,
-        })
+    _MENU_STYLE = """
+        QMenu {
+            background: #0d1117;
+            color: #e6f0f8;
+            border: 1px solid rgba(125, 211, 252, 0.20);
+            border-radius: 10px;
+            padding: 5px 4px;
+        }
+        QMenu::item {
+            padding: 7px 20px 7px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+        QMenu::item:selected { background: rgba(56, 189, 248, 0.16); }
+        QMenu::item:checked  { color: #7DD3FC; }
+        QMenu::separator {
+            height: 1px;
+            background: rgba(125, 211, 252, 0.12);
+            margin: 4px 10px;
+        }
+    """
 
-    def _on_crossfade_secs_changed(self, value: int):
-        if self._cf_check.isChecked():
-            self._send_playback("set_crossfade", {
-                "seconds": value,
-                "enabled": True,
-            })
+    def _show_header_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(self._MENU_STYLE)
+
+        in_playlist = self._table_kind == "playlist_tracks"
+        in_playlists_list = self._table_kind == "playlists"
+
+        if in_playlists_list:
+            act_import = menu.addAction("Importar playlist...")
+            act_import.triggered.connect(self._import_playlist_dialog)
+
+        if in_playlist:
+            act_export_cur = menu.addAction("Exportar esta lista...")
+            act_export_cur.triggered.connect(self._do_export_current)
+            act_export_liked = menu.addAction("Exportar Me Gusta...")
+            act_export_liked.triggered.connect(self._do_export_liked)
+            menu.addSeparator()
+
+            cf_label = f"{'✓' if self._cf_enabled else '   '}  Crossfade  ({self._cf_secs} s)"
+            act_cf = menu.addAction(cf_label)
+            act_cf.setCheckable(True)
+            act_cf.setChecked(self._cf_enabled)
+            act_cf.triggered.connect(self._toggle_crossfade)
+
+            act_cf_dur = menu.addAction("  Cambiar duración del crossfade...")
+            act_cf_dur.triggered.connect(self._change_crossfade_duration)
+
+        if not in_playlists_list and not in_playlist:
+            menu.addAction("Sin opciones disponibles").setEnabled(False)
+
+        btn = self._hdr_menu_btn
+        menu.exec(btn.mapToGlobal(btn.rect().bottomRight()))
+
+    def _toggle_crossfade(self, checked: bool):
+        self._cf_enabled = checked
+        self._send_playback("set_crossfade", {"seconds": self._cf_secs, "enabled": checked})
+
+    def _change_crossfade_duration(self):
+        val, ok = QInputDialog.getInt(
+            self, "Duración del crossfade",
+            "Segundos de fundido entre canciones (1-15):",
+            self._cf_secs, 1, 15, 1,
+        )
+        if ok:
+            self._cf_secs = val
+            if self._cf_enabled:
+                self._send_playback("set_crossfade", {"seconds": val, "enabled": True})
 
     # ------------------------------------------------------------------
     # Export / Import
     # ------------------------------------------------------------------
-
-    def _export_playlist_dialog(self):
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu { background: #0d1117; color: #e6f0f8; border: 1px solid rgba(125,211,252,0.2);
-                    border-radius: 8px; padding: 4px; }
-            QMenu::item { padding: 6px 18px; border-radius: 5px; }
-            QMenu::item:selected { background: rgba(56,189,248,0.18); }
-        """)
-        act_liked = menu.addAction("Exportar Me Gusta")
-        act_current = menu.addAction("Exportar lista actual")
-        chosen = menu.exec(self.export_btn.mapToGlobal(self.export_btn.rect().bottomLeft()))
-        if chosen == act_liked:
-            self._do_export_liked()
-        elif chosen == act_current:
-            self._do_export_current()
 
     def _do_export_liked(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -4612,7 +4608,6 @@ class MusicModePanelV2(QWidget):
         ]
         self._show_songs(self._items, table_kind="playlist_tracks")
         self.shuffle_btn.setVisible(True)
-        self.export_btn.setVisible(False)
 
     def load_playlists(self, force: bool = False):
         if self._artist_page_open and not force:

@@ -139,9 +139,85 @@ def _disable_win_audio_ducking():
 
 
 def _create_windows_job_for_child(proc: subprocess.Popen) -> bool:
-    """Attach mpv to a Windows job object so it dies with the parent process."""
+    """Attach mpv to a Windows Job Object so it is killed when Jarvis exits.
+
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE makes the OS terminate all processes in
+    the job when the last handle to the job object is closed — which happens
+    automatically when the parent process exits, even if killed forcefully.
+    """
     global _job_handle
     if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateJobObjectW.restype = wt.HANDLE
+        kernel32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+        kernel32.SetInformationJobObject.argtypes = [
+            wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD
+        ]
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit",     ctypes.c_longlong),
+                ("LimitFlags",             wt.DWORD),
+                ("MinimumWorkingSetSize",  ctypes.c_size_t),
+                ("MaximumWorkingSetSize",  ctypes.c_size_t),
+                ("ActiveProcessLimit",     wt.DWORD),
+                ("Affinity",              ctypes.c_size_t),
+                ("PriorityClass",         wt.DWORD),
+                ("SchedulingClass",       wt.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount",  ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount",   ctypes.c_ulonglong),
+                ("WriteTransferCount",  ctypes.c_ulonglong),
+                ("OtherTransferCount",  ctypes.c_ulonglong),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo",               IO_COUNTERS),
+                ("ProcessMemoryLimit",   ctypes.c_size_t),
+                ("JobMemoryLimit",       ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed",    ctypes.c_size_t),
+            ]
+
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        JobObjectExtendedLimitInformation   = 9
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return False
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation,
+            ctypes.byref(info), ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(job)
+            return False
+
+        proc_handle = wt.HANDLE(int(proc._handle))
+        ok = kernel32.AssignProcessToJobObject(job, proc_handle)
+        if not ok:
+            kernel32.CloseHandle(job)
+            return False
+
+        _job_handle = job
+        return True
+    except Exception:
         return False
 
 
@@ -158,78 +234,6 @@ def _locate_ytdlp() -> Optional[str]:
         if candidate and Path(candidate).exists():
             return candidate
     return None
-    try:
-        import ctypes
-        import ctypes.wintypes as wt
-
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateJobObjectW.restype = wt.HANDLE
-        kernel32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
-        kernel32.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
-
-        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                ("PerJobUserTimeLimit", ctypes.c_longlong),
-                ("LimitFlags", wt.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wt.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wt.DWORD),
-                ("SchedulingClass", wt.DWORD),
-            ]
-
-        class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_ulonglong),
-                ("WriteOperationCount", ctypes.c_ulonglong),
-                ("OtherOperationCount", ctypes.c_ulonglong),
-                ("ReadTransferCount", ctypes.c_ulonglong),
-                ("WriteTransferCount", ctypes.c_ulonglong),
-                ("OtherTransferCount", ctypes.c_ulonglong),
-            ]
-
-        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoInfo", IO_COUNTERS),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        JobObjectExtendedLimitInformation = 9
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            return False
-
-        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        size = ctypes.sizeof(info)
-        ok = kernel32.SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            ctypes.byref(info),
-            size,
-        )
-        if not ok:
-            kernel32.CloseHandle(job)
-            return False
-
-        proc_handle = wt.HANDLE(int(proc._handle))
-        ok = kernel32.AssignProcessToJobObject(job, proc_handle)
-        if not ok:
-            kernel32.CloseHandle(job)
-            return False
-
-        _job_handle = job
-        return True
-    except Exception:
-        return False
 
 
 def _wait_for_pipe(timeout_ms: int = 5000) -> bool:
