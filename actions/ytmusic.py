@@ -934,6 +934,20 @@ def _get_ytmusic(require_auth: bool = False):
     return YTMusic()
 
 
+def _save_ytmusic_headers(headers: Dict[str, str]) -> None:
+    """Save captured browser headers to OAUTH_FILE in a format ytmusicapi accepts."""
+    try:
+        from ytmusicapi import setup as yt_setup
+        headers_raw = "\n".join(f"{k}: {v}" for k, v in headers.items())
+        yt_setup(filepath=str(OAUTH_FILE), headers_raw=headers_raw)
+        return
+    except Exception:
+        pass
+    # Fallback: write the headers dict directly as JSON (works with most versions)
+    OAUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    OAUTH_FILE.write_text(json.dumps(headers, indent=2), encoding="utf-8")
+
+
 def _capture_ytmusic_browser_headers(timeout_seconds: int = 300) -> Dict[str, str]:
     """Open YouTube Music in Chromium and capture an authenticated API request."""
     from playwright.sync_api import sync_playwright
@@ -945,7 +959,7 @@ def _capture_ytmusic_browser_headers(timeout_seconds: int = 300) -> Dict[str, st
 
     with sync_playwright() as playwright:
         browser_type = playwright.chromium
-        launch_args = {
+        launch_args: Dict = {
             "headless": False,
             "no_viewport": True,
             "args": [
@@ -970,63 +984,116 @@ def _capture_ytmusic_browser_headers(timeout_seconds: int = 300) -> Dict[str, st
             if captured or "youtubei/v1/" not in request.url:
                 return
             try:
-                headers = {str(k).lower(): str(v) for k, v in request.all_headers().items()}
+                hdrs = {str(k).lower(): str(v) for k, v in request.all_headers().items()}
             except Exception:
                 return
             if (
-                headers.get("cookie")
-                and headers.get("authorization")
-                and headers.get("x-goog-authuser") is not None
+                hdrs.get("cookie")
+                and hdrs.get("authorization")
+                and hdrs.get("x-goog-authuser") is not None
             ):
-                captured.update(headers)
+                captured.update(hdrs)
 
         context.on("request", _inspect_request)
-        page.goto(_MUSIC_BASE, wait_until="domcontentloaded", timeout=60000)
+        try:
+            page.goto(_MUSIC_BASE, wait_until="domcontentloaded", timeout=60_000)
+        except Exception:
+            pass
 
         deadline = time.monotonic() + max(30, int(timeout_seconds))
         while not captured and time.monotonic() < deadline:
-            if page.is_closed():
+            try:
+                if page.is_closed():
+                    break
+                page.wait_for_timeout(500)
+            except Exception:
                 break
-            page.wait_for_timeout(500)
 
-        context.close()
+        try:
+            context.close()
+        except Exception:
+            pass
 
     if not captured:
         raise TimeoutError(
             "No detecté una sesión iniciada en YouTube Music. "
-            "Completa el login en la ventana que se abre antes de cerrarla."
+            "Inicia sesión en la ventana que se abre antes de cerrarla."
         )
     return captured
 
 
 def _refresh_ytmusic_auth():
-    """Open a real YouTube Music login window and regenerate browser auth."""
+    """Authenticate YouTube Music.
+
+    Tries (in order):
+      1. ytmusicapi setup_oauth — proper OAuth device-code flow, browser opens
+         automatically; ``input()`` is intercepted so it doesn't block a GUI app.
+      2. Playwright browser-header capture — fallback for environments where
+         setup_oauth is unavailable or fails.
+    """
     with _YTMUSIC_AUTH_LOCK:
-        from ytmusicapi import YTMusic, setup
-
         try:
-            try:
-                from actions.auth_dialog import show_ytmusic_auth_pending_dialog
-                show_ytmusic_auth_pending_dialog()
-            except Exception:
-                pass
+            from actions.auth_dialog import show_ytmusic_auth_pending_dialog
+            show_ytmusic_auth_pending_dialog()
+        except Exception:
+            pass
 
-            headers = _capture_ytmusic_browser_headers()
-            headers_raw = "\n".join(f"{key}: {value}" for key, value in headers.items())
-            setup(filepath=str(OAUTH_FILE), headers_raw=headers_raw)
-            return YTMusic(str(OAUTH_FILE))
-        except Exception as exc:
-            raise PermissionError(
-                "No pude completar el inicio de sesión de YouTube Music. "
-                "Se abrió music.youtube.com, pero no se pudo guardar una sesión autenticada.\n"
-                f"Detalle: {exc}"
-            ) from exc
-        finally:
+        last_exc: Exception = RuntimeError("No se pudo iniciar el flujo de autenticación.")
+        try:
+            # --- Primary: ytmusicapi OAuth device-code flow ---
+            from ytmusicapi import setup_oauth, YTMusic
+            import builtins, io, contextlib
+
+            # Intercept input() so the "Press Enter when done" prompt doesn't
+            # block the GUI thread; the polling loop detects auth automatically.
+            _orig_input = builtins.input
+
+            def _noop_input(_prompt=""):
+                return ""
+
+            builtins.input = _noop_input
+            try:
+                # Suppress URL/code printed to stdout (not visible in GUI)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    setup_oauth(filepath=str(OAUTH_FILE), open_browser=True)
+            finally:
+                builtins.input = _orig_input
+
             try:
                 from actions.auth_dialog import close_ytmusic_auth_pending_dialog
                 close_ytmusic_auth_pending_dialog()
             except Exception:
                 pass
+            return YTMusic(str(OAUTH_FILE))
+
+        except Exception as exc:
+            last_exc = exc
+
+        try:
+            # --- Fallback: Playwright browser-header capture ---
+            headers = _capture_ytmusic_browser_headers()
+            _save_ytmusic_headers(headers)
+            from ytmusicapi import YTMusic
+
+            try:
+                from actions.auth_dialog import close_ytmusic_auth_pending_dialog
+                close_ytmusic_auth_pending_dialog()
+            except Exception:
+                pass
+            return YTMusic(str(OAUTH_FILE))
+
+        except Exception as exc2:
+            last_exc = exc2
+
+        try:
+            from actions.auth_dialog import close_ytmusic_auth_pending_dialog
+            close_ytmusic_auth_pending_dialog()
+        except Exception:
+            pass
+        raise PermissionError(
+            "No pude completar el inicio de sesión de YouTube Music.\n"
+            f"Detalle: {last_exc}"
+        ) from last_exc
 
 
 def _is_liked_songs_auth_error(exc: Exception) -> bool:
@@ -1770,3 +1837,123 @@ def ytmusic(parameters: dict, player=None, speak=None) -> str:
         return str(e)
     except Exception as e:
         return f"YouTube Music error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Playlist export / import
+# ---------------------------------------------------------------------------
+
+_PLAYLIST_FORMAT_VERSION = 1
+
+
+def _track_to_export(t: Dict) -> Dict:
+    """Normalize a track dict to a portable export record."""
+    video_id = (
+        t.get("videoId") or t.get("video_id") or t.get("id") or ""
+    )
+    artists_raw = t.get("artists", "")
+    if isinstance(artists_raw, list):
+        artists_list = [
+            (a.get("name") or a.get("artist") or str(a)) if isinstance(a, dict) else str(a)
+            for a in artists_raw
+            if a
+        ]
+    else:
+        artists_list = [str(artists_raw)] if artists_raw else []
+
+    return {
+        "title": t.get("title", ""),
+        "artists": artists_list,
+        "video_id": video_id,
+        "duration_seconds": int(t.get("duration_seconds") or t.get("duration") or 0),
+        "album": t.get("album", ""),
+        "is_video": bool(t.get("isVideo") or t.get("is_video")),
+    }
+
+
+def export_liked_to_file(output_path: str, limit: Optional[int] = None) -> Dict:
+    """Fetch liked songs and save them to *output_path* as a Jarvis playlist JSON.
+
+    Returns a summary dict with ``name``, ``count`` and ``path``.
+    """
+    songs = get_liked_songs(limit=limit)
+    tracks = [_track_to_export(t) for t in songs]
+    payload = {
+        "jarvis_playlist": True,
+        "version": _PLAYLIST_FORMAT_VERSION,
+        "name": "Mis Me Gusta",
+        "type": "liked",
+        "exported_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        "tracks": tracks,
+    }
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"name": payload["name"], "count": len(tracks), "path": str(out)}
+
+
+def export_playlist_to_file(query_or_id: str, output_path: str) -> Dict:
+    """Fetch a playlist by name or ID and save it to *output_path*.
+
+    Returns a summary dict with ``name``, ``count`` and ``path``.
+    """
+    tracks_raw = list_playlist_tracks(query_or_id=query_or_id, limit=None, shuffle=False)
+    if not tracks_raw:
+        raise ValueError(f"No se encontró la playlist '{query_or_id}'.")
+    tracks = [_track_to_export(t) for t in tracks_raw]
+
+    # Try to get a nice name for the playlist
+    name = query_or_id
+    try:
+        yt = _get_ytmusic()
+        pls = yt.get_library_playlists(limit=50) or []
+        for pl in pls:
+            if pl.get("playlistId") == query_or_id or (
+                pl.get("title", "").lower() == query_or_id.lower()
+            ):
+                name = pl.get("title", query_or_id)
+                break
+    except Exception:
+        pass
+
+    payload = {
+        "jarvis_playlist": True,
+        "version": _PLAYLIST_FORMAT_VERSION,
+        "name": name,
+        "type": "playlist",
+        "exported_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        "tracks": tracks,
+    }
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"name": name, "count": len(tracks), "path": str(out)}
+
+
+def import_playlist_from_file(file_path: str) -> List[Dict]:
+    """Load a Jarvis playlist JSON and return a list of track dicts.
+
+    Each dict has keys: ``videoId``, ``title``, ``artists`` (str), ``is_video``.
+    Tracks without a ``video_id`` are silently skipped.
+    """
+    data = json.loads(Path(file_path).read_text(encoding="utf-8"))
+    if not data.get("jarvis_playlist"):
+        raise ValueError("El archivo no es una playlist exportada por Jarvis.")
+
+    tracks = []
+    for t in data.get("tracks", []):
+        vid = t.get("video_id") or t.get("videoId") or ""
+        if not vid:
+            continue
+        artists_raw = t.get("artists", "")
+        if isinstance(artists_raw, list):
+            artists_str = ", ".join(str(a) for a in artists_raw if a)
+        else:
+            artists_str = str(artists_raw)
+        tracks.append({
+            "videoId": vid,
+            "title": t.get("title", ""),
+            "artists": artists_str,
+            "is_video": bool(t.get("is_video")),
+        })
+    return tracks

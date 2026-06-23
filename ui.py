@@ -37,7 +37,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextBrowser, QTextEdit,
     QVBoxLayout, QWidget, QProgressBar, QSlider, QStackedWidget,
     QAbstractItemView, QComboBox, QHeaderView, QListWidget, QListWidgetItem,
-    QInputDialog, QListView, QMessageBox, QTableWidget, QTableWidgetItem,
+    QInputDialog, QListView, QMenu, QMessageBox, QSpinBox,
+    QTableWidget, QTableWidgetItem,
 )
 from actions.whatsapp_ui import WhatsAppWindow
 
@@ -3221,7 +3222,51 @@ class MusicModePanelV2(QWidget):
         self.shuffle_btn.clicked.connect(self._play_current_playlist_shuffled)
         self.shuffle_btn.setVisible(False)
         header_actions.addWidget(self.shuffle_btn)
+
+        # Export button
+        self.export_btn = QPushButton("Exportar")
+        self.export_btn.setObjectName("MusicHeaderAction")
+        self.export_btn.setIcon(_line_icon("download", "#DFF5FF", 17))
+        self.export_btn.setIconSize(QSize(17, 17))
+        self.export_btn.setToolTip("Exportar playlist a archivo Jarvis (.json)")
+        self.export_btn.clicked.connect(self._export_playlist_dialog)
+        self.export_btn.setVisible(False)
+        header_actions.addWidget(self.export_btn)
+
+        # Import button (always visible in header toolbar)
+        self.import_btn = QPushButton("Importar")
+        self.import_btn.setObjectName("MusicHeaderAction")
+        self.import_btn.setIcon(_line_icon("upload", "#DFF5FF", 17))
+        self.import_btn.setIconSize(QSize(17, 17))
+        self.import_btn.setToolTip("Importar y reproducir playlist exportada por Jarvis")
+        self.import_btn.clicked.connect(self._import_playlist_dialog)
+        header_actions.addWidget(self.import_btn)
+
         header_actions.addStretch()
+
+        # Crossfade toggle row
+        cf_row = QHBoxLayout()
+        cf_row.setSpacing(6)
+        self._cf_check = QPushButton("Crossfade")
+        self._cf_check.setObjectName("MusicCrossfadeBtn")
+        self._cf_check.setCheckable(True)
+        self._cf_check.setChecked(False)
+        self._cf_check.setToolTip("Activar/desactivar fundido entre canciones")
+        self._cf_check.toggled.connect(self._on_crossfade_toggled)
+        cf_row.addWidget(self._cf_check)
+        self._cf_spin = QSpinBox()
+        self._cf_spin.setObjectName("MusicCrossfadeSpin")
+        self._cf_spin.setRange(1, 15)
+        self._cf_spin.setValue(3)
+        self._cf_spin.setSuffix(" s")
+        self._cf_spin.setToolTip("Duración del fundido en segundos")
+        self._cf_spin.setFixedWidth(64)
+        self._cf_spin.setEnabled(False)
+        self._cf_spin.valueChanged.connect(self._on_crossfade_secs_changed)
+        cf_row.addWidget(self._cf_spin)
+        cf_row.addStretch()
+        header_text.addLayout(cf_row)
+
         header_text.addLayout(header_actions)
         header_text.addStretch()
         header_layout.addLayout(header_text, stretch=1)
@@ -3404,6 +3449,38 @@ class MusicModePanelV2(QWidget):
             QPushButton#MusicHeaderAction:hover {{
                 background: rgba(56, 189, 248, 0.24);
                 border-color: rgba(125, 211, 252, 0.46);
+            }}
+            QPushButton#MusicCrossfadeBtn {{
+                min-height: 26px;
+                background: rgba(30, 30, 40, 0.5);
+                color: rgba(180, 210, 240, 0.65);
+                border: 1px solid rgba(125, 211, 252, 0.15);
+                border-radius: 6px;
+                padding: 0 10px;
+                font-size: 10px;
+                font-weight: 700;
+            }}
+            QPushButton#MusicCrossfadeBtn:checked {{
+                background: rgba(56, 189, 248, 0.18);
+                color: #DFF5FF;
+                border-color: rgba(125, 211, 252, 0.38);
+            }}
+            QPushButton#MusicCrossfadeBtn:hover {{
+                border-color: rgba(125, 211, 252, 0.3);
+                color: #DFF5FF;
+            }}
+            QSpinBox#MusicCrossfadeSpin {{
+                background: rgba(8, 14, 25, 0.7);
+                color: rgba(180, 210, 240, 0.75);
+                border: 1px solid rgba(125, 211, 252, 0.18);
+                border-radius: 5px;
+                padding: 2px 4px;
+                font-size: 10px;
+                min-height: 22px;
+            }}
+            QSpinBox#MusicCrossfadeSpin:disabled {{
+                color: rgba(120, 150, 180, 0.35);
+                border-color: rgba(125, 211, 252, 0.08);
             }}
             QTableWidget#MusicTable {{
                 background: rgba(5, 11, 20, 0.90);
@@ -4339,7 +4416,9 @@ class MusicModePanelV2(QWidget):
             playlist["itemCount"] = playlist.get("itemCount") or len(self._items)
             self._current_playlist = playlist
             self._set_header(self._playlist_title(playlist), self._playlist_meta(playlist, len(self._items)), "Lista", playlist)
-        self.shuffle_btn.setVisible(bool(playlist) and table_kind == "playlist_tracks" and bool(self._items))
+        is_playlist = bool(playlist) and table_kind == "playlist_tracks" and bool(self._items)
+        self.shuffle_btn.setVisible(is_playlist)
+        self.export_btn.setVisible(is_playlist)
         self.status.setVisible(False)
         self._prefetch_thumbnails()
         self._prefetch_audio_streams(0, 4)
@@ -4363,6 +4442,7 @@ class MusicModePanelV2(QWidget):
             self._set_row_icon(row, data)
         self._set_header("Playlists", "Tu biblioteca de YouTube Music", "Playlists", {})
         self.shuffle_btn.setVisible(False)
+        self.export_btn.setVisible(False)
         self.status.setVisible(False)
         self._prefetch_thumbnails()
 
@@ -4383,8 +4463,156 @@ class MusicModePanelV2(QWidget):
             self._set_row_icon(row, data)
         self._set_header("Artistas", "Resultados de la busqueda", "Busqueda", {})
         self.shuffle_btn.setVisible(False)
+        self.export_btn.setVisible(False)
         self.status.setVisible(False)
         self._prefetch_thumbnails()
+
+    # ------------------------------------------------------------------
+    # Crossfade helpers
+    # ------------------------------------------------------------------
+
+    def _on_crossfade_toggled(self, checked: bool):
+        self._cf_spin.setEnabled(checked)
+        self._send_playback("set_crossfade", {
+            "seconds": self._cf_spin.value(),
+            "enabled": checked,
+        })
+
+    def _on_crossfade_secs_changed(self, value: int):
+        if self._cf_check.isChecked():
+            self._send_playback("set_crossfade", {
+                "seconds": value,
+                "enabled": True,
+            })
+
+    # ------------------------------------------------------------------
+    # Export / Import
+    # ------------------------------------------------------------------
+
+    def _export_playlist_dialog(self):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background: #0d1117; color: #e6f0f8; border: 1px solid rgba(125,211,252,0.2);
+                    border-radius: 8px; padding: 4px; }
+            QMenu::item { padding: 6px 18px; border-radius: 5px; }
+            QMenu::item:selected { background: rgba(56,189,248,0.18); }
+        """)
+        act_liked = menu.addAction("Exportar Me Gusta")
+        act_current = menu.addAction("Exportar lista actual")
+        chosen = menu.exec(self.export_btn.mapToGlobal(self.export_btn.rect().bottomLeft()))
+        if chosen == act_liked:
+            self._do_export_liked()
+        elif chosen == act_current:
+            self._do_export_current()
+
+    def _do_export_liked(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar Me Gusta",
+            str(Path.home() / "Downloads" / "jarvis_me_gusta.json"),
+            "Playlist Jarvis (*.json)",
+        )
+        if not path:
+            return
+
+        def _work():
+            try:
+                from actions.ytmusic import export_liked_to_file
+                result = export_liked_to_file(path)
+                QTimer.singleShot(0, lambda: QMessageBox.information(
+                    self, "Exportación completada",
+                    f"Se exportaron {result['count']} canciones a:\n{result['path']}"
+                ))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: QMessageBox.warning(
+                    self, "Error al exportar", str(e)
+                ))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _do_export_current(self):
+        pl = self._current_playlist
+        if not pl:
+            QMessageBox.information(self, "Sin playlist", "Abre una playlist primero.")
+            return
+        pid = pl.get("playlistId") or pl.get("browseId") or ""
+        name = (pl.get("title") or pl.get("name") or pid or "playlist").replace("/", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar lista actual",
+            str(Path.home() / "Downloads" / f"jarvis_{name}.json"),
+            "Playlist Jarvis (*.json)",
+        )
+        if not path:
+            return
+
+        def _work():
+            try:
+                from actions.ytmusic import export_playlist_to_file
+                result = export_playlist_to_file(pid, path)
+                QTimer.singleShot(0, lambda: QMessageBox.information(
+                    self, "Exportación completada",
+                    f"Se exportaron {result['count']} canciones de '{result['name']}' a:\n{result['path']}"
+                ))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: QMessageBox.warning(
+                    self, "Error al exportar", str(e)
+                ))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _import_playlist_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Importar playlist Jarvis",
+            str(Path.home() / "Downloads"),
+            "Playlist Jarvis (*.json)",
+        )
+        if not path:
+            return
+
+        def _work():
+            try:
+                from actions.ytmusic import import_playlist_from_file
+                tracks = import_playlist_from_file(path)
+                if not tracks:
+                    QTimer.singleShot(0, lambda: QMessageBox.warning(
+                        self, "Playlist vacía", "No se encontraron pistas con videoId."
+                    ))
+                    return
+                import json as _json
+                data = _json.loads(Path(path).read_text(encoding="utf-8"))
+                playlist_name = data.get("name", Path(path).stem)
+                self._send_playback("play_tracks", {"tracks": tracks, "start_index": 0, "shuffle": False})
+                QTimer.singleShot(0, lambda: (
+                    self._set_header(
+                        playlist_name,
+                        f"Importada • {len(tracks)} canciones",
+                        "Importada",
+                        {},
+                    ),
+                    self._show_imported_tracks(tracks),
+                ))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: QMessageBox.warning(
+                    self, "Error al importar", str(e)
+                ))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _show_imported_tracks(self, tracks: list):
+        """Display imported tracks in the table (runs on UI thread)."""
+        self._table_kind = "playlist_tracks"
+        self._items = [
+            {
+                "videoId": t.get("videoId", ""),
+                "title": t.get("title", ""),
+                "artists": t.get("artists", ""),
+                "_kind": "song",
+                "_index": i,
+            }
+            for i, t in enumerate(tracks)
+        ]
+        self._show_songs(self._items, table_kind="playlist_tracks")
+        self.shuffle_btn.setVisible(True)
+        self.export_btn.setVisible(False)
 
     def load_playlists(self, force: bool = False):
         if self._artist_page_open and not force:

@@ -2400,6 +2400,22 @@ def main():
                                 elif a == 'warmup':
                                     if hasattr(ymod, 'warmup'):
                                         ymod.warmup()
+                                elif a == 'set_crossfade':
+                                    if hasattr(ymod, 'set_crossfade'):
+                                        secs = int(p.get('seconds', 3) or 3)
+                                        enabled = p.get('enabled', True)
+                                        if not isinstance(enabled, bool):
+                                            enabled = str(enabled).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
+                                        ymod.set_crossfade(secs, enabled)
+                                elif a == 'play_from_file':
+                                    if hasattr(ymod, 'play_from_file'):
+                                        shf = p.get('shuffle', False)
+                                        if not isinstance(shf, bool):
+                                            shf = str(shf).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
+                                        ymod.play_from_file(
+                                            str(p.get('file_path', '')),
+                                            shuffle=shf,
+                                        )
                                 elif a == 'set_like':
                                     video_id = str(p.get('video_id') or p.get('videoId') or '').strip()
                                     liked = p.get('liked', True)

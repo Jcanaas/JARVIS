@@ -40,6 +40,13 @@ _autoplay_enabled: bool = True
 _autoplay_thread: Optional[threading.Thread] = None
 _autoplay_last_switch: float = 0.0
 _job_handle = None
+
+# Crossfade: fade-out the last N seconds of a track, fade-in the next one.
+# 0 = disabled.
+_crossfade_secs: int = 3
+_crossfade_enabled: bool = False   # off by default; toggled via set_crossfade()
+_user_volume: int = 100            # user's intended volume (0-100)
+_crossfade_fading_out: bool = False
 import atexit as _atexit
 
 def _cleanup_on_exit():
@@ -597,6 +604,44 @@ def _artists_text(artists) -> str:
     return str(artists)
 
 
+def _crossfade_fade_out_step(pos: float, dur: float) -> None:
+    """Called from the autoplay worker to smoothly reduce volume near track end."""
+    global _crossfade_fading_out
+    if dur <= 0:
+        return
+    remaining = dur - pos
+    cf_dur = float(_crossfade_secs)
+    if remaining > cf_dur:
+        # Not in crossfade zone yet — restore volume if we were previously fading
+        if _crossfade_fading_out:
+            _crossfade_fading_out = False
+            _send_command(["set_property", "volume", _user_volume])
+        return
+    # Fade progress: 1.0 at start of fade, 0.0 at track end
+    progress = max(0.0, remaining / cf_dur)
+    target_vol = int(_user_volume * progress)
+    _crossfade_fading_out = True
+    _send_command(["set_property", "volume", max(0, target_vol)])
+
+
+def _crossfade_fade_in(duration_secs: float = None) -> None:
+    """Start a fade-in on the current track from 0 to _user_volume over crossfade duration."""
+    if duration_secs is None:
+        duration_secs = float(_crossfade_secs)
+
+    def _fade():
+        steps = max(1, int(duration_secs / 0.08))
+        for i in range(steps + 1):
+            if _shutting_down:
+                break
+            vol = int(_user_volume * i / steps)
+            _send_command(["set_property", "volume", vol])
+            time.sleep(0.08)
+        _send_command(["set_property", "volume", _user_volume])
+
+    threading.Thread(target=_fade, daemon=True).start()
+
+
 def _ensure_autoplay_worker() -> None:
     """Start the combined position-poller + autoplay thread if not running."""
     global _autoplay_thread
@@ -604,7 +649,7 @@ def _ensure_autoplay_worker() -> None:
         return
 
     def _worker():
-        global _autoplay_last_switch
+        global _autoplay_last_switch, _crossfade_fading_out
         _poll_pos  = 0.0   # last non-None time-pos from mpv
         _poll_dur  = 0.0   # last non-None duration from mpv
         _eof_seen  = False  # did we already trigger advance on this eof?
@@ -635,15 +680,22 @@ def _ensure_autoplay_worker() -> None:
                         if eof and not (_autoplay_enabled and _playlist):
                             _last_meta["playing"] = False
 
+                    # --- Crossfade fade-out when approaching track end ---
+                    is_paused = bool(_get_mpv_property("pause"))
+                    if _crossfade_enabled and not is_paused and _poll_dur > 0:
+                        _crossfade_fade_out_step(_poll_pos, _poll_dur)
+
                     # --- Autoplay: advance on eof-reached OR near end ---
                     if _autoplay_enabled and _playlist:
+                        cf_margin = float(_crossfade_secs) if _crossfade_enabled else 1.5
                         eof_hit  = bool(eof)
-                        near_end = _poll_dur > 0 and _poll_pos >= _poll_dur - 1.5
+                        near_end = _poll_dur > 0 and _poll_pos >= _poll_dur - cf_margin
                         if (eof_hit or near_end) and not _eof_seen:
                             now = time.time()
                             if now - _autoplay_last_switch > 3.0:
                                 _eof_seen = True
                                 _autoplay_last_switch = now
+                                _crossfade_fading_out = False
                                 next()
                 else:
                     with _lock:
@@ -814,22 +866,39 @@ def play(query: str) -> str:
 
 def next() -> str:
     """Skip to next track in playlist."""
-    global _playlist_idx
+    global _playlist_idx, _crossfade_fading_out
     if not _playlist:
         return "No hay lista de reproducción."
     _playlist_idx = (_playlist_idx + 1) % len(_playlist)
     t = _playlist[_playlist_idx]
-    return _play_video(t["videoId"], t["title"], t["artists"])
+    # Reset volume before loading next track, then fade in if crossfade is on
+    _crossfade_fading_out = False
+    if _crossfade_enabled:
+        _send_command(["set_property", "volume", 0])
+    else:
+        _send_command(["set_property", "volume", _user_volume])
+    result = _play_video(t["videoId"], t["title"], t["artists"])
+    if _crossfade_enabled:
+        _crossfade_fade_in()
+    return result
 
 
 def previous() -> str:
     """Skip to previous track in playlist."""
-    global _playlist_idx
+    global _playlist_idx, _crossfade_fading_out
     if not _playlist:
         return "No hay lista de reproducción."
     _playlist_idx = (_playlist_idx - 1) % len(_playlist)
     t = _playlist[_playlist_idx]
-    return _play_video(t["videoId"], t["title"], t["artists"])
+    _crossfade_fading_out = False
+    if _crossfade_enabled:
+        _send_command(["set_property", "volume", 0])
+    else:
+        _send_command(["set_property", "volume", _user_volume])
+    result = _play_video(t["videoId"], t["title"], t["artists"])
+    if _crossfade_enabled:
+        _crossfade_fade_in()
+    return result
 
 
 def pause() -> bool:
@@ -871,12 +940,32 @@ def stop() -> bool:
 
 
 def volume(level: int) -> bool:
+    global _user_volume
     try:
         lvl = max(0, min(100, int(level)))
     except Exception:
         lvl = 50
+    _user_volume = lvl
     ok = _send_command(["set_property", "volume", lvl])
     return ok
+
+
+def set_crossfade(seconds: int = 3, enabled: bool = True) -> str:
+    """Enable or disable crossfade and set its duration in seconds (1-15)."""
+    global _crossfade_secs, _crossfade_enabled
+    try:
+        secs = max(1, min(15, int(seconds)))
+    except Exception:
+        secs = 3
+    _crossfade_secs = secs
+    _crossfade_enabled = bool(enabled)
+    state = "activado" if _crossfade_enabled else "desactivado"
+    return f"Crossfade {state} ({_crossfade_secs}s)."
+
+
+def get_crossfade() -> dict:
+    """Return current crossfade settings."""
+    return {"enabled": _crossfade_enabled, "seconds": _crossfade_secs}
 
 
 def seek(seconds: int) -> bool:
@@ -890,6 +979,19 @@ def seek(seconds: int) -> bool:
             _last_meta["position"] = float(s)
             _last_meta["_sampled_at"] = time.monotonic()
     return ok
+
+
+def play_from_file(file_path: str, shuffle: bool = False) -> str:
+    """Load a Jarvis playlist JSON exported with export_liked_to_file /
+    export_playlist_to_file and start playback."""
+    try:
+        from actions.ytmusic import import_playlist_from_file
+        tracks = import_playlist_from_file(file_path)
+    except Exception as e:
+        return f"No se pudo leer la playlist: {e}"
+    if not tracks:
+        return "La playlist importada está vacía o no tiene videoIds."
+    return play_tracks(tracks, start_index=0, shuffle=shuffle)
 
 
 def current() -> dict:
