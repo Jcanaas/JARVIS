@@ -6,6 +6,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from actions import event_bus
+
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -283,7 +285,6 @@ def _schedule_linux(target_dt: datetime, task_name: str,
 def reminder(
     parameters: dict,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
 
@@ -326,8 +327,7 @@ def reminder(
     if not job_id:
         return "I couldn't register the reminder with the system scheduler."
 
-    if player:
-        player.write_log(f"[Reminder] ✅ {date_str} {time_str} — {safe_msg[:40]}")
+    event_bus.log("Reminder", f"[Reminder] ✅ {date_str} {time_str} — {safe_msg[:40]}")
 
     friendly_time = target_dt.strftime("%B %d at %I:%M %p")
     return f"Reminder set for {friendly_time}."

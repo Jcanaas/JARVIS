@@ -11,6 +11,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from actions import event_bus
+
 from playwright.async_api import (
     async_playwright,
     BrowserContext,
@@ -804,7 +806,6 @@ _registry = _SessionRegistry()
 def browser_control(
     parameters:    dict = None,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
     params  = parameters or {}
@@ -815,24 +816,24 @@ def browser_control(
     if action == "switch":
         target = browser or params.get("target", "").lower().strip()
         result = _registry.switch(target) if target else "Please specify a browser."
-        _log(player, result)
+        _log(result)
         return result
 
     if action == "list_browsers":
         result = _registry.list_sessions()
-        _log(player, result)
+        _log(result)
         return result
 
     if action == "close_all":
         result = _registry.close_all()
-        _log(player, result)
+        _log(result)
         return result
 
     try:
         sess = _registry.get(browser)
     except Exception as e:
         result = f"Could not start browser session: {e}"
-        _log(player, result)
+        _log(result)
         return result
 
     try:
@@ -882,12 +883,11 @@ def browser_control(
     except Exception as e:
         result = f"Browser error ({action}): {e}"
 
-    _log(player, result)
+    _log(result)
     return result
 
 
-def _log(player, text: str):
+def _log(text: str):
     short = str(text)[:80]
     print(f"[Browser] {short}")
-    if player:
-        player.write_log(f"[browser] {short[:60]}")
+    event_bus.log("browser", f"[browser] {short[:60]}")

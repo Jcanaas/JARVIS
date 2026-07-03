@@ -13,16 +13,16 @@ class PlaybackProgressTests(unittest.TestCase):
             "duration": 245.75,
         }
         get_property.side_effect = values.get
-        old_proc = ytmusic_headless._proc
+        old_proc = ytmusic_headless._procs[ytmusic_headless._active_slot]
         old_thread = ytmusic_headless._autoplay_thread
         process = Mock()
         process.poll.return_value = None
-        ytmusic_headless._proc = process
+        ytmusic_headless._procs[ytmusic_headless._active_slot] = process
         ytmusic_headless._autoplay_thread = None
         try:
             result = ytmusic_headless.current()
         finally:
-            ytmusic_headless._proc = old_proc
+            ytmusic_headless._procs[ytmusic_headless._active_slot] = old_proc
             ytmusic_headless._autoplay_thread = old_thread
 
         self.assertEqual(result["position"], 12.625)
@@ -31,13 +31,13 @@ class PlaybackProgressTests(unittest.TestCase):
     @patch("actions.ytmusic_headless.time.monotonic", return_value=101.25)
     def test_current_extrapolates_background_sample_age(self, _monotonic):
         old_thread = ytmusic_headless._autoplay_thread
-        old_proc = ytmusic_headless._proc
+        old_proc = ytmusic_headless._procs[ytmusic_headless._active_slot]
         old_meta = dict(ytmusic_headless._last_meta)
         thread = Mock()
         thread.is_alive.return_value = True
         process = Mock()
         process.poll.return_value = None
-        ytmusic_headless._proc = process
+        ytmusic_headless._procs[ytmusic_headless._active_slot] = process
         ytmusic_headless._autoplay_thread = thread
         ytmusic_headless._last_meta.update(
             {
@@ -51,7 +51,7 @@ class PlaybackProgressTests(unittest.TestCase):
             result = ytmusic_headless.current()
         finally:
             ytmusic_headless._autoplay_thread = old_thread
-            ytmusic_headless._proc = old_proc
+            ytmusic_headless._procs[ytmusic_headless._active_slot] = old_proc
             ytmusic_headless._last_meta.clear()
             ytmusic_headless._last_meta.update(old_meta)
 
@@ -60,20 +60,20 @@ class PlaybackProgressTests(unittest.TestCase):
 
     def test_current_marks_playback_stopped_when_mpv_process_died(self):
         old_thread = ytmusic_headless._autoplay_thread
-        old_proc = ytmusic_headless._proc
+        old_proc = ytmusic_headless._procs[ytmusic_headless._active_slot]
         old_meta = dict(ytmusic_headless._last_meta)
         thread = Mock()
         thread.is_alive.return_value = True
         process = Mock()
         process.poll.return_value = 1
         ytmusic_headless._autoplay_thread = thread
-        ytmusic_headless._proc = process
+        ytmusic_headless._procs[ytmusic_headless._active_slot] = process
         ytmusic_headless._last_meta.update({"playing": True, "_sampled_at": 100.0})
         try:
             result = ytmusic_headless.current()
         finally:
             ytmusic_headless._autoplay_thread = old_thread
-            ytmusic_headless._proc = old_proc
+            ytmusic_headless._procs[ytmusic_headless._active_slot] = old_proc
             ytmusic_headless._last_meta.clear()
             ytmusic_headless._last_meta.update(old_meta)
 

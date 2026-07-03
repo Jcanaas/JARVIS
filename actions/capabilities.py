@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from actions import event_bus
+
 
 CAPABILITY_SECTIONS = [
     (
@@ -136,12 +138,11 @@ CAPABILITY_SECTIONS = [
 ]
 
 
-def capabilities_catalog(parameters: dict | None = None, player=None, speak=None) -> str:
+def capabilities_catalog(parameters: dict | None = None, speak=None) -> str:
     params = parameters or {}
     compact = str(params.get("format", "")).lower().strip() == "compact"
 
-    if player:
-        player.write_log("[Capabilities] catalog")
+    event_bus.log("Capabilities", "[Capabilities] catalog")
 
     lines = [
         "Puedo hacer bastante mas que reproducir musica. Lista amplia de capacidades:",

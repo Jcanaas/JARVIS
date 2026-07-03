@@ -124,7 +124,7 @@ def search_events(query: str, max_results: int = 10, calendar_id: str = "primary
     return out
 
 
-def google_calendar(parameters: dict, player=None, speak=None) -> str:
+def google_calendar(parameters: dict, speak=None) -> str:
     """Punto de entrada principal. Recibe args del tool y despacha."""
     action      = parameters.get("action", "list_events")
     calendar_id = parameters.get("calendar_id", "primary")

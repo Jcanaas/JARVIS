@@ -62,14 +62,14 @@ def _schedule_and_wait(func, timeout: float = 300.0) -> None:
 # ---------------------------------------------------------------------------
 
 _BASE_STYLE = """
-    QDialog { background: #0B1220; color: #E0E8F0; }
+    QDialog { background: #0E1226; color: #E0E8F0; }
     QLabel  { color: #E0E8F0; }
 """
 
 _BTN_PRIMARY = (
-    "QPushButton { background:#1E4A8A; color:white; padding:8px 22px; "
+    "QPushButton { background:#3A55C4; color:white; padding:8px 22px; "
     "border-radius:4px; font-weight:bold; font-size:12px; } "
-    "QPushButton:hover { background:#2A5FAD; }"
+    "QPushButton:hover { background:#4A6BE0; }"
 )
 _BTN_SECONDARY = (
     "QPushButton { background:#1E2A3A; color:#E0E8F0; padding:8px 18px; "

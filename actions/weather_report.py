@@ -1,18 +1,19 @@
 import webbrowser
 from urllib.parse import quote_plus
 
+from actions import event_bus
+
 
 def weather_action(
     parameters: dict,
-    player=None,
     session_memory=None,
 ) -> str:
     city     = parameters.get("city")
-    when     = parameters.get("time", "today")  
+    when     = parameters.get("time", "today")
 
     if not city or not isinstance(city, str) or not city.strip():
         msg = "Sir, the city is missing for the weather report."
-        _log(msg, player)
+        _log(msg)
         return msg
 
     city = city.strip()
@@ -27,11 +28,11 @@ def weather_action(
             raise RuntimeError("webbrowser.open returned False")
     except Exception as e:
         msg = f"Sir, I couldn't open the browser for the weather report: {e}"
-        _log(msg, player)
+        _log(msg)
         return msg
 
     msg = f"Showing the weather for {city}, {when}, sir."
-    _log(msg, player)
+    _log(msg)
 
     if session_memory:
         try:
@@ -42,10 +43,6 @@ def weather_action(
     return msg
 
 
-def _log(message: str, player=None) -> None:
+def _log(message: str) -> None:
     print(f"[Weather] {message}")
-    if player:
-        try:
-            player.write_log(f"JARVIS: {message}")
-        except Exception:
-            pass
+    event_bus.log("Weather", f"JARVIS: {message}")

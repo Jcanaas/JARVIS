@@ -5,6 +5,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from actions import event_bus
+
 
 PARTIAL_EXTENSIONS = {".part", ".tmp", ".crdownload", ".ytdl"}
 
@@ -141,11 +143,10 @@ def web_search_summary(query: str, max_results: int = 5) -> dict:
     return compact
 
 
-def utility_tools(parameters: dict, player=None, speak=None):
+def utility_tools(parameters: dict, speak=None):
     params = parameters or {}
     action = str(params.get("action", "")).lower().strip()
-    if player:
-        player.write_log(f"[Utility] {action}")
+    event_bus.log("Utility", f"[Utility] {action}")
 
     if action == "download_open_folder":
         return download_open_folder(params.get("kind") or params.get("folder") or "downloads")

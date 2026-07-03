@@ -119,12 +119,32 @@ def is_ignored_message(message: Dict[str, Any]) -> bool:
 
 
 def _bridge_qr_status() -> dict:
-    """Return the /qr endpoint payload, or {} on error."""
+    """Return the /qr endpoint payload, or {} on error.
+
+    Payload shape: ``{ready, qr, state, detail}`` where ``state`` is one of
+    ``starting|qr|loading|ready|auth_failure|disconnected`` (older bridges omit
+    ``state``/``detail``; callers must tolerate their absence).
+    """
     try:
         r = requests.get(f"{BRIDGE_URL}/qr", headers=_request_headers(), timeout=3)
         return r.json()
     except Exception:
         return {}
+
+
+def bridge_reconnect(timeout: int = 5) -> bool:
+    """Ask the bridge to drop the current session and start a fresh attempt.
+
+    Used by the UI "Reintentar" action when linking/loading gets stuck.
+    Returns True if the bridge accepted the request.
+    """
+    try:
+        r = requests.post(
+            f"{BRIDGE_URL}/reconnect", headers=_request_headers(), timeout=timeout,
+        )
+        return bool(r.ok and (r.json() or {}).get("ok"))
+    except Exception:
+        return False
 
 
 def ensure_bridge_ready() -> bool:
@@ -147,7 +167,7 @@ def ensure_bridge_ready() -> bool:
                 dlg.setWindowTitle("WhatsApp - Bridge no disponible")
                 dlg.setModal(True)
                 dlg.resize(400, 180)
-                dlg.setStyleSheet("QDialog{background:#0B1220;color:#E0E8F0;} QLabel{color:#E0E8F0;}")
+                dlg.setStyleSheet("QDialog{background:#0E1226;color:#E0E8F0;} QLabel{color:#E0E8F0;}")
                 layout = QVBoxLayout(dlg)
                 msg = QLabel(
                     "No se pudo iniciar el bridge de WhatsApp junto con Jarvis.\n\n"
@@ -537,6 +557,55 @@ def media_url(path_or_url: str) -> str:
     if value.startswith("/"):
         return f"{BRIDGE_URL}{value}"
     return f"{BRIDGE_URL}/{value.lstrip('/')}"
+
+
+def download_message_media(message: Dict[str, Any], timeout: int = 10) -> Optional[bytes]:
+    """Download media from a WhatsApp message. Returns file bytes or None on error."""
+    if not message or not message.get("mediaUrl"):
+        return None
+    try:
+        url = media_url(message["mediaUrl"])
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+        return resp.content
+    except Exception:
+        return None
+
+
+def transcribe_message_audio(message: Dict[str, Any], timeout: int = 10) -> Optional[str]:
+    """Download and transcribe audio from a WhatsApp message (type='audio' or 'ptt').
+
+    Returns the transcription text, or None when the message is not audio. On a
+    genuine failure (download or transcription) it raises WhatsAppError with the
+    underlying reason, so callers can surface it instead of a generic message.
+    """
+    from pathlib import Path
+    from actions.file_processor import _process_audio
+
+    msg_type = str(message.get("type") or "").lower()
+    if msg_type not in {"audio", "ptt"}:
+        return None
+
+    media_data = download_message_media(message, timeout=timeout)
+    if not media_data:
+        raise WhatsAppError("No se pudo descargar el audio del mensaje.")
+
+    # Save to temp file
+    import tempfile
+    suffix = ".m4a" if msg_type == "ptt" else ".mp3"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(media_data)
+        tmp_path = Path(tmp.name)
+
+    try:
+        # Transcribe using Gemini. _process_audio returns the text on success or
+        # "Transcription failed: <reason>" on error.
+        result = _process_audio(tmp_path, "transcribe", {"save": False})
+        if result.startswith("Transcription failed"):
+            raise WhatsAppError(result)
+        return result
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 if __name__ == '__main__':
     import time

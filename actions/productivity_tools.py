@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta, timezone
 
+from actions import event_bus
+
 
 def _dt_value(event: dict) -> str:
     start = event.get("start", {})
@@ -147,11 +149,10 @@ def email_summary(count: int = 10, unread_only: bool = True, label: str = "INBOX
     }
 
 
-def productivity_tools(parameters: dict, player=None, speak=None):
+def productivity_tools(parameters: dict, speak=None):
     params = parameters or {}
     action = str(params.get("action", "")).lower().strip()
-    if player:
-        player.write_log(f"[Productivity] {action}")
+    event_bus.log("Productivity", f"[Productivity] {action}")
 
     if action == "whatsapp_recent":
         return whatsapp_recent(limit=int(params.get("limit") or 10), days=int(params.get("days") or 2))

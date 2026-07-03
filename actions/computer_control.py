@@ -9,6 +9,8 @@ import time
 import random
 from pathlib import Path
 
+from actions import event_bus
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -346,7 +348,6 @@ def _screen_find(description: str) -> tuple[int, int] | None:
 def computer_control(
     parameters: dict,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
     """
@@ -397,8 +398,7 @@ def computer_control(
     if not action:
         return "No action specified for computer_control."
 
-    if player:
-        player.write_log(f"[Computer] {action}")
+    event_bus.log("Computer", f"[Computer] {action}")
 
     print(f"[ComputerControl] ▶ {action}  {params}")
 

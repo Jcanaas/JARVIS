@@ -6,6 +6,7 @@ import time
 import subprocess
 import platform
 from pathlib import Path
+from actions import event_bus
 
 try:
     import pyautogui
@@ -571,9 +572,8 @@ _DANGEROUS_ACTIONS = {"restart", "shutdown"}
 
 def _detect_action(description: str) -> dict:
 
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    from actions.genai_client import get_model
+    model = get_model("gemini-2.5-flash-lite")
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + \
                 ", volume_set, type_text, press_key, reload_n"
@@ -607,7 +607,6 @@ Rules:
 def computer_settings(
     parameters: dict = None,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
     if not _PYAUTOGUI:
@@ -630,8 +629,7 @@ def computer_settings(
         return "No action could be determined."
 
     print(f"[Settings] Action: {action}  Value: {value}  OS: {_OS}")
-    if player:
-        player.write_log(f"[Settings] {action}")
+    event_bus.log("Settings", f"[Settings] {action}")
 
     if action in _DANGEROUS_ACTIONS:
         confirmed = str(params.get("confirmed", "")).lower()

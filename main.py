@@ -201,6 +201,55 @@ def _pick_mic_device() -> Optional[int]:
     return None
 
 
+def _has_input_device() -> bool:
+    """True if the system currently exposes any audio input (microphone)."""
+    try:
+        import sounddevice as _sd
+        return any(d.get("max_input_channels", 0) > 0 for d in _sd.query_devices())
+    except Exception:
+        return False
+
+
+def _resolve_input_device() -> Optional[int]:
+    """Index of the microphone to use: the one configured in Ajustes if set and
+    present, otherwise the auto-picked non-Bluetooth mic."""
+    try:
+        from actions import app_settings as _appcfg
+        want = str(_appcfg.get("input_device_name", "") or "").strip()
+    except Exception:
+        want = ""
+    if want:
+        try:
+            import sounddevice as _sd
+            for i, d in enumerate(_sd.query_devices()):
+                if d["max_input_channels"] > 0 and d["name"] == want:
+                    return i
+            # loose match (name may carry a host-API suffix)
+            for i, d in enumerate(_sd.query_devices()):
+                if d["max_input_channels"] > 0 and want.lower() in d["name"].lower():
+                    return i
+        except Exception:
+            pass
+    return _pick_mic_device()
+
+
+def list_input_devices() -> list[dict]:
+    """Enumerate available input (microphone) devices: [{'name'}], de-duplicated."""
+    out = []
+    seen = set()
+    try:
+        import sounddevice as _sd
+        for d in _sd.query_devices():
+            if d["max_input_channels"] > 0:
+                nm = d["name"]
+                if nm and nm not in seen:
+                    seen.add(nm)
+                    out.append({"name": nm})
+    except Exception:
+        pass
+    return out
+
+
 def _pick_loopback_input_device(devices, output_name: str, preferred_name: str = "") -> Optional[int]:
     """Best-effort selector for legacy PortAudio loopback input devices.
     Matches by preferred name first, then by output-name similarity, then any loopback input.
@@ -1200,27 +1249,27 @@ class JarvisLive:
 
         try:
             if name == "capabilities_catalog":
-                r = await loop.run_in_executor(None, lambda: capabilities_catalog(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: capabilities_catalog(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "open_app":
-                r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None))
                 result = r or f"Opened {args.get('app_name')}."
 
             elif name == "personal_tools":
-                r = await loop.run_in_executor(None, lambda: personal_tools(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: personal_tools(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "weather_report":
-                r = await loop.run_in_executor(None, lambda: weather_action(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: weather_action(parameters=args))
                 result = r or "Weather delivered."
 
             elif name == "browser_control":
-                r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: browser_control(parameters=args))
                 result = r or "Done."
 
             elif name == "file_controller":
-                r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: file_controller(parameters=args))
                 result = r or "Done."
 
             elif name == "send_message":
@@ -1252,13 +1301,13 @@ class JarvisLive:
                         await loop.run_in_executor(None, lambda: wa_wrapper.send_whatsapp(to, message_text))
                         result = f"Mensaje enviado a {receiver}."
                     else:
-                        r = await loop.run_in_executor(None, lambda: send_message(parameters=args, response=None, player=self.ui, session_memory=None))
+                        r = await loop.run_in_executor(None, lambda: send_message(parameters=args, response=None, session_memory=None))
                         result = r or f"Message sent to {args.get('receiver')}."
                 except Exception as e:
                     result = f"Tool 'send_message' failed: {e}"
 
             elif name == "reminder":
-                r = await loop.run_in_executor(None, lambda: reminder(parameters=args, response=None, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: reminder(parameters=args, response=None))
                 result = r or "Reminder set."
 
             elif name == "youtube_video":
@@ -1296,32 +1345,32 @@ class JarvisLive:
                             self.speak("Video descargado, sir.")
                     result = r or "Done."
                 else:
-                    r = await loop.run_in_executor(None, lambda: youtube_video(parameters=args, response=None, player=self.ui, speak=self.speak))
+                    r = await loop.run_in_executor(None, lambda: youtube_video(parameters=args, response=None, speak=self.speak))
                     result = r or "Done."
 
             elif name == "screen_process":
                 threading.Thread(
                     target=screen_process,
                     kwargs={"parameters": args, "response": None,
-                            "player": self.ui, "session_memory": None},
+                            "session_memory": None},
                     daemon=True
                 ).start()
                 result = "Vision module activated. Stay completely silent — vision module will speak directly."
 
             elif name == "computer_settings":
-                r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None))
                 result = r or "Done."
 
             elif name == "desktop_control":
-                r = await loop.run_in_executor(None, lambda: desktop_control(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: desktop_control(parameters=args))
                 result = r or "Done."
 
             elif name == "code_helper":
-                r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "dev_agent":
-                r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "agent_task":
@@ -1332,11 +1381,11 @@ class JarvisLive:
                 result   = f"Task started (ID: {task_id})."
 
             elif name == "web_search":
-                r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args))
                 result = r or "Done."
 
             elif name == "utility_tools":
-                r = await loop.run_in_executor(None, lambda: utility_tools(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: utility_tools(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "file_processor":
@@ -1344,32 +1393,32 @@ class JarvisLive:
                     args["file_path"] = self.ui.current_file
                 r = await loop.run_in_executor(
                     None,
-                    lambda: file_processor(parameters=args, player=self.ui, speak=self.speak)
+                    lambda: file_processor(parameters=args, speak=self.speak)
                 )
                 result = r or "Done."
 
             elif name == "computer_control":
-                r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: computer_control(parameters=args))
                 result = r or "Done."
 
             elif name == "system_tools":
-                r = await loop.run_in_executor(None, lambda: system_tools(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: system_tools(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "game_updater":
-                r = await loop.run_in_executor(None, lambda: game_updater(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: game_updater(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "flight_finder":
-                r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
+                r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args))
                 result = r or "Done."
 
             elif name == "google_calendar":
-                r = await loop.run_in_executor(None, lambda: google_calendar(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: google_calendar(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "gmail":
-                r = await loop.run_in_executor(None, lambda: gmail(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: gmail(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "google_drive":
@@ -1377,12 +1426,12 @@ class JarvisLive:
                 _progress = self.ui.set_task_state if _drive_action in ("upload_file", "download_file", "update_file", "replace_file") else None
                 r = await loop.run_in_executor(
                     None,
-                    lambda: gdrive(parameters=args, player=self.ui, speak=self.speak, progress_hook=_progress)
+                    lambda: gdrive(parameters=args, speak=self.speak, progress_hook=_progress)
                 )
                 result = r or "Done."
 
             elif name == "productivity_tools":
-                r = await loop.run_in_executor(None, lambda: productivity_tools(parameters=args, player=self.ui, speak=self.speak))
+                r = await loop.run_in_executor(None, lambda: productivity_tools(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "yt_music":
@@ -1640,7 +1689,7 @@ class JarvisLive:
                     import traceback
                     print(f"[yt_music headless] fallback to GUI: {_hl_exc}")
                     traceback.print_exc()
-                    r = await loop.run_in_executor(None, lambda: ytmusic(parameters=args, player=self.ui, speak=self.speak))
+                    r = await loop.run_in_executor(None, lambda: ytmusic(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "whatsapp":
@@ -1884,25 +1933,45 @@ class JarvisLive:
                 )
 
 
-        try:
-            mic_device = _pick_mic_device()
-            if mic_device is not None:
-                import sounddevice as _sd
-                print(f"[JARVIS] 🎤 Using mic: {_sd.query_devices(mic_device)['name']}")
-            with sd.InputStream(
-                device=mic_device,
-                samplerate=SEND_SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype="int16",
-                blocksize=CHUNK_SIZE,
-                callback=callback,
-            ):
-                print("[JARVIS] 🎤 Mic stream open")
-                while True:
-                    await asyncio.sleep(0.1)
-        except Exception as e:
-            print(f"[JARVIS] ❌ Mic: {e}")
-            raise
+        # Resilient capture loop: if there is no microphone we DON'T raise (that
+        # would tear down the session and make run() reconnect forever). Instead
+        # we idle, poll for a mic to appear, and tell the UI to lock the mic
+        # button. When a mic shows up we (re)open the stream automatically.
+        announced = None  # last availability we reported to the UI
+        while True:
+            has_mic = _has_input_device()
+            if has_mic != announced:
+                announced = has_mic
+                try:
+                    self.ui.set_mic_available(has_mic)
+                except Exception:
+                    pass
+            if not has_mic:
+                await asyncio.sleep(1.5)
+                continue
+            try:
+                mic_device = _resolve_input_device()
+                if mic_device is not None:
+                    import sounddevice as _sd
+                    print(f"[JARVIS] 🎤 Using mic: {_sd.query_devices(mic_device)['name']}")
+                with sd.InputStream(
+                    device=mic_device,
+                    samplerate=SEND_SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=CHUNK_SIZE,
+                    callback=callback,
+                ):
+                    print("[JARVIS] 🎤 Mic stream open")
+                    while True:
+                        await asyncio.sleep(0.5)
+                        if not _has_input_device():
+                            print("[JARVIS] 🎤 Mic removed — idling")
+                            break
+            except Exception as e:
+                print(f"[JARVIS] ⚠️ Mic capture stopped: {e}")
+                announced = None  # force re-report on next loop
+                await asyncio.sleep(1.5)
 
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
@@ -2088,6 +2157,14 @@ def main():
 
     def runner():
         ui.wait_for_api_key()
+        # If there's no microphone at startup, tell the user with a brief toast
+        # (the mic button will stay locked until one is connected).
+        try:
+            if not _has_input_device():
+                ui.set_mic_available(False)
+                ui.show_toast("No se detectó ningún micrófono", 3000)
+        except Exception:
+            pass
         # Onboarding: if no Google account is connected yet, guide the user
         # through creating their OAuth credentials and signing in (single flow
         # for Calendar + Gmail + Drive + YouTube). Non-blocking — the dialog is
@@ -2110,6 +2187,10 @@ def main():
                 def _announce(entry):
                     """Announce incoming WA message through Gemini TTS (no auto-reply)."""
                     try:
+                        # The poller also feeds back messages sent from the phone
+                        # (fromMe); never announce or notify our own messages.
+                        if entry.get('fromMe'):
+                            return
                         chat_id   = entry.get('from', '')
                         author_id = entry.get('author') or ''
                         sender_nm = entry.get('senderName') or ''
@@ -2132,6 +2213,15 @@ def main():
                             display = sender_nm or chat_id.split('@')[0]
                         # Log in UI
                         ui.write_log(f"[WhatsApp] {display}: {body}")
+                        # Floating desktop notification (clickable → opens chat).
+                        try:
+                            ui.show_whatsapp_notification({
+                                "title": display,
+                                "body": body or "(mensaje)",
+                                "chat_id": chat_id,
+                            })
+                        except Exception:
+                            pass
                         # Send to Gemini as a notification — model will read it aloud.
                         # Prefix tells the model this is a passive notification, not a command.
                         jarvis.speak(
@@ -2159,6 +2249,34 @@ def main():
             except Exception:
                 import actions.ytmusic as ymod
                 _HEADLESS = False
+
+            # Apply persisted user settings (crossfade, audio, etc.) to the backend
+            try:
+                from actions import app_settings as _appcfg
+                if hasattr(ymod, 'set_crossfade'):
+                    ymod.set_crossfade(
+                        int(_appcfg.get('crossfade_seconds', 3)),
+                        bool(_appcfg.get('crossfade_enabled', False)),
+                    )
+                if hasattr(ymod, 'set_crossfade_on_skip'):
+                    ymod.set_crossfade_on_skip(bool(_appcfg.get('crossfade_on_skip', False)))
+                if hasattr(ymod, 'set_autoplay'):
+                    ymod.set_autoplay(bool(_appcfg.get('music_autoplay', True)))
+                if hasattr(ymod, 'set_audio_quality'):
+                    ymod.set_audio_quality(str(_appcfg.get('music_audio_quality', 'm4a')))
+                if hasattr(ymod, 'set_ducking'):
+                    ymod.set_ducking(bool(_appcfg.get('music_disable_ducking', True)))
+                if hasattr(ymod, 'volume'):
+                    ymod.volume(int(_appcfg.get('music_default_volume', 100)))
+                if hasattr(ymod, 'set_audio_output_device'):
+                    ymod.set_audio_output_device(str(_appcfg.get('audio_output_device', '')))
+                if hasattr(ymod, 'set_equalizer'):
+                    ymod.set_equalizer(
+                        enabled=bool(_appcfg.get('eq_enabled', False)),
+                        gains=_appcfg.get('eq_gains', None),
+                    )
+            except Exception as _e:
+                print(f"[JARVIS] ⚠️ no se pudieron aplicar ajustes guardados: {_e}", flush=True)
 
             # --- loopback: capturar audio del sistema para el visualizador ---
             _lb_stop  = threading.Event()
@@ -2358,9 +2476,15 @@ def main():
                                     if sec is not None:
                                         ymod.seek(int(sec))
                                 elif a in ('next', 'next_track'):
-                                    ymod.next()
+                                    try:
+                                        ymod.next(manual=True)
+                                    except TypeError:
+                                        ymod.next()
                                 elif a in ('previous', 'prev', 'previous_track'):
-                                    ymod.previous()
+                                    try:
+                                        ymod.previous(manual=True)
+                                    except TypeError:
+                                        ymod.previous()
                                 elif a == 'play_playlist':
                                     q = (
                                         p.get('query')
@@ -2407,6 +2531,36 @@ def main():
                                         if not isinstance(enabled, bool):
                                             enabled = str(enabled).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
                                         ymod.set_crossfade(secs, enabled)
+                                elif a == 'set_crossfade_on_skip':
+                                    if hasattr(ymod, 'set_crossfade_on_skip'):
+                                        enabled = p.get('enabled', False)
+                                        if not isinstance(enabled, bool):
+                                            enabled = str(enabled).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
+                                        ymod.set_crossfade_on_skip(enabled)
+                                elif a == 'set_autoplay':
+                                    if hasattr(ymod, 'set_autoplay'):
+                                        enabled = p.get('enabled', True)
+                                        if not isinstance(enabled, bool):
+                                            enabled = str(enabled).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
+                                        ymod.set_autoplay(enabled)
+                                elif a == 'set_audio_quality':
+                                    if hasattr(ymod, 'set_audio_quality'):
+                                        ymod.set_audio_quality(str(p.get('quality', 'm4a')))
+                                elif a == 'set_ducking':
+                                    if hasattr(ymod, 'set_ducking'):
+                                        enabled = p.get('enabled', True)
+                                        if not isinstance(enabled, bool):
+                                            enabled = str(enabled).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
+                                        ymod.set_ducking(enabled)
+                                elif a == 'set_audio_output_device':
+                                    if hasattr(ymod, 'set_audio_output_device'):
+                                        ymod.set_audio_output_device(str(p.get('name', '')))
+                                elif a == 'set_equalizer':
+                                    if hasattr(ymod, 'set_equalizer'):
+                                        en = p.get('enabled', None)
+                                        if en is not None and not isinstance(en, bool):
+                                            en = str(en).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
+                                        ymod.set_equalizer(enabled=en, gains=p.get('gains'))
                                 elif a == 'play_from_file':
                                     if hasattr(ymod, 'play_from_file'):
                                         shf = p.get('shuffle', False)
@@ -2427,6 +2581,10 @@ def main():
                                         set_song_like(video_id, liked)
                                     except Exception as exc:
                                         error = str(exc)
+                                    # Keep the poller's cached like-state in sync so the
+                                    # 1s poll doesn't revert the button back to its old value.
+                                    if not error and video_id == _last_like_video[0]:
+                                        _last_like_state[0] = liked
                                     ui.set_playback_like_state(video_id, liked, error)
                                 else:
                                     # unknown action: try generic ymod method
@@ -2440,14 +2598,16 @@ def main():
                                 speak_fn = getattr(jarvis_inst, 'speak', None) if jarvis_inst else None
                                 try:
                                     if speak_fn:
-                                        ytmusic(params_obj, player=None, speak=speak_fn)
+                                        ytmusic(params_obj, speak=speak_fn)
                                     else:
-                                        ytmusic(params_obj, player=None, speak=lambda *a, **k: None)
+                                        ytmusic(params_obj, speak=lambda *a, **k: None)
                                 except Exception:
                                     # best effort
                                     pass
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            import traceback
+                            print(f"[JARVIS] ⚠️ playback '{action}' falló: {_e}", flush=True)
+                            traceback.print_exc()
                     threading.Thread(target=_call, daemon=True).start()
                 except Exception:
                     pass
@@ -2504,21 +2664,30 @@ def main():
                             ui.update_playback('', '', 0, 0, False)
 
                         # activar/desactivar loopback según estado de reproducción
-                        ui.set_music_playing(playing)
-                        if playing and not _was_playing[0]:
+                        # y la preferencia del visualizador
+                        try:
+                            from actions import app_settings as _appcfg
+                            viz_on = bool(_appcfg.get('ui_show_visualizer', True))
+                        except Exception:
+                            viz_on = True
+                        ui.set_music_playing(playing and viz_on)
+                        want_loop = playing and viz_on
+                        if want_loop and not _was_playing[0]:
                             _start_loopback()
-                        elif not playing and _was_playing[0]:
+                        elif not want_loop and _was_playing[0]:
                             _stop_loopback()
                             ui.set_fft_bins([0.0] * 64)
-                        _was_playing[0] = playing
+                        _was_playing[0] = want_loop
                     except Exception:
                         pass
                     time.sleep(1)
 
             t = threading.Thread(target=_poller, daemon=True)
             t.start()
-        except Exception:
-            pass
+        except Exception as _e:
+            import traceback
+            print(f"[JARVIS] ⚠️ _install_playback_handlers FALLÓ: {_e}", flush=True)
+            traceback.print_exc()
 
     # Instalar handlers antes de arrancar el loop de UI
     _install_playback_handlers()
@@ -2527,10 +2696,29 @@ def main():
     try:
         ui.root.mainloop()
     finally:
-        manager = getattr(ui, "whatsapp_manager", None)
-        if manager is not None:
-            manager.stop()
-        stop_bridge()
+        # Tear down external resources we own. Background threads from the
+        # Gemini Live SDK / PortAudio can otherwise keep the process alive and
+        # hang the terminal, so after cleanup we force a hard exit.
+        try:
+            manager = getattr(ui, "whatsapp_manager", None)
+            if manager is not None:
+                manager.stop()
+        except Exception:
+            pass
+        try:
+            stop_bridge()
+        except Exception:
+            pass
+        try:
+            import actions.ytmusic_headless as _hl
+            _hl._cleanup_on_exit()
+        except Exception:
+            pass
+        try:
+            print("[JARVIS] Cerrando.", flush=True)
+        except Exception:
+            pass
+        os._exit(0)
 
 if __name__ == "__main__":
     main()

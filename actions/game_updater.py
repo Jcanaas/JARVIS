@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 from config import get_os, is_windows, is_mac, is_linux
+from actions import event_bus
 
 _KNOWN_APPIDS: dict[str, tuple[str, str]] = {
     "pubg":                ("578080",  "PUBG: Battlegrounds"),
@@ -923,7 +924,7 @@ def _get_schedule_status() -> str:
         return "No scheduled game update found."
 
 
-def game_updater(parameters: dict, player=None, speak=None) -> str:
+def game_updater(parameters: dict, speak=None) -> str:
     p         = parameters or {}
     action    = p.get("action",    "update").lower().strip()
     platform  = p.get("platform",  "both").lower().strip()
@@ -998,7 +999,7 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                                 daemon=True
                             ).start()
                             msg += " Auto-shutdown enabled."
-                        if player: player.write_log(f"[GameUpdater] {msg[:100]}")
+                        event_bus.log("GameUpdater", f"[GameUpdater] {msg[:100]}")
                         if speak:  speak(msg)
                         return msg
                     else:
@@ -1034,7 +1035,7 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                     results.append("Epic: Not installed.")
 
         output = " | ".join(results) or "Nothing to do."
-        if player: player.write_log(f"[GameUpdater] {output[:100]}")
+        event_bus.log("GameUpdater", f"[GameUpdater] {output[:100]}")
         if speak:  speak(output)
         return output
 

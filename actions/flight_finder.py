@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import is_windows, is_mac, is_linux
+from actions import event_bus
 
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -63,10 +64,9 @@ def _parse_date(raw: str) -> str:
             return val.strftime("%Y-%m-%d")
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=_get_api_key())
-        model    = genai.GenerativeModel("gemini-2.5-flash-lite")
-        response = model.generate_content(
+        from actions.genai_client import generate_content
+        response = generate_content(
+            "gemini-2.5-flash-lite",
             f"Today is {today.strftime('%Y-%m-%d')}. "
             f"Convert this date expression to YYYY-MM-DD: '{raw}'. "
             f"Return ONLY the date string, nothing else."
@@ -153,11 +153,10 @@ def _parse_flights_with_gemini(
     destination: str,
     date:        str,
 ) -> list[dict]:
-    import google.generativeai as genai
+    from actions.genai_client import get_model
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
+    model = get_model(
+        "gemma-4-26b-a4b-it",
         system_instruction=(
             "You are a flight data extraction expert. "
             "Extract flight information from raw webpage text. "
@@ -295,7 +294,7 @@ def _save_to_desktop(content: str, origin: str, destination: str) -> str:
     return str(filepath)
 
 
-def flight_finder(parameters: dict, player=None, speak=None) -> str:
+def flight_finder(parameters: dict, speak=None) -> str:
     params = parameters or {}
 
     origin      = params.get("origin",      "").strip()
@@ -318,8 +317,7 @@ def flight_finder(parameters: dict, player=None, speak=None) -> str:
     date        = _parse_date(date_raw)
     return_date = _parse_date(return_raw) if return_raw else None
 
-    if player:
-        player.write_log(f"[FlightFinder] {origin} → {destination} on {date}")
+    event_bus.log("FlightFinder", f"[FlightFinder] {origin} → {destination} on {date}")
 
     if speak:
         speak(f"Searching flights from {origin} to {destination} on {date}, sir.")

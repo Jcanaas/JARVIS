@@ -370,6 +370,69 @@ def fetch_recommended(limit: int = 24) -> list[dict]:
     return out
 
 
+def fetch_home_recommendations(limit: int = 24) -> list[dict]:
+    """Genuine personalised YouTube recommendations (the signed-in home feed).
+
+    The official YouTube Data API v3 cannot return a personalised recommendation
+    list: ``activities.list`` with ``home=true`` only yields generic
+    "Popular on YouTube" uploads, never items whose ``snippet.type`` is
+    ``recommendation`` (the long-standing v2→v3 deprecation gap). yt-dlp, reading
+    the signed-in session straight from the browser cookies, can instead extract
+    the same "Recomendado" feed that youtube.com shows on its homepage.
+
+    Best-effort and never raises: if no browser cookies are readable it falls
+    back to the user's subscriptions feed and finally to trending, so the tab is
+    never empty.
+    """
+    try:
+        from yt_dlp import YoutubeDL
+    except Exception:
+        return []
+
+    base_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "skip_download": True,
+        "playlistend": int(limit) * 2,
+        "socket_timeout": 15,
+    }
+    for browser in ("edge", "chrome", "brave", "firefox", "opera", "vivaldi"):
+        opts = {**base_opts, "cookiesfrombrowser": (browser,)}
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info("https://www.youtube.com/", download=False)
+        except Exception:
+            continue
+        entries = (info.get("entries") if isinstance(info, dict) else []) or []
+        flat: list = []
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("entries"):
+                flat.extend(entry["entries"])
+            else:
+                flat.append(entry)
+        out: list[dict] = []
+        seen: set[str] = set()
+        for entry in flat:
+            video = _entry_to_video(entry)
+            if video and video["id"] not in seen:
+                seen.add(video["id"])
+                out.append(video)
+            if len(out) >= limit:
+                break
+        if out:
+            return out
+
+    # No readable cookies / empty feed: degrade gracefully.
+    try:
+        subs = fetch_subscriptions_feed(limit=limit)
+        if subs:
+            return subs
+    except Exception:
+        pass
+    return fetch_recommended(limit=limit)
+
+
 def is_authenticated() -> bool:
     """True if a usable shared Google token exists (no prompt)."""
     from actions.google_auth import is_signed_in
