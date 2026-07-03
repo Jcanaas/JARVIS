@@ -15,6 +15,7 @@ CAPABILITY_SECTIONS = [
             "Extraer solo los nombres de canciones desde un array de tracks.",
             "Descargar audio de playlists, liked songs o rangos concretos.",
             "Descargar videos de YouTube por URL o busqueda.",
+            "Buscar y reproducir películas y series en streaming via torrents (búsqueda, tendencias).",
             "Preguntar calidad antes de descargar audio/video.",
             "Ver progreso de descargas, cancelar, pausar, reanudar y reintentar fallidas.",
             "Previsualizar playlists antes de descargarlas.",

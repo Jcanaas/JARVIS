@@ -8459,6 +8459,199 @@ class WhatsAppRuleDialog(QDialog):
         }
 
 
+class MoviesModePanel(QWidget):
+    """Movie/TV discovery and streaming via torrents.
+
+    Uses TMDB for metadata (titles, posters, ratings) and 1337x for magnet
+    links, streamed via peerflix. All network calls run on daemon threads to
+    avoid blocking the UI. TV shows drill down: search → seasons → episodes.
+    """
+
+    _results_ready = pyqtSignal(list, str, str)  # items, header, error
+    _status_sig = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items: list = []
+        self._build_ui()
+        self._results_ready.connect(self._on_results)
+        self._status_sig.connect(self._set_status)
+        QTimer.singleShot(0, self._load_trending)
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
+
+        title = QLabel("Películas y Series")
+        title.setFont(QFont(FONT_UI, 15, QFont.Weight.Bold))
+        title.setStyleSheet(f"color:{C.TEXT}; background:transparent;")
+        root.addWidget(title)
+
+        # Search row
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Buscar una película o serie…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedHeight(38)
+        self._search.setStyleSheet(f"""
+            QLineEdit {{
+                background:{C.PANEL2}; color:{C.TEXT};
+                border:1px solid {C.BORDER}; border-radius:9px;
+                padding:0 12px; font-size:12px;
+            }}
+            QLineEdit:focus {{ border:1px solid {C.PRI_DIM}; }}
+        """)
+        self._search.returnPressed.connect(self._do_search)
+        search_row.addWidget(self._search, stretch=1)
+        search_btn = self._chip("Buscar", self._do_search, primary=True)
+        search_row.addWidget(search_btn)
+        root.addLayout(search_row)
+
+        # Filter chips
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        for label, cb in (
+            ("Tendencias", self._load_trending),
+            ("Pelis recientes", self._load_recent),
+            ("Descargar", self._show_download_info),
+        ):
+            chips.addWidget(self._chip(label, cb))
+        chips.addStretch(1)
+        root.addLayout(chips)
+
+        # Results list
+        self._list = QListWidget()
+        self._list.setStyleSheet(f"""
+            QListWidget {{
+                background:{C.PANEL}; color:{C.TEXT};
+                border:1px solid {C.BORDER_A}; border-radius:11px;
+                padding:6px; font-size:12px; outline:none;
+            }}
+            QListWidget::item {{ padding:9px 10px; border-radius:7px; }}
+            QListWidget::item:hover {{ background:rgba(255,255,255,0.05); }}
+            QListWidget::item:selected {{ background:{C.PRI_GHO}; color:{C.TEXT}; }}
+        """)
+        self._list.itemActivated.connect(self._on_item_activated)
+        self._list.itemClicked.connect(self._on_item_activated)
+        root.addWidget(self._list, stretch=1)
+
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; font-size:11px;")
+        root.addWidget(self._status)
+
+    def _chip(self, label: str, cb, primary: bool = False) -> QPushButton:
+        b = QPushButton(label)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setFixedHeight(34)
+        bg = C.PRI_DIM if primary else "transparent"
+        fg = C.DARK if primary else C.TEXT_DIM
+        b.setStyleSheet(f"""
+            QPushButton {{
+                background:{bg}; color:{fg};
+                border:1px solid {C.BORDER}; border-radius:8px;
+                padding:0 14px; font-size:11px; font-weight:600;
+            }}
+            QPushButton:hover {{ border-color:{C.PRI_DIM}; color:{C.TEXT}; }}
+        """)
+        b.clicked.connect(lambda _=False: cb())
+        return b
+
+    def _set_status(self, text: str):
+        self._status.setText(text)
+
+    def _run_async(self, fn):
+        threading.Thread(target=fn, daemon=True).start()
+
+    def _do_search(self):
+        query = self._search.text().strip()
+        if not query:
+            return
+        self._set_status(f"Buscando «{query}»…")
+
+        def work():
+            try:
+                from actions import movie_search as ms
+                items = ms.search(query, limit=12)
+                self._results_ready.emit(items, f"Resultados para «{query}»", "")
+            except Exception as e:
+                self._results_ready.emit([], "", str(e))
+
+        self._run_async(work)
+
+    def _load_trending(self):
+        self._set_status("Cargando tendencias…")
+
+        def work():
+            try:
+                from actions import movie_search as ms
+                items = ms.get_trending(kind="movie", limit=12)
+                self._results_ready.emit(items, "Películas en tendencia", "")
+            except Exception as e:
+                self._results_ready.emit([], "", str(e))
+
+        self._run_async(work)
+
+    def _load_recent(self):
+        self._set_status("Buscando películas recientes…")
+
+        def work():
+            try:
+                from actions import movie_search as ms
+                items = ms.get_trending(kind="movie", window="week", limit=12)
+                self._results_ready.emit(items, "Películas de esta semana", "")
+            except Exception as e:
+                self._results_ready.emit([], "", str(e))
+
+        self._run_async(work)
+
+    def _show_download_info(self):
+        self._set_status("Selecciona una película y presiona para buscar torrents")
+
+    def _on_results(self, items: list, header: str, error: str):
+        self._items = items
+        self._list.clear()
+        if error:
+            self._set_status(error)
+            return
+        self._set_status(header)
+        for it in items:
+            year_str = f" ({it.release_year})" if it.release_year else ""
+            rating = f" ★{it.rating:.1f}" if it.rating else ""
+            item = QListWidgetItem(f"{it.title}{year_str}{rating}")
+            item.setData(Qt.ItemDataRole.UserRole, it)
+            self._list.addItem(item)
+
+    def _on_item_activated(self, item: QListWidgetItem):
+        movie = item.data(Qt.ItemDataRole.UserRole)
+        if not movie:
+            return
+        self._search_and_play(movie)
+
+    def _search_and_play(self, movie):
+        self._set_status(f"Buscando torrents de «{movie.title}»…")
+
+        def work():
+            try:
+                from actions import torrent_search as ts
+                from actions import peerflix_player as pp
+
+                torrents = ts.search(movie.title, limit=5)
+                if not torrents:
+                    self._status_sig.emit("No encontré torrents para esta película")
+                    return
+
+                best = torrents[0]  # Highest seeders
+                self._status_sig.emit(f"▶ Reproduciendo «{movie.title}» (seeders: {best.seeders})")
+                pp.play(best.magnet, movie.title)
+            except Exception as e:
+                self._status_sig.emit(f"Error: {e}")
+
+        self._run_async(work)
+
+
 class SettingsModePanel(QWidget):
     """App settings space, organised as a strip of top tabs over a content stack.
 
@@ -10116,6 +10309,7 @@ class MainWindow(QMainWindow):
         self._drive_panel: DriveModePanel | None = None
         self._music_panel: QWidget | None = None
         self._youtube_panel: QWidget | None = None
+        self._movies_panel: QWidget | None = None
         self._settings_panel: QWidget | None = None
 
         central = QWidget()
@@ -10404,7 +10598,7 @@ class MainWindow(QMainWindow):
     def _set_mode_combo(self, mode: str):
         self._active_mode = mode
         # Remember the last space so "Espacio inicial → Último usado" works.
-        if mode in ("Normal", "WhatsApp", "Gmail", "Drive", "Music", "YouTube"):
+        if mode in ("Normal", "WhatsApp", "Gmail", "Drive", "Music", "YouTube", "Movies"):
             try:
                 app_settings.set("last_space", mode)
             except Exception:
@@ -10424,6 +10618,7 @@ class MainWindow(QMainWindow):
             "Drive": ("Drive", "Archivos en la nube"),
             "Music": ("Música", "Biblioteca y reproducción"),
             "YouTube": ("YouTube", "Vídeos y reproducción"),
+            "Movies": ("Películas", "Streaming via torrents"),
             "Ajustes": ("Ajustes", "Configuración de la app"),
         }
         title, context = mode_copy.get(mode, (mode, "Espacio de trabajo"))
@@ -10477,6 +10672,15 @@ class MainWindow(QMainWindow):
         self._center_stack.setCurrentWidget(self._youtube_panel)
         self._center_stack.setVisible(True)
 
+    def _show_movies_mode(self):
+        self._set_mode_combo("Movies")
+        self._apply_right_panel_visibility()
+        if self._movies_panel is None:
+            self._movies_panel = MoviesModePanel(parent=self)
+            self._center_stack.addWidget(self._movies_panel)
+        self._center_stack.setCurrentWidget(self._movies_panel)
+        self._center_stack.setVisible(True)
+
     def _show_settings_mode(self):
         self._set_mode_combo("Ajustes")
         self._apply_right_panel_visibility()
@@ -10503,6 +10707,8 @@ class MainWindow(QMainWindow):
             self._show_music_mode()
         elif mode == "YouTube":
             self._show_youtube_mode()
+        elif mode == "Movies":
+            self._show_movies_mode()
         elif mode == "Ajustes":
             self._show_settings_mode()
         else:
@@ -10715,6 +10921,7 @@ class MainWindow(QMainWindow):
             ("Drive", "drive", "Drive"),
             ("Music", "music", "Música"),
             ("YouTube", "youtube", "YouTube"),
+            ("Movies", "film", "Películas"),
             ("Ajustes", "settings", "Ajustes"),
         ]
         for mode, icon_name, label in nav_items:

@@ -95,6 +95,8 @@ from actions.file_controller   import file_controller
 from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
+from actions.movie_search      import search_action as movie_search_action
+from actions.torrent_search    import search_action as torrent_search_action
 from actions.computer_control  import computer_control
 from actions.capabilities      import capabilities_catalog
 from actions.personal_tools    import personal_tools
@@ -364,6 +366,24 @@ TOOL_DECLARATIONS = [
                 "aspect": {"type": "STRING", "description": "price | specs | reviews"}
             },
             "required": ["query"]
+        }
+    },
+    {
+        "name": "movies",
+        "description": (
+            "Search and stream movies or TV shows via torrents. "
+            "Uses TMDB for metadata (titles, posters, ratings) and finds magnet links from 1337x. "
+            "Actions: search (find by title) | trending (popular right now). "
+            "Selections auto-launch in peerflix for streaming."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "search | trending"},
+                "query": {"type": "STRING", "description": "Movie/TV title (required for search)"},
+                "kind": {"type": "STRING", "description": "movie | tv"}
+            },
+            "required": ["action"]
         }
     },
     {
@@ -1358,6 +1378,10 @@ class JarvisLive:
 
             elif name == "web_search":
                 r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args))
+                result = r or "Done."
+
+            elif name == "movies":
+                r = await loop.run_in_executor(None, lambda: movie_search_action(parameters=args))
                 result = r or "Done."
 
             elif name == "utility_tools":
