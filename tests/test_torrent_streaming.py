@@ -15,61 +15,75 @@ from actions import peerflix_player as pp  # noqa: E402
 # TMDB / Movie Search                                                        #
 # --------------------------------------------------------------------------- #
 class MovieSearchTests(unittest.TestCase):
-    IMDB_RESPONSE = {
-        "description": [
+    MOVIE_RESPONSE = {
+        "results": [
             {
-                "#IMDB_ID": "tt0137523",
-                "#TITLE": "Fight Club",
-                "#YEAR": "1999",
-                "#IMG_POSTER": "https://m.media-amazon.com/images/M/poster.jpg",
-                "description": "An inversion of the personality.",
-                "#IMDB_IV": "8.8",
+                "id": 19404,
+                "title": "Fight Club",
+                "release_date": "1999-10-15",
+                "poster_path": "/fqv8v6AycXKsivp1T5yKwLg39AS.jpg",
+                "overview": "A ticking-time-bomb inversion of the personality.",
+                "vote_average": 8.8,
+                "media_type": "movie",
             },
             {
-                "#IMDB_ID": "tt0903747",
-                "#TITLE": "Breaking Bad",
-                "#YEAR": "2008",
-                "#IMG_POSTER": "https://m.media-amazon.com/images/M/bb.jpg",
-                "description": "A chemistry teacher.",
-                "#IMDB_IV": "9.5",
+                "id": 1396,
+                "name": "Breaking Bad",
+                "first_air_date": "2008-01-20",
+                "poster_path": "/ggFHVNu6YYI5L9pIbPbVfnQEers.jpg",
+                "overview": "A high school chemistry teacher.",
+                "vote_average": 9.5,
+                "media_type": "tv",
             },
         ]
     }
 
+    @patch("actions.movie_search._get_api_key", return_value="fake_key")
     @patch("actions.movie_search._http_get")
-    def test_search_returns_movies(self, http_get):
-        http_get.return_value = self.IMDB_RESPONSE
+    def test_search_returns_movies_and_tv(self, http_get, get_key):
+        http_get.return_value = self.MOVIE_RESPONSE
         results = ms.search("fight club")
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0].title, "Fight Club")
-        self.assertEqual(results[0].imdb_id, "tt0137523")
+        self.assertEqual(results[0].media_type, "movie")
+        self.assertEqual(results[1].title, "Breaking Bad")
+        self.assertEqual(results[1].media_type, "tv")
 
-    def test_empty_query_raises(self):
+    @patch("actions.movie_search._get_api_key", return_value="")
+    def test_search_without_api_key_raises(self, get_key):
+        with self.assertRaises(ms.MovieSearchError):
+            ms.search("anything")
+
+    @patch("actions.movie_search._get_api_key", return_value="fake_key")
+    def test_empty_query_raises(self, get_key):
         with self.assertRaises(ms.MovieSearchError):
             ms.search("   ")
 
-    @patch("actions.movie_search._http_get", return_value={"description": []})
-    def test_no_results_raises(self, http_get):
+    @patch("actions.movie_search._get_api_key", return_value="fake_key")
+    @patch("actions.movie_search._http_get", return_value={"results": []})
+    def test_no_results_raises(self, http_get, get_key):
         with self.assertRaises(ms.MovieSearchError):
             ms.search("zzzznotexist")
 
     def test_parse_movie_extracts_fields(self):
         data = {
-            "#IMDB_ID": "tt0137523",
-            "#TITLE": "Fight Club",
-            "#YEAR": "1999",
-            "#IMG_POSTER": "https://m.media-amazon.com/images/poster.jpg",
-            "description": "Synopsis here",
-            "#IMDB_IV": "8.8",
+            "id": 19404,
+            "title": "Fight Club",
+            "release_date": "1999-10-15",
+            "poster_path": "/fqv8v6AycXKsivp1T5yKwLg39AS.jpg",
+            "overview": "Synopsis here",
+            "vote_average": 8.8,
         }
         movie = ms._parse_movie(data, "movie")
-        self.assertEqual(movie.imdb_id, "tt0137523")
+        self.assertEqual(movie.tmdb_id, 19404)
         self.assertEqual(movie.title, "Fight Club")
         self.assertEqual(movie.release_year, 1999)
+        self.assertIn("w342", movie.poster_url)  # TMDB_IMG_BASE
         self.assertAlmostEqual(movie.rating, 8.8, places=1)
 
-    @patch("actions.movie_search._http_get", return_value={"description": [{"#IMDB_ID": "tt0137523", "#TITLE": "Fight Club", "#YEAR": "1999"}]})
-    def test_search_action_returns_formatted_string(self, http_get):
+    @patch("actions.movie_search._get_api_key", return_value="fake_key")
+    @patch("actions.movie_search._http_get", return_value={"results": [{"id": 19404, "title": "Fight Club", "release_date": "1999-10-15"}]})
+    def test_search_action_returns_formatted_string(self, http_get, get_key):
         out = ms.search_action({"query": "fight club"})
         self.assertIn("Encontré", out)
         self.assertIn("Fight Club", out)
