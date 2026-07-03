@@ -1,37 +1,30 @@
-"""Movie metadata search via TMDB (The Movie Database).
+"""Movie metadata search via IMDb API (https://imdbapi.dev/).
 
-Uses the free TMDB API to fetch movie/TV show information: titles, posters,
-synopses, ratings, release dates, etc. No authentication required beyond an API
-key (free tier from https://www.themoviedb.org/settings/api).
+Free, no-auth API for movie/TV show information: titles, posters, synopses,
+ratings, release dates, etc. No API key required.
 
 This module does NOT handle downloading or streaming — only metadata discovery.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, asdict
-from pathlib import Path
 from typing import Optional
 
 import requests
 
-from actions.paths import config_path, memory_path
-
-TMDB_API_BASE = "https://api.themoviedb.org/3"
-TMDB_IMG_BASE = "https://image.tmdb.org/t/p/w342"  # 342px width (mobile-friendly)
+_IMDB_API_BASE = "https://imdbapi.dev/api"
 _TIMEOUT = 15
-_CACHE_DIR = memory_path("tmdb_cache")
 
 
 class MovieSearchError(RuntimeError):
-    """Raised when TMDB lookup fails (network, auth, no results)."""
+    """Raised when IMDb lookup fails (network, no results)."""
 
 
 @dataclass
 class Movie:
-    """Minimal movie metadata from TMDB."""
+    """Minimal movie metadata from IMDb."""
 
-    tmdb_id: int
+    imdb_id: str
     title: str
     release_year: int = 0
     poster_url: str = ""
@@ -43,135 +36,119 @@ class Movie:
         return asdict(self)
 
 
-def _get_api_key() -> str:
-    """Load TMDB API key from config. Falls back to empty if not configured."""
-    try:
-        cfg = config_path("api_keys.json")
-        if cfg.exists():
-            with open(cfg, "r", encoding="utf-8") as f:
-                return json.load(f).get("tmdb_api_key", "")
-    except Exception:
-        pass
-    return ""
-
-
 def _http_get(url: str, params: dict | None = None) -> dict:
-    """GET to TMDB API, return JSON. Raise MovieSearchError on failure."""
+    """GET to IMDb API, return JSON. Raise MovieSearchError on failure."""
     try:
         r = requests.get(url, params=params or {}, timeout=_TIMEOUT)
         r.raise_for_status()
         return r.json()
     except requests.RequestException as exc:
         raise MovieSearchError(
-            f"TMDB request failed ({exc.__class__.__name__}). "
-            "Check your internet connection or API key."
+            f"IMDb API request failed ({exc.__class__.__name__}). "
+            "The service may be unavailable. Try again later."
         ) from exc
 
 
 def _parse_movie(data: dict, media_type: str = "movie") -> Optional[Movie]:
-    """Parse a TMDB result dict into a Movie object."""
+    """Parse an IMDb result dict into a Movie object."""
     try:
+        imdb_id = data.get("#IMDB_ID") or data.get("id", "")
+        title = data.get("#TITLE") or ""
+        year_str = data.get("#YEAR", "0")
+        poster = data.get("#IMG_POSTER") or ""
+        rating_str = data.get("#IMDB_IV") or "0"
+
+        # Parse rating (IMDb returns as string like "8.8")
+        try:
+            rating = float(str(rating_str).split(",")[0]) if rating_str else 0.0
+        except (ValueError, IndexError):
+            rating = 0.0
+
         return Movie(
-            tmdb_id=data.get("id", 0),
-            title=data.get("title") or data.get("name", ""),
-            release_year=int(
-                (data.get("release_date") or data.get("first_air_date") or "")[:4] or 0
-            ),
-            poster_url=(
-                f"{TMDB_IMG_BASE}{data['poster_path']}"
-                if data.get("poster_path")
-                else ""
-            ),
-            overview=data.get("overview", ""),
-            rating=float(data.get("vote_average", 0) or 0),
+            imdb_id=imdb_id,
+            title=title,
+            release_year=int(year_str) if year_str.isdigit() else 0,
+            poster_url=poster,
+            overview=data.get("description", ""),
+            rating=rating,
             media_type=media_type,
         )
     except (KeyError, ValueError, TypeError):
         return None
 
 
-def search(query: str, kind: str = "multi", limit: int = 10) -> list[Movie]:
-    """Search TMDB for movies/TV shows.
+def search(query: str, kind: str = "movie", limit: int = 10) -> list[Movie]:
+    """Search IMDb for movies/TV shows.
 
     Args:
         query: Title or text to search for
-        kind: "movie" | "tv" | "multi" (default: both)
-        limit: Max results (TMDB returns up to 20 per page)
+        kind: "movie" | "tv" (IMDb API treats all the same, we just tag)
+        limit: Max results
 
     Returns:
-        List of Movie objects (or TV objects with media_type="tv")
+        List of Movie objects
 
     Raises:
-        MovieSearchError: If API key missing, request fails, or no results.
+        MovieSearchError: If request fails or no results.
     """
-    api_key = _get_api_key()
-    if not api_key:
-        raise MovieSearchError(
-            "TMDB API key not configured. "
-            "Add tmdb_api_key to config/api_keys.json (free from https://www.themoviedb.org)"
-        )
-
     query = query.strip()
     if not query:
         raise MovieSearchError("Empty search query.")
 
-    url = f"{TMDB_API_BASE}/search/{kind}"
-    data = _http_get(
-        url,
-        {
-            "api_key": api_key,
-            "query": query,
-            "language": "es-ES",  # Spanish results preferred
-            "page": 1,
-        },
-    )
+    url = f"{_IMDB_API_BASE}/search"
+    data = _http_get(url, {"q": query})
 
     results: list[Movie] = []
-    for item in data.get("results", [])[:limit]:
-        media_type = item.get("media_type", kind)
-        movie = _parse_movie(item, media_type)
-        if movie and movie.title:
+    for item in data.get("description", [])[:limit]:
+        movie = _parse_movie(item, kind)
+        if movie and movie.title and movie.imdb_id:
             results.append(movie)
+
     if not results:
         raise MovieSearchError(f"No results found for '{query}'.")
     return results
 
 
-def get_trending(kind: str = "movie", window: str = "week", limit: int = 20) -> list[Movie]:
-    """Fetch trending movies or TV shows.
+def get_trending(kind: str = "movie", limit: int = 20) -> list[Movie]:
+    """Fetch popular movies (mock with search of popular titles).
 
-    Args:
-        kind: "movie" | "tv"
-        window: "day" | "week"
-        limit: Max results
-
-    Returns:
-        List of Movie objects
+    Note: IMDb API doesn't have a dedicated trending endpoint, so we search
+    for perennially popular titles as a fallback.
     """
-    api_key = _get_api_key()
-    if not api_key:
-        raise MovieSearchError("TMDB API key not configured.")
-
-    url = f"{TMDB_API_BASE}/trending/{kind}/{window}"
-    data = _http_get(url, {"api_key": api_key, "language": "es-ES"})
+    popular_queries = [
+        "The Shawshank Redemption",
+        "The Dark Knight",
+        "Inception",
+        "Pulp Fiction",
+        "Forrest Gump",
+        "Fight Club",
+        "The Matrix",
+        "Interstellar",
+        "The Godfather",
+        "The Avengers",
+    ]
 
     results: list[Movie] = []
-    for item in data.get("results", [])[:limit]:
-        movie = _parse_movie(item, kind)
-        if movie and movie.title:
-            results.append(movie)
-    return results
+    for query in popular_queries[:limit // 2]:
+        try:
+            found = search(query, kind=kind, limit=1)
+            if found:
+                results.append(found[0])
+        except MovieSearchError:
+            continue
+        if len(results) >= limit:
+            break
+    return results[:limit]
 
 
-def get_details(tmdb_id: int, kind: str = "movie") -> Optional[Movie]:
-    """Fetch full details for a movie/TV show by TMDB ID."""
-    api_key = _get_api_key()
-    if not api_key:
-        raise MovieSearchError("TMDB API key not configured.")
-
-    url = f"{TMDB_API_BASE}/{kind}/{tmdb_id}"
-    data = _http_get(url, {"api_key": api_key, "language": "es-ES"})
-    return _parse_movie(data, kind)
+def get_details(imdb_id: str) -> Optional[Movie]:
+    """Fetch full details for a movie/TV show by IMDb ID."""
+    url = f"{_IMDB_API_BASE}/title/{imdb_id}"
+    try:
+        data = _http_get(url)
+        return _parse_movie(data)
+    except MovieSearchError:
+        return None
 
 
 def search_action(parameters: dict) -> str:
@@ -179,10 +156,10 @@ def search_action(parameters: dict) -> str:
 
     parameters:
         query: title to search
-        kind: "movie" | "tv" | "multi" (default "multi")
+        kind: "movie" | "tv" (default "movie")
     """
     query = (parameters.get("query") or "").strip()
-    kind = (parameters.get("kind") or "multi").strip().lower()
+    kind = (parameters.get("kind") or "movie").strip().lower()
 
     if not query:
         return "¿Qué película o serie buscas?"
