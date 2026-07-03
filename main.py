@@ -101,7 +101,6 @@ from actions.personal_tools    import personal_tools
 from actions.system_tools      import system_tools
 from actions.productivity_tools import productivity_tools
 from actions.utility_tools     import utility_tools
-from actions.game_updater      import game_updater
 from actions.google_calendar   import google_calendar
 from actions.gmail             import gmail
 from actions.gdrive            import gdrive
@@ -783,7 +782,7 @@ TOOL_DECLARATIONS = [
         "description": (
             "Executes complex multi-step tasks requiring multiple different tools. "
             "Examples: 'research X and save to file', 'find and organize files'. "
-            "DO NOT use for single commands. NEVER use for Steam/Epic — use game_updater."
+            "DO NOT use for single commands."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -839,29 +838,6 @@ TOOL_DECLARATIONS = [
                 "limit": {"type": "INTEGER", "description": "Maximum result count"}
             },
             "required": ["action"]
-        }
-    },
-    {
-        "name": "game_updater",
-        "description": (
-            "THE ONLY tool for ANY Steam or Epic Games request. "
-            "Use for: installing, downloading, updating games, listing installed games, "
-            "checking download status, scheduling updates. "
-            "ALWAYS call directly for any Steam/Epic/game request. "
-            "NEVER use agent_task, browser_control, or web_search for Steam/Epic."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "action":    {"type": "STRING",  "description": "update | install | list | download_status | schedule | cancel_schedule | schedule_status (default: update)"},
-                "platform":  {"type": "STRING",  "description": "steam | epic | both (default: both)"},
-                "game_name": {"type": "STRING",  "description": "Game name (partial match supported)"},
-                "app_id":    {"type": "STRING",  "description": "Steam AppID for install (optional)"},
-                "hour":      {"type": "INTEGER", "description": "Hour for scheduled update 0-23 (default: 3)"},
-                "minute":    {"type": "INTEGER", "description": "Minute for scheduled update 0-59 (default: 0)"},
-                "shutdown_when_done": {"type": "BOOLEAN", "description": "Shut down PC when download finishes"},
-            },
-            "required": []
         }
     },
     {
@@ -1403,10 +1379,6 @@ class JarvisLive:
 
             elif name == "system_tools":
                 r = await loop.run_in_executor(None, lambda: system_tools(parameters=args, speak=self.speak))
-                result = r or "Done."
-
-            elif name == "game_updater":
-                r = await loop.run_in_executor(None, lambda: game_updater(parameters=args, speak=self.speak))
                 result = r or "Done."
 
             elif name == "flight_finder":
