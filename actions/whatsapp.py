@@ -126,13 +126,13 @@ def _bridge_qr_status() -> dict:
     ``state``/``detail``; callers must tolerate their absence).
     """
     try:
-        r = requests.get(f"{BRIDGE_URL}/qr", headers=_request_headers(), timeout=3)
+        r = requests.get(f"{BRIDGE_URL}/qr", headers=_request_headers(), timeout=10)
         return r.json()
     except Exception:
         return {}
 
 
-def bridge_reconnect(timeout: int = 5) -> bool:
+def bridge_reconnect(timeout: int = 10) -> bool:
     """Ask the bridge to drop the current session and start a fresh attempt.
 
     Used by the UI "Reintentar" action when linking/loading gets stuck.
