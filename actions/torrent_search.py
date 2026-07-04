@@ -21,6 +21,10 @@ _DOMAINS = [
     "https://1337x.to",
     "https://1337x.ws",
     "https://1337x.st",
+    "https://1337x.io",
+    "https://1337x.se",
+    "https://x1337x.ws",
+    "https://1337x.unblocked",
 ]
 
 
