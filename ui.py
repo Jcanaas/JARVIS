@@ -35,12 +35,12 @@ from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
-    QHBoxLayout, QLabel, QLayout, QLineEdit,
+    QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextBrowser, QTextEdit,
     QVBoxLayout, QWidget, QProgressBar, QSlider, QStackedWidget,
     QAbstractItemView, QButtonGroup, QComboBox, QHeaderView, QListWidget, QListWidgetItem,
     QInputDialog, QListView, QMenu, QMessageBox, QSpinBox, QCheckBox,
-    QTableWidget, QTableWidgetItem, QDialog, QDialogButtonBox, QTimeEdit,
+    QTableWidget, QTableWidgetItem, QDialog, QDialogButtonBox, QTimeEdit, QSpacerItem,
 )
 from actions.whatsapp_ui import WhatsAppWindow
 
@@ -8459,23 +8459,93 @@ class WhatsAppRuleDialog(QDialog):
         }
 
 
+class _MovieCard(QWidget):
+    """Clickable movie card with poster, title, and rating."""
+
+    clicked = pyqtSignal(object)  # movie data
+
+    def __init__(self, movie, parent=None):
+        super().__init__(parent)
+        self.movie = movie
+        self.setStyleSheet(f"""
+            _MovieCard {{
+                background:{C.PANEL2}; border-radius:8px;
+                border:1px solid {C.BORDER};
+            }}
+            _MovieCard:hover {{
+                border:1px solid {C.PRI_DIM};
+                background:{C.PANEL};
+            }}
+        """)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 10)
+        lay.setSpacing(8)
+
+        # Poster image
+        self.poster = QLabel()
+        self.poster.setFixedSize(160, 240)
+        self.poster.setStyleSheet(f"background:{C.DARK}; border-radius:4px;")
+        self.poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if movie.poster_url:
+            try:
+                import urllib.request
+                data = urllib.request.urlopen(movie.poster_url).read()
+                pixmap = QPixmap()
+                pixmap.loadFromData(data)
+                if not pixmap.isNull():
+                    pixmap = pixmap.scaledToWidth(160, Qt.TransformationMode.SmoothTransformation)
+                    self.poster.setPixmap(pixmap)
+            except:
+                self.poster.setText("🎬")
+                self.poster.setFont(QFont(FONT_UI, 24))
+        else:
+            self.poster.setText("🎬")
+            self.poster.setFont(QFont(FONT_UI, 24))
+        lay.addWidget(self.poster, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # Title
+        title_label = QLabel(movie.title)
+        title_label.setFont(QFont(FONT_UI, 10, QFont.Weight.Bold))
+        title_label.setStyleSheet(f"color:{C.TEXT}; background:transparent;")
+        title_label.setWordWrap(True)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title_label)
+
+        # Rating + year
+        meta = f"★ {movie.rating:.1f}" if movie.rating else ""
+        if movie.release_year:
+            meta += f" • {movie.release_year}"
+        if meta:
+            meta_label = QLabel(meta)
+            meta_label.setFont(QFont(FONT_UI, 9))
+            meta_label.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent;")
+            meta_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(meta_label)
+
+        lay.addStretch()
+
+    def mousePressEvent(self, ev):
+        self.clicked.emit(self.movie)
+
+
 class MoviesModePanel(QWidget):
-    """Movie/TV discovery and streaming via torrents.
+    """Movie/TV discovery with poster grid and detail view."""
 
-    Uses TMDB for metadata (titles, posters, ratings) and 1337x for magnet
-    links, streamed via peerflix. All network calls run on daemon threads to
-    avoid blocking the UI. TV shows drill down: search → seasons → episodes.
-    """
-
-    _results_ready = pyqtSignal(list, str, str)  # items, header, error
+    _results_ready = pyqtSignal(list, str, str)
     _status_sig = pyqtSignal(str)
+    _show_detail = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list = []
+        self._current_view = "grid"  # "grid" | "detail"
+        self._detail_movie = None
         self._build_ui()
         self._results_ready.connect(self._on_results)
         self._status_sig.connect(self._set_status)
+        self._show_detail.connect(self._show_movie_detail)
         QTimer.singleShot(0, self._load_trending)
 
     def _build_ui(self):
@@ -8483,10 +8553,22 @@ class MoviesModePanel(QWidget):
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
 
-        title = QLabel("Películas y Series")
-        title.setFont(QFont(FONT_UI, 15, QFont.Weight.Bold))
-        title.setStyleSheet(f"color:{C.TEXT}; background:transparent;")
-        root.addWidget(title)
+        # Header
+        header_lay = QHBoxLayout()
+        self._back_btn = QPushButton("←")
+        self._back_btn.setFixedSize(36, 36)
+        self._back_btn.clicked.connect(self._show_grid_view)
+        self._back_btn.setVisible(False)
+        self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._back_btn.setStyleSheet(f"background:{C.PANEL2}; border:1px solid {C.BORDER}; border-radius:6px;")
+        header_lay.addWidget(self._back_btn)
+
+        self._title = QLabel("Películas y Series")
+        self._title.setFont(QFont(FONT_UI, 15, QFont.Weight.Bold))
+        self._title.setStyleSheet(f"color:{C.TEXT}; background:transparent;")
+        header_lay.addWidget(self._title, stretch=1)
+        header_lay.addStretch()
+        root.addLayout(header_lay)
 
         # Search row
         search_row = QHBoxLayout()
@@ -8514,28 +8596,43 @@ class MoviesModePanel(QWidget):
         chips.setSpacing(6)
         for label, cb in (
             ("Tendencias", self._load_trending),
-            ("Pelis recientes", self._load_recent),
-            ("Descargar", self._show_download_info),
+            ("Recientes", self._load_recent),
         ):
             chips.addWidget(self._chip(label, cb))
         chips.addStretch(1)
         root.addLayout(chips)
 
-        # Results list
-        self._list = QListWidget()
-        self._list.setStyleSheet(f"""
-            QListWidget {{
-                background:{C.PANEL}; color:{C.TEXT};
-                border:1px solid {C.BORDER_A}; border-radius:11px;
-                padding:6px; font-size:12px; outline:none;
-            }}
-            QListWidget::item {{ padding:9px 10px; border-radius:7px; }}
-            QListWidget::item:hover {{ background:rgba(255,255,255,0.05); }}
-            QListWidget::item:selected {{ background:{C.PRI_GHO}; color:{C.TEXT}; }}
-        """)
-        self._list.itemActivated.connect(self._on_item_activated)
-        self._list.itemClicked.connect(self._on_item_activated)
-        root.addWidget(self._list, stretch=1)
+        # Stack: grid view | detail view
+        self._stack = QStackedWidget()
+
+        # Grid view
+        grid_container = QWidget()
+        grid_lay = QVBoxLayout(grid_container)
+        grid_lay.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setStyleSheet(f"background:{C.PANEL}; border:1px solid {C.BORDER_A}; border-radius:11px;")
+        scroll.setWidgetResizable(True)
+        self._grid_widget = QWidget()
+        self._grid = QGridLayout(self._grid_widget)
+        self._grid.setSpacing(12)
+        scroll.setWidget(self._grid_widget)
+        grid_lay.addWidget(scroll)
+        self._stack.addWidget(grid_container)
+
+        # Detail view
+        detail_container = QWidget()
+        detail_lay = QVBoxLayout(detail_container)
+        detail_lay.setContentsMargins(0, 0, 0, 0)
+        detail_scroll = QScrollArea()
+        detail_scroll.setStyleSheet(f"background:{C.PANEL}; border:1px solid {C.BORDER_A}; border-radius:11px;")
+        detail_scroll.setWidgetResizable(True)
+        self._detail_content = QWidget()
+        self._detail_layout = QVBoxLayout(self._detail_content)
+        detail_scroll.setWidget(self._detail_content)
+        detail_lay.addWidget(detail_scroll)
+        self._stack.addWidget(detail_container)
+
+        root.addWidget(self._stack, stretch=1)
 
         self._status = QLabel("")
         self._status.setWordWrap(True)
@@ -8607,28 +8704,127 @@ class MoviesModePanel(QWidget):
 
         self._run_async(work)
 
-    def _show_download_info(self):
-        self._set_status("Selecciona una película y presiona para buscar torrents")
-
     def _on_results(self, items: list, header: str, error: str):
         self._items = items
-        self._list.clear()
+        self._show_grid_view()
         if error:
             self._set_status(error)
             return
         self._set_status(header)
-        for it in items:
-            year_str = f" ({it.release_year})" if it.release_year else ""
-            rating = f" ★{it.rating:.1f}" if it.rating else ""
-            item = QListWidgetItem(f"{it.title}{year_str}{rating}")
-            item.setData(Qt.ItemDataRole.UserRole, it)
-            self._list.addItem(item)
+        self._title.setText(header)
 
-    def _on_item_activated(self, item: QListWidgetItem):
-        movie = item.data(Qt.ItemDataRole.UserRole)
-        if not movie:
-            return
-        self._search_and_play(movie)
+        # Clear grid
+        while self._grid.count():
+            self._grid.takeAt(0).widget().deleteLater()
+
+        # Add movie cards (4 columns)
+        for i, movie in enumerate(items):
+            card = _MovieCard(movie)
+            card.clicked.connect(lambda m: self._show_detail.emit(m))
+            col = i % 4
+            row = i // 4
+            self._grid.addWidget(card, row, col)
+
+        self._grid.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding),
+                          (len(items) // 4) + 1, 0, 1, 4)
+
+    def _show_grid_view(self):
+        self._current_view = "grid"
+        self._back_btn.setVisible(False)
+        self._stack.setCurrentIndex(0)
+
+    def _show_movie_detail(self, movie):
+        self._current_view = "detail"
+        self._detail_movie = movie
+        self._back_btn.setVisible(True)
+        self._title.setText(movie.title)
+
+        # Clear detail layout
+        while self._detail_layout.count():
+            self._detail_layout.takeAt(0).widget().deleteLater()
+
+        # Build detail view
+        detail_widget = QWidget()
+        detail = QVBoxLayout(detail_widget)
+        detail.setSpacing(16)
+
+        # Poster + meta
+        header = QHBoxLayout()
+        poster_label = QLabel()
+        poster_label.setFixedSize(180, 270)
+        poster_label.setStyleSheet(f"background:{C.DARK}; border-radius:6px;")
+        if movie.poster_url:
+            try:
+                import urllib.request
+                data = urllib.request.urlopen(movie.poster_url).read()
+                pixmap = QPixmap()
+                pixmap.loadFromData(data)
+                if not pixmap.isNull():
+                    pixmap = pixmap.scaledToWidth(180, Qt.TransformationMode.SmoothTransformation)
+                    poster_label.setPixmap(pixmap)
+            except:
+                poster_label.setText("🎬")
+                poster_label.setFont(QFont(FONT_UI, 32))
+        else:
+            poster_label.setText("🎬")
+            poster_label.setFont(QFont(FONT_UI, 32))
+        poster_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(poster_label)
+
+        # Meta info
+        meta = QVBoxLayout()
+        meta.setSpacing(10)
+
+        year_label = QLabel(f"Año: {movie.release_year}" if movie.release_year else "Año: N/A")
+        year_label.setFont(QFont(FONT_UI, 11))
+        year_label.setStyleSheet(f"color:{C.TEXT_MED};")
+        meta.addWidget(year_label)
+
+        rating_label = QLabel(f"Rating: ★ {movie.rating:.1f}/10" if movie.rating else "Rating: N/A")
+        rating_label.setFont(QFont(FONT_UI, 11, QFont.Weight.Bold))
+        rating_label.setStyleSheet(f"color:{C.TEXT};")
+        meta.addWidget(rating_label)
+
+        type_label = QLabel(f"Tipo: {'Película' if movie.media_type == 'movie' else 'Serie'}")
+        type_label.setFont(QFont(FONT_UI, 11))
+        type_label.setStyleSheet(f"color:{C.TEXT_MED};")
+        meta.addWidget(type_label)
+
+        meta.addStretch()
+        header.addLayout(meta, 1)
+        detail.addLayout(header)
+
+        # Overview
+        if movie.overview:
+            synopsis_label = QLabel("Sinopsis")
+            synopsis_label.setFont(QFont(FONT_UI, 11, QFont.Weight.Bold))
+            synopsis_label.setStyleSheet(f"color:{C.TEXT};")
+            detail.addWidget(synopsis_label)
+
+            overview = QLabel(movie.overview)
+            overview.setWordWrap(True)
+            overview.setFont(QFont(FONT_UI, 10))
+            overview.setStyleSheet(f"color:{C.TEXT_MED};")
+            detail.addWidget(overview)
+
+        # Play button
+        play_btn = QPushButton("▶ Reproducir")
+        play_btn.setFixedHeight(42)
+        play_btn.setFont(QFont(FONT_UI, 11, QFont.Weight.Bold))
+        play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        play_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{C.PRI_DIM}; color:{C.DARK};
+                border:none; border-radius:8px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{C.PRI}; }}
+        """)
+        play_btn.clicked.connect(lambda: self._search_and_play(movie))
+        detail.addWidget(play_btn)
+
+        detail.addStretch()
+        self._detail_layout.addWidget(detail_widget)
+        self._stack.setCurrentIndex(1)
 
     def _search_and_play(self, movie):
         self._set_status(f"Buscando torrents de «{movie.title}»…")
@@ -8643,7 +8839,7 @@ class MoviesModePanel(QWidget):
                     self._status_sig.emit("No encontré torrents para esta película")
                     return
 
-                best = torrents[0]  # Highest seeders
+                best = torrents[0]
                 self._status_sig.emit(f"▶ Reproduciendo «{movie.title}» (seeders: {best.seeders})")
                 pp.play(best.magnet, movie.title)
             except Exception as e:
