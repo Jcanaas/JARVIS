@@ -8725,7 +8725,7 @@ class MoviesModePanel(QWidget):
             row = i // 4
             self._grid.addWidget(card, row, col)
 
-        self._grid.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding),
+        self._grid.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding),
                           (len(items) // 4) + 1, 0, 1, 4)
 
     def _show_grid_view(self):
