@@ -8715,7 +8715,9 @@ class MoviesModePanel(QWidget):
 
         # Clear grid
         while self._grid.count():
-            self._grid.takeAt(0).widget().deleteLater()
+            item = self._grid.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
 
         # Add movie cards (4 columns)
         for i, movie in enumerate(items):
@@ -8741,7 +8743,9 @@ class MoviesModePanel(QWidget):
 
         # Clear detail layout
         while self._detail_layout.count():
-            self._detail_layout.takeAt(0).widget().deleteLater()
+            item = self._detail_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
 
         # Build detail view
         detail_widget = QWidget()
