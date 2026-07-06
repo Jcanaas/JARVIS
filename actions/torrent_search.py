@@ -1,7 +1,8 @@
-"""Torrent magnet link search via torlink.
+"""Torrent magnet link search via a vendored torlink search script.
 
-Uses torlink CLI (https://github.com/baairon/torlink) to search torrents
-across multiple sources. Returns magnet links for streaming via peerflix.mov.
+Runs actions/vendor/torlink/search.mjs (a search-only subset of torlink,
+https://github.com/baairon/torlink, MIT) with Node.js to query YTS, The
+Pirate Bay and 1337x, and returns normalized magnet links.
 """
 from __future__ import annotations
 
@@ -9,7 +10,11 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
+
+from actions.paths import resource
+
+_TIMEOUT = 30
+_SEARCH_SCRIPT = resource("actions", "vendor", "torlink", "search.mjs")
 
 
 class TorrentSearchError(RuntimeError):
@@ -38,18 +43,18 @@ class Torrent:
         }
 
 
-def _locate_torlink() -> str:
-    """Find torlink executable in PATH."""
-    torlink = shutil.which("torlink")
-    if torlink:
-        return torlink
+def _locate_node() -> str:
+    """Find the Node.js executable in PATH."""
+    node = shutil.which("node")
+    if node:
+        return node
     raise TorrentSearchError(
-        "torlink not found. Install: npm install -g @baairon/torlink"
+        "Node.js not found. Install it from https://nodejs.org to enable torrent search."
     )
 
 
 def search(query: str, kind: str = "movie", limit: int = 10) -> list[Torrent]:
-    """Search for torrents using torlink CLI.
+    """Search for torrents via the vendored torlink script.
 
     Args:
         query: Movie/TV title
@@ -57,65 +62,59 @@ def search(query: str, kind: str = "movie", limit: int = 10) -> list[Torrent]:
         limit: Max results
 
     Returns:
-        List of Torrent objects with magnet links
+        List of Torrent objects with magnet links, sorted by seeders.
 
     Raises:
-        TorrentSearchError: If search fails or no results found.
+        TorrentSearchError: If Node.js is missing, the search fails, or no
+            results are found.
     """
     query = query.strip()
     if not query:
         raise TorrentSearchError("Empty search query.")
 
-    try:
-        torlink_exe = _locate_torlink()
-    except TorrentSearchError:
-        raise
+    node = _locate_node()
+    kind = "tv" if kind == "tv" else "movie"
 
     try:
-        # Run: torlink search <query> --json --limit <limit>
         result = subprocess.run(
-            [torlink_exe, "search", query, "--json", "--limit", str(limit + 5)],
+            [node, str(_SEARCH_SCRIPT), "search", query, "--kind", kind, "--limit", str(limit), "--json"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise TorrentSearchError("Torrent search timed out.") from None
+
+    if result.returncode != 0:
+        raise TorrentSearchError(
+            f"Torrent search failed: {result.stderr.strip() or result.stdout.strip()}"
         )
 
-        if result.returncode != 0:
-            raise TorrentSearchError(f"torlink failed: {result.stderr or result.stdout}")
-
+    try:
         data = json.loads(result.stdout)
-        if not data or not isinstance(data, list):
-            raise TorrentSearchError(f"No torrents found for '{query}'.")
-
-        torrents: list[Torrent] = []
-        for item in data[:limit]:
-            try:
-                # torlink returns: name, magnet, seeders, leechers, etc.
-                torrent = Torrent(
-                    title=item.get("name", "Unknown"),
-                    magnet=item.get("magnet", ""),
-                    seeders=int(item.get("seeders", 0)) if item.get("seeders") else 0,
-                    leechers=int(item.get("leechers", 0)) if item.get("leechers") else 0,
-                    size=item.get("size", ""),
-                )
-                if torrent.magnet:
-                    torrents.append(torrent)
-            except (KeyError, ValueError, TypeError):
-                continue
-
-        if not torrents:
-            raise TorrentSearchError(f"No valid torrents found for '{query}'.")
-
-        # Sort by seeders descending
-        torrents.sort(key=lambda t: t.seeders, reverse=True)
-        return torrents[:limit]
-
     except json.JSONDecodeError as exc:
-        raise TorrentSearchError(f"Failed to parse torlink results: {exc}") from exc
-    except subprocess.TimeoutExpired:
-        raise TorrentSearchError("torlink search timeout.") from None
-    except Exception as exc:
-        raise TorrentSearchError(f"torlink error: {exc}") from exc
+        raise TorrentSearchError(f"Failed to parse search results: {exc}") from exc
+
+    if not data:
+        raise TorrentSearchError(f"No torrents found for '{query}'.")
+
+    torrents = [
+        Torrent(
+            title=item.get("name", "Unknown"),
+            magnet=item.get("magnet", ""),
+            seeders=int(item.get("seeders") or 0),
+            leechers=int(item.get("leechers") or 0),
+            size=item.get("size", ""),
+        )
+        for item in data
+        if item.get("magnet")
+    ]
+
+    if not torrents:
+        raise TorrentSearchError(f"No valid torrents found for '{query}'.")
+
+    torrents.sort(key=lambda t: t.seeders, reverse=True)
+    return torrents[:limit]
 
 
 def search_action(parameters: dict) -> str:

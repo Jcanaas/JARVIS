@@ -95,7 +95,7 @@ class MovieSearchTests(unittest.TestCase):
 # Torrent Search                                                             #
 # --------------------------------------------------------------------------- #
 class TorrentSearchTests(unittest.TestCase):
-    TORLINK_JSON = [
+    SEARCH_JSON = [
         {
             "name": "Fight Club 1999 1080p",
             "magnet": "magnet:?xt=urn:btih:abc123",
@@ -120,8 +120,8 @@ class TorrentSearchTests(unittest.TestCase):
         self.assertIn("title", d)
         self.assertIn("magnet", d)
 
-    @patch("actions.torrent_search._locate_torlink", side_effect=ts.TorrentSearchError("not found"))
-    def test_search_without_torlink_raises(self, mock_locate):
+    @patch("actions.torrent_search._locate_node", side_effect=ts.TorrentSearchError("not found"))
+    def test_search_without_node_raises(self, mock_locate):
         with self.assertRaises(ts.TorrentSearchError):
             ts.search("anything")
 
@@ -129,17 +129,25 @@ class TorrentSearchTests(unittest.TestCase):
         with self.assertRaises(ts.TorrentSearchError):
             ts.search("   ")
 
-    @patch("actions.torrent_search._locate_torlink", return_value="torlink")
+    @patch("actions.torrent_search._locate_node", return_value="node")
     @patch("actions.torrent_search.subprocess.run")
-    def test_search_parses_torlink_json(self, mock_run, mock_locate):
+    def test_search_parses_vendored_script_json(self, mock_run, mock_locate):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps(self.TORLINK_JSON),
+            stdout=json.dumps(self.SEARCH_JSON),
+            stderr="",
         )
         torrents = ts.search("fight club", limit=2)
         self.assertEqual(len(torrents), 2)
         self.assertEqual(torrents[0].title, "Fight Club 1999 1080p")
         self.assertEqual(torrents[0].seeders, 500)
+
+    @patch("actions.torrent_search._locate_node", return_value="node")
+    @patch("actions.torrent_search.subprocess.run")
+    def test_search_nonzero_exit_raises(self, mock_run, mock_locate):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="No results from any source")
+        with self.assertRaises(ts.TorrentSearchError):
+            ts.search("anything")
 
     @patch("actions.torrent_search.search")
     def test_search_action_returns_formatted_string(self, mock_search):
