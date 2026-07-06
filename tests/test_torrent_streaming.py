@@ -1,4 +1,4 @@
-"""Tests for torrent-based streaming (movie_search, torrent_search, peerflix_player)."""
+"""Tests for torrent-based streaming (movie_search, torrent_search, vlc_player)."""
 import json
 import sys
 import unittest
@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from actions import movie_search as ms  # noqa: E402
 from actions import torrent_search as ts  # noqa: E402
-from actions import peerflix_player as pp  # noqa: E402
+from actions import vlc_player as vp  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -162,48 +162,49 @@ class TorrentSearchTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Peerflix Player                                                            #
+# VLC Player (WebTorrent stream)                                            #
 # --------------------------------------------------------------------------- #
-class PeerflixPlayerTests(unittest.TestCase):
-    @patch("actions.peerflix_player._locate_peerflix", return_value="peerflix")
-    @patch("actions.peerflix_player.subprocess.Popen")
-    @patch("actions.peerflix_player.time.sleep")
-    def test_play_returns_streaming_url(self, mock_sleep, mock_popen, mock_locate):
-        # Mock peerflix process
+class VLCPlayerTests(unittest.TestCase):
+    def setUp(self):
+        vp._stream_process = None
+
+    @patch("actions.vlc_player._locate_node", return_value="node")
+    @patch("actions.vlc_player.subprocess.Popen")
+    def test_start_streaming_returns_url(self, mock_popen, mock_node):
         proc = MagicMock()
+        url = "http://127.0.0.1:8888/webtorrent/hash/Movie.mp4"
+        proc.stdout.readline.return_value = json.dumps({"url": url, "name": "Movie.mp4"}) + "\n"
         mock_popen.return_value = proc
-        # Mock _port_available to return False (port in use = listening)
-        with patch("actions.peerflix_player._port_available", return_value=False):
-            magnet = "magnet:?xt=urn:btih:abc123"
-            result = pp.play(magnet, "Fight Club")
-            self.assertIn("http://127.0.0.1", result)
-            self.assertIn("6881", result)
 
-    @patch("actions.peerflix_player._locate_peerflix", return_value="peerflix")
-    @patch("actions.peerflix_player.subprocess.Popen")
-    @patch("actions.peerflix_player.time.sleep")
-    def test_play_timeout_raises(self, mock_sleep, mock_popen, mock_locate):
+        result = vp.start_streaming("magnet:?xt=urn:btih:abc123", "Inception")
+        self.assertEqual(result, url)
+
+    @patch("actions.vlc_player._locate_node", return_value="node")
+    @patch("actions.vlc_player.subprocess.Popen")
+    def test_start_streaming_no_output_raises(self, mock_popen, mock_node):
         proc = MagicMock()
+        proc.stdout.readline.return_value = ""  # no URL line
+        proc.poll.return_value = 1
+        proc.stderr.read.return_value = "no seeders"
         mock_popen.return_value = proc
-        # Mock _port_available to always return True (port always free = not listening)
-        with patch("actions.peerflix_player._port_available", return_value=True):
-            with self.assertRaises(pp.PeerflixError):
-                pp.play("magnet:?xt=urn:btih:abc123")
 
-    @patch("actions.peerflix_player._locate_peerflix", side_effect=pp.PeerflixError("not found"))
-    def test_play_without_peerflix_raises(self, mock_locate):
-        with self.assertRaises(pp.PeerflixError):
-            pp.play("magnet:?xt=urn:btih:abc")
+        with self.assertRaises(vp.VLCPlayerError):
+            vp.start_streaming("magnet:?xt=urn:btih:abc123")
 
-    @patch("actions.peerflix_player._locate_peerflix", return_value="peerflix")
-    def test_get_status_when_available(self, mock_locate):
-        status = pp.get_status()
+    @patch("actions.vlc_player._locate_node", side_effect=vp.VLCPlayerError("not found"))
+    def test_start_streaming_without_node_raises(self, mock_node):
+        with self.assertRaises(vp.VLCPlayerError):
+            vp.start_streaming("magnet:?xt=urn:btih:abc")
+
+    @patch("actions.vlc_player._locate_node", return_value="node")
+    def test_get_status_when_available(self, mock_node):
+        status = vp.get_status()
         self.assertIsNotNone(status)
         self.assertIn("ready", status)
 
-    @patch("actions.peerflix_player._locate_peerflix", side_effect=pp.PeerflixError("not found"))
-    def test_get_status_when_unavailable(self, mock_locate):
-        status = pp.get_status()
+    @patch("actions.vlc_player._locate_node", side_effect=vp.VLCPlayerError("not found"))
+    def test_get_status_when_unavailable(self, mock_node):
+        status = vp.get_status()
         self.assertIsNone(status)
 
 
