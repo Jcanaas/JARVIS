@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from actions.paths import resource
 
-_TIMEOUT = 30
+_TIMEOUT = 10  # 10s timeout for parallel searches across 3 sources
 _SEARCH_SCRIPT = resource("actions", "vendor", "torlink", "search.mjs")
 
 

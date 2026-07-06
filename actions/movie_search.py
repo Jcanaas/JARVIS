@@ -19,7 +19,7 @@ from actions.paths import config_path, memory_path
 
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG_BASE = "https://image.tmdb.org/t/p/w342"  # 342px width (mobile-friendly)
-_TIMEOUT = 15
+_TIMEOUT = 5  # TMDB is fast, 5s is plenty
 _CACHE_DIR = memory_path("tmdb_cache")
 
 
