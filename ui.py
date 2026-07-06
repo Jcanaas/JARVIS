@@ -42,6 +42,12 @@ from PyQt6.QtWidgets import (
     QInputDialog, QListView, QMenu, QMessageBox, QSpinBox, QCheckBox,
     QTableWidget, QTableWidgetItem, QDialog, QDialogButtonBox, QTimeEdit, QSpacerItem,
 )
+
+try:
+    import vlc
+    HAS_VLC = True
+except ImportError:
+    HAS_VLC = False
 from actions.whatsapp_ui import WhatsAppWindow
 
 from actions.paths import RESOURCE_DIR, CONFIG_DIR, MEMORY_DIR, config_path
@@ -8459,6 +8465,83 @@ class WhatsAppRuleDialog(QDialog):
         }
 
 
+class _TorrentSelectDialog(QDialog):
+    """Dialog to select a torrent from a list of search results."""
+
+    def __init__(self, torrents: list, parent=None):
+        super().__init__(parent)
+        self.selected_torrent = None
+        self.setWindowTitle("Seleccionar Torrent")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(400)
+
+        lay = QVBoxLayout(self)
+
+        # Info label
+        info = QLabel("Selecciona un torrent para reproducir (ordenados por seeders):")
+        lay.addWidget(info)
+
+        # Torrent list
+        self._list = QListWidget()
+        self._list.setStyleSheet(f"""
+            QListWidget {{
+                background:{C.PANEL}; color:{C.TEXT};
+                border:1px solid {C.BORDER}; border-radius:6px;
+            }}
+            QListWidget::item {{ padding:12px; border-radius:4px; }}
+            QListWidget::item:hover {{ background:{C.PANEL2}; }}
+            QListWidget::item:selected {{ background:{C.PRI}; color:{C.DARK}; font-weight:bold; }}
+        """)
+        self._list.itemDoubleClicked.connect(self._on_select)
+        lay.addWidget(self._list)
+
+        # Populate with torrents sorted by seeders
+        for t in sorted(torrents, key=lambda x: x.seeders, reverse=True):
+            size_str = t.size if t.size else ""
+            item_text = f"{t.title}\n📤 {t.seeders} seeders  📥 {t.leechers} leechers  {size_str}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, t)
+            self._list.addItem(item)
+
+        # Buttons
+        btn_lay = QHBoxLayout()
+        btn_lay.addStretch()
+
+        btn_select = QPushButton("Reproducir")
+        btn_select.setFixedHeight(36)
+        btn_select.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_select.setStyleSheet(f"""
+            QPushButton {{
+                background:{C.PRI}; color:{C.DARK};
+                border:none; border-radius:6px; font-weight:bold; padding:0 20px;
+            }}
+            QPushButton:hover {{ background:{C.PRI_DIM}; }}
+        """)
+        btn_select.clicked.connect(self._on_select)
+        btn_lay.addWidget(btn_select)
+
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setFixedHeight(36)
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background:transparent; color:{C.TEXT};
+                border:1px solid {C.BORDER}; border-radius:6px; padding:0 20px;
+            }}
+            QPushButton:hover {{ border-color:{C.PRI}; }}
+        """)
+        btn_cancel.clicked.connect(self.reject)
+        btn_lay.addWidget(btn_cancel)
+
+        lay.addLayout(btn_lay)
+
+    def _on_select(self):
+        item = self._list.currentItem()
+        if item:
+            self.selected_torrent = item.data(Qt.ItemDataRole.UserRole)
+            self.accept()
+
+
 class _MovieCard(QWidget):
     """Clickable movie card with poster, title, and rating."""
 
@@ -8530,6 +8613,43 @@ class _MovieCard(QWidget):
         self.clicked.emit(self.movie)
 
 
+class _VLCWidget(QWidget):
+    """Embeds a VLC player in PyQt6."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.instance = None
+        self.media_list_player = None
+
+        if HAS_VLC:
+            try:
+                self.instance = vlc.Instance()
+                self.media_list_player = self.instance.media_list_player_new()
+            except Exception:
+                pass
+
+    def play_url(self, url: str):
+        """Play a URL in VLC."""
+        if not HAS_VLC or not self.instance:
+            return
+        try:
+            media = self.instance.media_new(url)
+            media_list = self.instance.media_list_new()
+            media_list.add_media(media)
+            self.media_list_player.set_media_list(media_list)
+            self.media_list_player.play()
+        except Exception:
+            pass
+
+    def stop(self):
+        """Stop playback."""
+        if self.media_list_player:
+            try:
+                self.media_list_player.stop()
+            except Exception:
+                pass
+
+
 class MoviesModePanel(QWidget):
     """Movie/TV discovery with poster grid and detail view."""
 
@@ -8542,7 +8662,7 @@ class MoviesModePanel(QWidget):
         self._items: list = []
         self._current_view = "grid"  # "grid" | "detail"
         self._detail_movie = None
-        self._media_player = None
+        self._vlc_player = _VLCWidget(self) if HAS_VLC else None
         self._build_ui()
         self._results_ready.connect(self._on_results)
         self._status_sig.connect(self._set_status)
@@ -8837,31 +8957,40 @@ class MoviesModePanel(QWidget):
         def work():
             try:
                 from actions import torrent_search as ts
-                from actions import peerflix_player as pp
-                from PyQt6.QtMultimedia import QMediaPlayer
-                from PyQt6.QtCore import QUrl
+                from actions import vlc_player as vp
 
-                torrents = ts.search(movie.title, limit=5)
+                torrents = ts.search(movie.title, limit=10)
                 if not torrents:
                     self._status_sig.emit("No encontré torrents para esta película")
                     return
 
-                best = torrents[0]
-                self._status_sig.emit(f"▶ Iniciando reproducción de «{movie.title}» (seeders: {best.seeders})")
+                # Show dialog to select torrent
+                def show_dialog():
+                    dialog = _TorrentSelectDialog(torrents, self)
+                    if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_torrent:
+                        torrent = dialog.selected_torrent
+                        self._status_sig.emit(f"▶ Iniciando reproducción (seeders: {torrent.seeders})")
 
-                # Start peerflix and get streaming URL
-                stream_url = pp.play(best.magnet, movie.title)
+                        try:
+                            # Start peerflix streaming
+                            stream_url = vp.start_streaming(torrent.magnet, movie.title)
 
-                # Create media player if not exists
-                if not self._media_player:
-                    self._media_player = QMediaPlayer(self)
+                            # Play in VLC
+                            if self._vlc_player:
+                                self._vlc_player.play_url(stream_url)
+                                self._status_sig.emit(f"▶ Reproduciendo «{movie.title}» vía {torrent.source}")
+                            else:
+                                self._status_sig.emit("VLC no disponible. Instala: pip install python-vlc")
+                        except Exception as e:
+                            self._status_sig.emit(f"Error iniciando reproducción: {e}")
+                    else:
+                        self._status_sig.emit("Reproducción cancelada")
 
-                # Play the stream
-                self._media_player.setSource(QUrl(stream_url))
-                self._media_player.play()
-                self._status_sig.emit(f"▶ Reproduciendo «{movie.title}»")
+                # Schedule dialog on main thread
+                QTimer.singleShot(0, show_dialog)
+
             except Exception as e:
-                self._status_sig.emit(f"Error: {e}")
+                self._status_sig.emit(f"Error buscando torrents: {e}")
 
         self._run_async(work)
 
