@@ -6696,6 +6696,20 @@ class _PanelControls(QWidget):
         )
         self.like_btn = _LikeBtn()
         self.download_btn = _icon_button("download", "Descargar vídeo", size=36, icon_size=18)
+        # Audio-track + subtitle buttons: hidden by default (YouTube doesn't use
+        # them); the Movies panel reveals and wires them up.
+        self.audio_btn = _icon_button("audio", "Pista de audio", size=36, icon_size=18)
+        self.subs_btn = QPushButton("CC")
+        self.subs_btn.setToolTip("Subtítulos")
+        self.subs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.subs_btn.setFixedSize(36, 36)
+        self.subs_btn.setStyleSheet(
+            "QPushButton { color:#FFFFFF; background:transparent; border:none;"
+            " font-size:12px; font-weight:800; }"
+            "QPushButton:hover { color:#B6C4FF; }"
+        )
+        self.audio_btn.hide()
+        self.subs_btn.hide()
         self.float_btn = _icon_button("pip", "Vídeo flotante", size=36, icon_size=18)
         self.fullscreen_btn = _icon_button("fullscreen", "Pantalla completa", size=36, icon_size=18)
 
@@ -6707,6 +6721,8 @@ class _PanelControls(QWidget):
         bar_l.addSpacing(8)
         bar_l.addWidget(self.like_btn)
         bar_l.addWidget(self.download_btn)
+        bar_l.addWidget(self.audio_btn)
+        bar_l.addWidget(self.subs_btn)
         bar_l.addWidget(self.float_btn)
         bar_l.addWidget(self.fullscreen_btn)
 
@@ -8730,6 +8746,14 @@ class _VLCBackend:
         if self.player:
             self.player.video_set_spu(tid)
 
+    def get_subtitle_delay(self):
+        # microseconds
+        return self.player.video_get_spu_delay() if self.player else 0
+
+    def set_subtitle_delay(self, microseconds):
+        if self.player:
+            self.player.video_set_spu_delay(int(microseconds))
+
 
 class MoviesModePanel(QWidget):
     """Movie/TV discovery with poster grid and detail view."""
@@ -8903,6 +8927,11 @@ class MoviesModePanel(QWidget):
             self.volume.valueChanged.connect(self._on_volume)
             self._pc.float_btn.clicked.connect(self._toggle_floating_video)
             self._pc.fullscreen_btn.clicked.connect(lambda: self._detach_video("fullscreen"))
+            # Movies expose audio-track + subtitle menus.
+            self._pc.audio_btn.show()
+            self._pc.subs_btn.show()
+            self._pc.audio_btn.clicked.connect(self._show_audio_menu)
+            self._pc.subs_btn.clicked.connect(self._show_subs_menu)
         else:
             self._pc = None
 
@@ -9177,7 +9206,8 @@ class MoviesModePanel(QWidget):
         hwnd = int(self.video_surface.winId())
         self._player.play_url(stream_url, hwnd, self.volume.value())
         for b in (self.play_btn, self.seek, self.volume,
-                  self._pc.float_btn, self._pc.fullscreen_btn):
+                  self._pc.float_btn, self._pc.fullscreen_btn,
+                  self._pc.audio_btn, self._pc.subs_btn):
             b.setEnabled(True)
         self.play_btn.set_shape(_MediaBtn.PAUSE)
         self._start_poller()
@@ -9206,6 +9236,68 @@ class MoviesModePanel(QWidget):
     def _rewind_video(self):
         if self._player:
             self._player.seek_rel(-10)
+
+    # -- audio-track / subtitle menus --------------------------------------
+    @staticmethod
+    def _track_label(name) -> str:
+        return name.decode("utf-8", "ignore") if isinstance(name, bytes) else str(name)
+
+    def _styled_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background:{C.PANEL2}; color:{C.TEXT};
+                border:1px solid {C.BORDER}; border-radius:8px; padding:6px;
+            }}
+            QMenu::item {{ padding:6px 22px; border-radius:5px; }}
+            QMenu::item:selected {{ background:{C.PRI_GHO}; }}
+            QMenu::separator {{ height:1px; background:{C.BORDER}; margin:5px 8px; }}
+        """)
+        return menu
+
+    def _show_audio_menu(self):
+        if not (self._player and self._player.available()):
+            return
+        menu = self._styled_menu()
+        current = self._player.current_audio()
+        tracks = self._player.audio_tracks() or []
+        if not tracks:
+            menu.addAction("Sin pistas de audio").setEnabled(False)
+        for tid, name in tracks:
+            act = menu.addAction(("● " if tid == current else "     ") + self._track_label(name))
+            act.triggered.connect(lambda _=False, i=tid: self._player.set_audio_track(i))
+        menu.exec(self._pc.audio_btn.mapToGlobal(self._pc.audio_btn.rect().topLeft()))
+
+    def _show_subs_menu(self):
+        if not (self._player and self._player.available()):
+            return
+        menu = self._styled_menu()
+        current = self._player.current_subtitle()
+        tracks = self._player.subtitle_tracks() or []
+        # VLC lists "Disable" (id -1) as the first entry; show all as-is.
+        if not tracks:
+            menu.addAction("Sin subtítulos").setEnabled(False)
+        for tid, name in tracks:
+            act = menu.addAction(("● " if tid == current else "     ") + self._track_label(name))
+            act.triggered.connect(lambda _=False, i=tid: self._player.set_subtitle(i))
+
+        # Subtitle sync adjustment (delay is in microseconds).
+        menu.addSeparator()
+        delay_ms = int(self._player.get_subtitle_delay() / 1000)
+        header = menu.addAction(f"Sincronía: {delay_ms:+d} ms")
+        header.setEnabled(False)
+        later = menu.addAction("Retrasar subtítulos +0.5 s")
+        later.triggered.connect(lambda: self._nudge_subs(500_000))
+        sooner = menu.addAction("Adelantar subtítulos −0.5 s")
+        sooner.triggered.connect(lambda: self._nudge_subs(-500_000))
+        reset = menu.addAction("Restablecer sincronía")
+        reset.triggered.connect(lambda: self._player.set_subtitle_delay(0))
+
+        menu.exec(self._pc.subs_btn.mapToGlobal(self._pc.subs_btn.rect().topLeft()))
+
+    def _nudge_subs(self, delta_us: int):
+        if self._player and self._player.available():
+            self._player.set_subtitle_delay(self._player.get_subtitle_delay() + delta_us)
 
     def _start_poller(self):
         if self._poll_thread is not None and self._poll_thread.is_alive():
