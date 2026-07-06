@@ -215,85 +215,90 @@ from actions import opensubtitles as osub  # noqa: E402
 
 
 class OpenSubtitlesTests(unittest.TestCase):
-    SEARCH_RESPONSE = {
-        "data": [
-            {
-                "attributes": {
-                    "language": "es",
-                    "release": "Inception.2010.1080p",
-                    "download_count": 5000,
-                    "files": [{"file_id": 111, "file_name": "Inception.es.srt"}],
-                }
-            },
-            {
-                "attributes": {
-                    "language": "es",
-                    "release": "Inception.2010.720p",
-                    "download_count": 9000,
-                    "files": [{"file_id": 222, "file_name": "Inception2.es.srt"}],
-                }
-            },
-        ]
-    }
+    SEARCH_RESPONSE = [
+        {
+            "SubDownloadLink": "https://dl.opensubtitles.org/sub111.gz",
+            "LanguageName": "Spanish",
+            "MovieReleaseName": "Inception.2010.1080p",
+            "MovieYear": "2010",
+            "SubDownloadsCnt": "5000",
+            "SubFileName": "Inception.es.srt",
+        },
+        {
+            "SubDownloadLink": "https://dl.opensubtitles.org/sub222.gz",
+            "LanguageName": "Spanish",
+            "MovieReleaseName": "Inception.2010.720p",
+            "MovieYear": "1999",
+            "SubDownloadsCnt": "9000",
+            "SubFileName": "Inception2.es.srt",
+        },
+    ]
 
-    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
     @patch("actions.opensubtitles.requests.get")
-    def test_search_sorts_by_downloads(self, mock_get, mock_key):
+    def test_search_prioritises_year_then_downloads(self, mock_get):
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: self.SEARCH_RESPONSE,
+            raise_for_status=lambda: None,
+        )
+        # With year=2010, the 2010 entry wins even though it has fewer downloads.
+        subs = osub.search("inception", language="es", year=2010)
+        self.assertEqual(len(subs), 2)
+        self.assertEqual(subs[0].year, 2010)
+        self.assertIn("sub111", subs[0].download_link)
+
+    @patch("actions.opensubtitles.requests.get")
+    def test_search_sorts_by_downloads_without_year(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
             json=lambda: self.SEARCH_RESPONSE,
             raise_for_status=lambda: None,
         )
         subs = osub.search("inception", language="es")
-        self.assertEqual(len(subs), 2)
-        # Most-downloaded first
-        self.assertEqual(subs[0].file_id, 222)
+        # No year given → most-downloaded first.
         self.assertEqual(subs[0].downloads, 9000)
 
-    @patch("actions.opensubtitles._get_api_key", return_value="")
-    def test_search_without_key_raises(self, mock_key):
-        with self.assertRaises(osub.OpenSubtitlesError):
-            osub.search("anything")
-
-    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
-    def test_search_empty_query_raises(self, mock_key):
+    def test_search_empty_query_raises(self):
         with self.assertRaises(osub.OpenSubtitlesError):
             osub.search("   ")
 
-    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
     @patch("actions.opensubtitles.requests.get", return_value=MagicMock(
-        status_code=200, json=lambda: {"data": []}, raise_for_status=lambda: None))
-    def test_search_no_results_raises(self, mock_get, mock_key):
+        status_code=200, json=lambda: [], raise_for_status=lambda: None))
+    def test_search_no_results_raises(self, mock_get):
         with self.assertRaises(osub.OpenSubtitlesError):
             osub.search("zzznotexist")
 
-    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
     @patch("actions.opensubtitles.requests.get")
-    @patch("actions.opensubtitles.requests.post")
-    def test_download_saves_file(self, mock_post, mock_get, mock_key):
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"link": "https://dl.example/sub.srt", "file_name": "sub.srt"},
-            raise_for_status=lambda: None,
-        )
+    def test_download_decompresses_gzip(self, mock_get):
+        import gzip
+        srt = b"1\n00:00:01,000 --> 00:00:02,000\nHola\n"
         mock_get.return_value = MagicMock(
             status_code=200,
-            content=b"1\n00:00:01,000 --> 00:00:02,000\nHola\n",
+            content=gzip.compress(srt),
             raise_for_status=lambda: None,
         )
         import tempfile
         from pathlib import Path
+        sub = osub.Subtitle("https://dl.example/sub.gz", "Spanish", "rel", 10, "sub.srt", 2010)
         with tempfile.TemporaryDirectory() as tmp:
-            path = osub.download(111, dest_dir=Path(tmp))
+            path = osub.download(sub, dest_dir=Path(tmp))
             self.assertTrue(path.endswith("sub.srt"))
-            self.assertTrue(Path(path).exists())
+            self.assertEqual(Path(path).read_bytes(), srt)
 
-    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
-    @patch("actions.opensubtitles.requests.post", return_value=MagicMock(
-        status_code=200, json=lambda: {"message": "quota"}, raise_for_status=lambda: None))
-    def test_download_no_link_raises(self, mock_post, mock_key):
+    @patch("actions.opensubtitles.requests.get")
+    def test_download_accepts_plain_bytes(self, mock_get):
+        srt = b"1\n00:00:01,000 --> 00:00:02,000\nHi\n"
+        mock_get.return_value = MagicMock(
+            status_code=200, content=srt, raise_for_status=lambda: None)
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            path = osub.download("https://dl.example/plain.srt", dest_dir=Path(tmp))
+            self.assertEqual(Path(path).read_bytes(), srt)
+
+    def test_download_no_link_raises(self):
         with self.assertRaises(osub.OpenSubtitlesError):
-            osub.download(111)
+            osub.download("")
 
 
 if __name__ == "__main__":
