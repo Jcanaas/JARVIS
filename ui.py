@@ -44,9 +44,12 @@ from PyQt6.QtWidgets import (
 )
 
 try:
+    # `import vlc` can raise beyond ImportError: python-vlc loads libvlc.dll at
+    # import time, so a missing/mismatched VLC app raises OSError/FileNotFoundError.
+    # Catch broadly so Jarvis still starts and just disables playback.
     import vlc
     HAS_VLC = True
-except ImportError:
+except Exception:
     HAS_VLC = False
 from actions.whatsapp_ui import WhatsAppWindow
 
@@ -8991,7 +8994,7 @@ class MoviesModePanel(QWidget):
                     self._vlc_player.play_url(stream_url)
                     self._status_sig.emit(f"▶ Reproduciendo «{movie.title}» vía {torrent.source}")
                 else:
-                    self._status_sig.emit("VLC no disponible. Instala: pip install python-vlc")
+                    self._status_sig.emit("VLC no disponible. Instala la app VLC de VideoLAN (videolan.org) en 64 bits.")
             except Exception as e:
                 self._status_sig.emit(f"Error iniciando reproducción: {e}")
 
