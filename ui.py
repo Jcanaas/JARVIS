@@ -9171,6 +9171,9 @@ class MoviesModePanel(QWidget):
         if self._current_view != "player" or self._playing_movie is not movie:
             return  # user backed out before the stream was ready
         self._placeholder.hide()
+        # Give the surface a real size before VLC grabs its HWND, otherwise it
+        # renders into a 0-sized window and only audio comes through.
+        self._size_video()
         hwnd = int(self.video_surface.winId())
         self._player.play_url(stream_url, hwnd, self.volume.value())
         for b in (self.play_btn, self.seek, self.volume,
@@ -9238,15 +9241,27 @@ class MoviesModePanel(QWidget):
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
     def _size_video(self):
-        """Fix the in-panel video box to 16:9 based on available width."""
+        """Fix the in-panel video box to a centered 16:9 size.
+
+        Both width and height must be fixed: the box is added with AlignHCenter,
+        so without a fixed width it collapses to its (tiny) size hint and VLC has
+        no surface to draw into.
+        """
         if self._detached_mode is not None:
             return
-        try:
-            w = self.video_box.parentWidget().width() or self.width()
-            h = int(round(min(w, 1100) * 9 / 16))
-            self.video_box.setFixedHeight(max(220, h))
-        except Exception:
-            pass
+        box = getattr(self, "video_box", None)
+        if box is None:
+            return
+        avail_w = self.width() - 40
+        max_h = int(self.height() * 0.74)
+        if avail_w <= 0 or max_h <= 0:
+            return
+        w = avail_w
+        h = int(w * 9 / 16)
+        if h > max_h:
+            h = max_h
+            w = int(h * 16 / 9)
+        box.setFixedSize(max(240, w), max(135, h))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
