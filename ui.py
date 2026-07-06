@@ -8656,6 +8656,7 @@ class MoviesModePanel(QWidget):
     _results_ready = pyqtSignal(list, str, str)
     _status_sig = pyqtSignal(str)
     _show_detail = pyqtSignal(object)
+    _torrents_found = pyqtSignal(list, object)  # (torrents, movie)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -8667,6 +8668,7 @@ class MoviesModePanel(QWidget):
         self._results_ready.connect(self._on_results)
         self._status_sig.connect(self._set_status)
         self._show_detail.connect(self._show_movie_detail)
+        self._torrents_found.connect(self._show_torrent_select)
         QTimer.singleShot(0, self._load_trending)
 
     def _build_ui(self):
@@ -8957,40 +8959,41 @@ class MoviesModePanel(QWidget):
         def work():
             try:
                 from actions import torrent_search as ts
-                from actions import vlc_player as vp
 
                 torrents = ts.search(movie.title, limit=10)
                 if not torrents:
                     self._status_sig.emit("No encontré torrents para esta película")
                     return
 
-                # Show dialog to select torrent
-                def show_dialog():
-                    dialog = _TorrentSelectDialog(torrents, self)
-                    if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_torrent:
-                        torrent = dialog.selected_torrent
-                        self._status_sig.emit(f"▶ Iniciando reproducción (seeders: {torrent.seeders})")
-
-                        try:
-                            # Start peerflix streaming
-                            stream_url = vp.start_streaming(torrent.magnet, movie.title)
-
-                            # Play in VLC
-                            if self._vlc_player:
-                                self._vlc_player.play_url(stream_url)
-                                self._status_sig.emit(f"▶ Reproduciendo «{movie.title}» vía {torrent.source}")
-                            else:
-                                self._status_sig.emit("VLC no disponible. Instala: pip install python-vlc")
-                        except Exception as e:
-                            self._status_sig.emit(f"Error iniciando reproducción: {e}")
-                    else:
-                        self._status_sig.emit("Reproducción cancelada")
-
-                # Schedule dialog on main thread
-                QTimer.singleShot(0, show_dialog)
-
+                # Hand off to the main thread to show the selection dialog.
+                self._torrents_found.emit(torrents, movie)
             except Exception as e:
                 self._status_sig.emit(f"Error buscando torrents: {e}")
+
+        self._run_async(work)
+
+    def _show_torrent_select(self, torrents: list, movie):
+        """Show the torrent selection dialog (runs on the main thread)."""
+        dialog = _TorrentSelectDialog(torrents, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_torrent:
+            self._set_status("Reproducción cancelada")
+            return
+
+        torrent = dialog.selected_torrent
+        self._set_status(f"▶ Iniciando «{movie.title}» (seeders: {torrent.seeders})…")
+
+        def work():
+            try:
+                from actions import vlc_player as vp
+
+                stream_url = vp.start_streaming(torrent.magnet, movie.title)
+                if self._vlc_player:
+                    self._vlc_player.play_url(stream_url)
+                    self._status_sig.emit(f"▶ Reproduciendo «{movie.title}» vía {torrent.source}")
+                else:
+                    self._status_sig.emit("VLC no disponible. Instala: pip install python-vlc")
+            except Exception as e:
+                self._status_sig.emit(f"Error iniciando reproducción: {e}")
 
         self._run_async(work)
 

@@ -52,11 +52,19 @@ function formatBytes(bytes) {
   return `${n.toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
 }
 
+const FETCH_TIMEOUT_MS = 6000;
+
 async function fetchWithRetries(url, opts = {}, retries = 2) {
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url, { headers: { "User-Agent": USER_AGENT }, ...opts });
+      // AbortSignal.timeout caps each request so a hanging host can't stall the
+      // whole search (Node's fetch has no default timeout).
+      const res = await fetch(url, {
+        headers: { "User-Agent": USER_AGENT },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        ...opts,
+      });
       if (res.ok) return res;
       lastError = new Error(`HTTP ${res.status} for ${url}`);
     } catch (e) {
@@ -233,6 +241,11 @@ function parseArgs(argv) {
   return args;
 }
 
+// Overall budget for the whole search. Sources that haven't answered by then are
+// abandoned and we return whatever already arrived, so one slow tracker can't
+// stall the result.
+const OVERALL_TIMEOUT_MS = 8000;
+
 async function main() {
   const { query, kind, limit } = parseArgs(process.argv.slice(3)); // skip "node search.mjs search"
   if (!query) {
@@ -244,11 +257,17 @@ async function main() {
     ? [searchPirateBay(query, "tv"), searchX1337(query, "tv")]
     : [searchYts(query), searchPirateBay(query, "movie"), searchX1337(query, "movie")];
 
-  const settled = await Promise.allSettled(sources);
+  // Each source resolves to its own results, or [] on failure — never rejects —
+  // so Promise.all settles as soon as every source has either answered or timed
+  // out. A global timer races it to cap the total wait.
   const merged = [];
-  for (const s of settled) {
-    if (s.status === "fulfilled") merged.push(...s.value);
-  }
+  const collect = Promise.all(
+    sources.map((p) =>
+      p.then((rows) => merged.push(...rows)).catch(() => {}),
+    ),
+  );
+  const budget = new Promise((resolve) => setTimeout(resolve, OVERALL_TIMEOUT_MS));
+  await Promise.race([collect, budget]);
 
   if (merged.length === 0) {
     console.error("No results from any source");
@@ -266,6 +285,9 @@ async function main() {
   }));
 
   process.stdout.write(JSON.stringify(top));
+  // Force exit: abandoned fetches from slow sources may still be pending and
+  // would otherwise keep the event loop alive past the result being ready.
+  process.exit(0);
 }
 
 main().catch((e) => {

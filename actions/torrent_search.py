@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from actions.paths import resource
 
-_TIMEOUT = 10  # 10s timeout for parallel searches across 3 sources
+_TIMEOUT = 12  # search.mjs self-caps at ~8s; this leaves margin for startup
 _SEARCH_SCRIPT = resource("actions", "vendor", "torlink", "search.mjs")
 
 
