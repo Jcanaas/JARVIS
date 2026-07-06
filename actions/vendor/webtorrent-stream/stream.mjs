@@ -15,7 +15,7 @@
 import WebTorrent from "webtorrent";
 
 const VIDEO_EXT = /\.(mkv|mp4|avi|mov|webm|m4v|flv|wmv|mpg|mpeg|ts)$/i;
-const DEFAULT_PORT = 8888;
+const DEFAULT_PORT = 0; // 0 = ephemeral: OS picks a free port, avoiding clashes
 const READY_TIMEOUT_MS = 45000; // metadata must arrive within this window
 
 function parseArgs(argv) {
@@ -67,14 +67,16 @@ client.add(magnet, (torrent) => {
   httpServer.on("error", (err) => fail(`Stream server error: ${err.message || err}`));
 
   httpServer.listen(port, "127.0.0.1", () => {
+    // With an ephemeral port the OS assigns the real one; read it back.
+    const actualPort = httpServer.address().port;
     // The server matches file.path with backslashes normalized to '/', decoded
     // via decodeURI — so build the URL with forward slashes and encodeURI (its
     // inverse) so a Windows file.path like "Dir\movie.mp4" resolves correctly.
     const normalized = file.path.replace(/\\/g, "/");
     const encodedPath = encodeURI(normalized);
-    const url = `http://127.0.0.1:${port}/webtorrent/${torrent.infoHash}/${encodedPath}`;
+    const url = `http://127.0.0.1:${actualPort}/webtorrent/${torrent.infoHash}/${encodedPath}`;
     process.stdout.write(
-      JSON.stringify({ url, name: file.name, port }) + "\n",
+      JSON.stringify({ url, name: file.name, port: actualPort }) + "\n",
     );
   });
 });

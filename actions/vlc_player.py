@@ -15,7 +15,6 @@ from typing import Optional
 from actions.paths import resource
 
 _STREAM_SCRIPT = resource("actions", "vendor", "webtorrent-stream", "stream.mjs")
-_STREAM_PORT = 8888
 _READY_TIMEOUT = 50  # seconds to wait for the URL line (metadata + peers)
 
 
@@ -55,8 +54,10 @@ def start_streaming(magnet: str, title: str = "") -> str:
 
     node = _locate_node()
 
+    # No --port: the script binds an ephemeral port and reports the real URL,
+    # so repeated plays never clash on a fixed port.
     _stream_process = subprocess.Popen(
-        [node, str(_STREAM_SCRIPT), magnet, "--port", str(_STREAM_PORT)],
+        [node, str(_STREAM_SCRIPT), magnet],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -80,11 +81,19 @@ def start_streaming(magnet: str, title: str = "") -> str:
     reader.join(_READY_TIMEOUT)
 
     if "line" not in result or not result.get("line"):
-        # Grab any stderr for a useful message before tearing down.
+        # Grab any stderr for a useful message. If the process is still alive it
+        # timed out waiting for peers; kill it first so stderr.read() returns.
         err = ""
-        if _stream_process and _stream_process.poll() is not None:
+        proc = _stream_process
+        if proc:
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
             try:
-                err = (_stream_process.stderr.read() or "").strip()
+                err = (proc.stderr.read() or "").strip()
             except Exception:
                 pass
         stop_streaming()
