@@ -208,5 +208,93 @@ class VLCPlayerTests(unittest.TestCase):
         self.assertIsNone(status)
 
 
+# --------------------------------------------------------------------------- #
+# OpenSubtitles                                                              #
+# --------------------------------------------------------------------------- #
+from actions import opensubtitles as osub  # noqa: E402
+
+
+class OpenSubtitlesTests(unittest.TestCase):
+    SEARCH_RESPONSE = {
+        "data": [
+            {
+                "attributes": {
+                    "language": "es",
+                    "release": "Inception.2010.1080p",
+                    "download_count": 5000,
+                    "files": [{"file_id": 111, "file_name": "Inception.es.srt"}],
+                }
+            },
+            {
+                "attributes": {
+                    "language": "es",
+                    "release": "Inception.2010.720p",
+                    "download_count": 9000,
+                    "files": [{"file_id": 222, "file_name": "Inception2.es.srt"}],
+                }
+            },
+        ]
+    }
+
+    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
+    @patch("actions.opensubtitles.requests.get")
+    def test_search_sorts_by_downloads(self, mock_get, mock_key):
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: self.SEARCH_RESPONSE,
+            raise_for_status=lambda: None,
+        )
+        subs = osub.search("inception", language="es")
+        self.assertEqual(len(subs), 2)
+        # Most-downloaded first
+        self.assertEqual(subs[0].file_id, 222)
+        self.assertEqual(subs[0].downloads, 9000)
+
+    @patch("actions.opensubtitles._get_api_key", return_value="")
+    def test_search_without_key_raises(self, mock_key):
+        with self.assertRaises(osub.OpenSubtitlesError):
+            osub.search("anything")
+
+    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
+    def test_search_empty_query_raises(self, mock_key):
+        with self.assertRaises(osub.OpenSubtitlesError):
+            osub.search("   ")
+
+    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
+    @patch("actions.opensubtitles.requests.get", return_value=MagicMock(
+        status_code=200, json=lambda: {"data": []}, raise_for_status=lambda: None))
+    def test_search_no_results_raises(self, mock_get, mock_key):
+        with self.assertRaises(osub.OpenSubtitlesError):
+            osub.search("zzznotexist")
+
+    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
+    @patch("actions.opensubtitles.requests.get")
+    @patch("actions.opensubtitles.requests.post")
+    def test_download_saves_file(self, mock_post, mock_get, mock_key):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"link": "https://dl.example/sub.srt", "file_name": "sub.srt"},
+            raise_for_status=lambda: None,
+        )
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            content=b"1\n00:00:01,000 --> 00:00:02,000\nHola\n",
+            raise_for_status=lambda: None,
+        )
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            path = osub.download(111, dest_dir=Path(tmp))
+            self.assertTrue(path.endswith("sub.srt"))
+            self.assertTrue(Path(path).exists())
+
+    @patch("actions.opensubtitles._get_api_key", return_value="fake_key")
+    @patch("actions.opensubtitles.requests.post", return_value=MagicMock(
+        status_code=200, json=lambda: {"message": "quota"}, raise_for_status=lambda: None))
+    def test_download_no_link_raises(self, mock_post, mock_key):
+        with self.assertRaises(osub.OpenSubtitlesError):
+            osub.download(111)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

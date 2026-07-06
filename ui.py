@@ -8754,6 +8754,22 @@ class _VLCBackend:
         if self.player:
             self.player.video_set_spu_delay(int(microseconds))
 
+    def add_subtitle_file(self, path: str) -> bool:
+        """Load an external subtitle file and select it."""
+        if not self.player:
+            return False
+        try:
+            uri = Path(path).as_uri()
+            # add_slave(type, uri, select_now)
+            self.player.add_slave(vlc.MediaSlaveType.Subtitle, uri, True)
+            return True
+        except Exception:
+            try:  # older python-vlc fallback
+                self.player.video_set_subtitle_file(path)
+                return True
+            except Exception:
+                return False
+
 
 class MoviesModePanel(QWidget):
     """Movie/TV discovery with poster grid and detail view."""
@@ -8764,6 +8780,7 @@ class MoviesModePanel(QWidget):
     _torrents_found = pyqtSignal(list, object)  # (torrents, movie)
     _stream_ready = pyqtSignal(str, object)  # (stream_url, movie)
     _pos_sig = pyqtSignal(float, float, bool)  # position, duration, playing
+    _subtitle_ready = pyqtSignal(str, str)  # (srt_path, label)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -8790,6 +8807,7 @@ class MoviesModePanel(QWidget):
         self._torrents_found.connect(self._show_torrent_select)
         self._stream_ready.connect(self._on_stream_ready)
         self._pos_sig.connect(self._apply_position)
+        self._subtitle_ready.connect(self._on_subtitle_ready)
         QTimer.singleShot(0, self._load_trending)
 
     def _build_ui(self):
@@ -9281,6 +9299,15 @@ class MoviesModePanel(QWidget):
             act = menu.addAction(("● " if tid == current else "     ") + self._track_label(name))
             act.triggered.connect(lambda _=False, i=tid: self._player.set_subtitle(i))
 
+        # Download subtitles from OpenSubtitles.
+        menu.addSeparator()
+        online = menu.addAction("Buscar subtítulos online…")
+        online.setEnabled(False)
+        es = menu.addAction("   Español (OpenSubtitles)")
+        es.triggered.connect(lambda: self._fetch_online_subs("es"))
+        en = menu.addAction("   Inglés (OpenSubtitles)")
+        en.triggered.connect(lambda: self._fetch_online_subs("en"))
+
         # Subtitle sync adjustment (delay is in microseconds).
         menu.addSeparator()
         delay_ms = int(self._player.get_subtitle_delay() / 1000)
@@ -9298,6 +9325,32 @@ class MoviesModePanel(QWidget):
     def _nudge_subs(self, delta_us: int):
         if self._player and self._player.available():
             self._player.set_subtitle_delay(self._player.get_subtitle_delay() + delta_us)
+
+    def _fetch_online_subs(self, language: str):
+        """Search + download subtitles from OpenSubtitles on a worker thread."""
+        movie = self._playing_movie
+        if movie is None:
+            return
+        lang_name = {"es": "español", "en": "inglés"}.get(language, language)
+        self._set_status(f"Buscando subtítulos en {lang_name}…")
+
+        def work():
+            try:
+                from actions import opensubtitles as osub
+                year = int(getattr(movie, "release_year", 0) or 0)
+                path = osub.fetch_subtitle(movie.title, language=language, year=year)
+                self._subtitle_ready.emit(path, lang_name)
+            except Exception as e:
+                self._status_sig.emit(f"Subtítulos: {e}")
+
+        self._run_async(work)
+
+    def _on_subtitle_ready(self, srt_path: str, label: str):
+        """Load a downloaded subtitle into VLC (main thread)."""
+        if self._player and self._player.add_subtitle_file(srt_path):
+            self._set_status(f"✓ Subtítulos en {label} cargados")
+        else:
+            self._set_status("No se pudieron cargar los subtítulos")
 
     def _start_poller(self):
         if self._poll_thread is not None and self._poll_thread.is_alive():
