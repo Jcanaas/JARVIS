@@ -1,4 +1,5 @@
 """Tests for torrent-based streaming (movie_search, torrent_search, peerflix_player)."""
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -94,24 +95,22 @@ class MovieSearchTests(unittest.TestCase):
 # Torrent Search                                                             #
 # --------------------------------------------------------------------------- #
 class TorrentSearchTests(unittest.TestCase):
-    SEARCH_HTML = """
-    <html>
-      <table>
-        <tbody>
-          <tr>
-            <td><a href="/torrent/12345/fight-club/">Fight Club 1999 1080p</a></td>
-            <td>500</td>
-            <td>100</td>
-          </tr>
-          <tr>
-            <td><a href="/torrent/12346/fight-club-hd/">Fight Club HD</a></td>
-            <td>300</td>
-            <td>50</td>
-          </tr>
-        </tbody>
-      </table>
-    </html>
-    """
+    TORLINK_JSON = [
+        {
+            "name": "Fight Club 1999 1080p",
+            "magnet": "magnet:?xt=urn:btih:abc123",
+            "seeders": 500,
+            "leechers": 100,
+            "size": "1.4GB",
+        },
+        {
+            "name": "Fight Club HD",
+            "magnet": "magnet:?xt=urn:btih:def456",
+            "seeders": 300,
+            "leechers": 50,
+            "size": "700MB",
+        },
+    ]
 
     def test_torrent_dataclass(self):
         t = ts.Torrent("Fight Club", "magnet:?xt=urn:btih:abc", seeders=500, leechers=100)
@@ -121,8 +120,8 @@ class TorrentSearchTests(unittest.TestCase):
         self.assertIn("title", d)
         self.assertIn("magnet", d)
 
-    @patch("actions.torrent_search._get_working_domain", return_value=None)
-    def test_search_all_domains_down_raises(self, mock_domain):
+    @patch("actions.torrent_search._locate_torlink", side_effect=ts.TorrentSearchError("not found"))
+    def test_search_without_torlink_raises(self, mock_locate):
         with self.assertRaises(ts.TorrentSearchError):
             ts.search("anything")
 
@@ -130,16 +129,17 @@ class TorrentSearchTests(unittest.TestCase):
         with self.assertRaises(ts.TorrentSearchError):
             ts.search("   ")
 
-    @patch("actions.torrent_search._get_working_domain", return_value="https://1337x.to")
-    @patch("actions.torrent_search.requests.head")
-    def test_get_working_domain_tries_all(self, mock_head, _):
-        # First call fails, second succeeds
-        mock_head.side_effect = [
-            Exception("down"),
-            MagicMock(status_code=200),
-        ]
-        domain = ts._get_working_domain()
-        self.assertIsNotNone(domain)
+    @patch("actions.torrent_search._locate_torlink", return_value="torlink")
+    @patch("actions.torrent_search.subprocess.run")
+    def test_search_parses_torlink_json(self, mock_run, mock_locate):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(self.TORLINK_JSON),
+        )
+        torrents = ts.search("fight club", limit=2)
+        self.assertEqual(len(torrents), 2)
+        self.assertEqual(torrents[0].title, "Fight Club 1999 1080p")
+        self.assertEqual(torrents[0].seeders, 500)
 
     @patch("actions.torrent_search.search")
     def test_search_action_returns_formatted_string(self, mock_search):
@@ -157,52 +157,36 @@ class TorrentSearchTests(unittest.TestCase):
 # Peerflix Player                                                            #
 # --------------------------------------------------------------------------- #
 class PeerflixPlayerTests(unittest.TestCase):
-    @patch("actions.peerflix_player.shutil.which")
-    def test_locate_peerflix_finds_global(self, which):
-        which.return_value = "/usr/local/bin/peerflix"
-        exe = pp._locate_peerflix()
-        self.assertEqual(exe, "/usr/local/bin/peerflix")
-
-    @patch("actions.peerflix_player.shutil.which")
-    def test_locate_peerflix_falls_back_to_npx(self, which):
-        # First call (peerflix) returns None, second (npx) succeeds
-        which.side_effect = [None, "/usr/local/bin/npx"]
-        exe = pp._locate_peerflix()
-        self.assertIn("npx", exe)
-
-    @patch("actions.peerflix_player.shutil.which", return_value=None)
-    def test_locate_peerflix_all_fail_raises(self, which):
-        with self.assertRaises(pp.PeerflixError):
-            pp._locate_peerflix()
-
-    @patch("actions.peerflix_player._locate_peerflix", return_value="peerflix")
-    @patch("actions.peerflix_player.subprocess.Popen")
-    def test_play_launches_peerflix(self, popen, locate):
-        proc = MagicMock()
-        popen.return_value = proc
+    @patch("actions.peerflix_player.webbrowser.open")
+    def test_play_opens_peerflix_url(self, mock_open):
         magnet = "magnet:?xt=urn:btih:abc123"
         result = pp.play(magnet, "Fight Club")
-        self.assertEqual(result, proc)
-        # Verify command includes magnet and title
-        cmd = popen.call_args[0][0]
-        self.assertIn(magnet, cmd)
-        self.assertIn("Fight Club", cmd)
+        self.assertTrue(result)
+        mock_open.assert_called_once()
+        # Verify URL contains peerflix.mov
+        url = mock_open.call_args[0][0]
+        self.assertIn("peerflix.mov", url)
+        self.assertIn("magnet=", url)
 
-    @patch("actions.peerflix_player._locate_peerflix", side_effect=pp.PeerflixError("not found"))
-    def test_play_without_peerflix_raises(self, locate):
+    @patch("actions.peerflix_player.webbrowser.open")
+    def test_play_encodes_magnet_and_title(self, mock_open):
+        magnet = "magnet:?xt=urn:btih:test&tr=tracker"
+        result = pp.play(magnet, "My Movie")
+        self.assertTrue(result)
+        url = mock_open.call_args[0][0]
+        self.assertIn("title=", url)
+        # Verify URL encoding (? and & should be encoded)
+        self.assertNotIn("?xt=", url)
+
+    @patch("actions.peerflix_player.webbrowser.open", side_effect=Exception("No browser"))
+    def test_play_without_browser_raises(self, mock_open):
         with self.assertRaises(pp.PeerflixError):
             pp.play("magnet:?xt=urn:btih:abc")
 
-    @patch("actions.peerflix_player._locate_peerflix", return_value="peerflix")
-    def test_get_status_when_available(self, locate):
+    def test_get_status_always_ready(self):
         status = pp.get_status()
         self.assertIsNotNone(status)
         self.assertIn("ready", status)
-
-    @patch("actions.peerflix_player._locate_peerflix", side_effect=pp.PeerflixError("not found"))
-    def test_get_status_when_unavailable(self, locate):
-        status = pp.get_status()
-        self.assertIsNone(status)
 
 
 if __name__ == "__main__":
