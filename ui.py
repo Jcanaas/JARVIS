@@ -8617,40 +8617,211 @@ class _MovieCard(QWidget):
 
 
 class _VLCWidget(QWidget):
-    """Embeds a VLC player in PyQt6."""
+    """Embedded VLC video player with playback controls.
+
+    Renders video into a Qt surface (no external window) and exposes a control
+    bar: play/pause, seek, ±10s skip, volume, and audio-track / subtitle menus.
+    """
+
+    closed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.instance = None
-        self.media_list_player = None
+        self.player = None
+        self._dragging = False
 
         if HAS_VLC:
             try:
                 self.instance = vlc.Instance()
-                self.media_list_player = self.instance.media_list_player_new()
+                self.player = self.instance.media_player_new()
             except Exception:
-                pass
+                self.instance = None
+                self.player = None
 
+        self._build_ui()
+
+        # Poll position/duration a few times a second to drive the seek bar.
+        self._timer = QTimer(self)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self._tick)
+
+    # -- UI -----------------------------------------------------------------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Video surface (VLC renders into this via set_hwnd).
+        self._video = QFrame()
+        self._video.setStyleSheet("background:#000;")
+        self._video.setMinimumHeight(320)
+        root.addWidget(self._video, stretch=1)
+
+        # Control bar.
+        bar = QHBoxLayout()
+        bar.setContentsMargins(10, 8, 10, 10)
+        bar.setSpacing(8)
+
+        self._play_btn = self._tool("⏸", self.toggle_pause)
+        bar.addWidget(self._play_btn)
+        bar.addWidget(self._tool("⏮ 10", lambda: self.skip(-10000)))
+        bar.addWidget(self._tool("10 ⏭", lambda: self.skip(10000)))
+
+        self._elapsed = QLabel("0:00")
+        self._elapsed.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; font-size:11px;")
+        bar.addWidget(self._elapsed)
+
+        self._seek = QSlider(Qt.Orientation.Horizontal)
+        self._seek.setRange(0, 1000)
+        self._seek.sliderPressed.connect(lambda: setattr(self, "_dragging", True))
+        self._seek.sliderReleased.connect(self._on_seek_released)
+        bar.addWidget(self._seek, stretch=1)
+
+        self._duration = QLabel("0:00")
+        self._duration.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; font-size:11px;")
+        bar.addWidget(self._duration)
+
+        # Audio track + subtitle menus.
+        self._audio_btn = self._tool("🔊 Audio", self._show_audio_menu)
+        bar.addWidget(self._audio_btn)
+        self._sub_btn = self._tool("💬 Subs", self._show_subs_menu)
+        bar.addWidget(self._sub_btn)
+
+        self._vol = QSlider(Qt.Orientation.Horizontal)
+        self._vol.setFixedWidth(90)
+        self._vol.setRange(0, 100)
+        self._vol.setValue(90)
+        self._vol.valueChanged.connect(self._on_volume)
+        bar.addWidget(self._vol)
+
+        bar.addWidget(self._tool("✕", self._on_close))
+
+        holder = QWidget()
+        holder.setStyleSheet(f"background:{C.PANEL};")
+        holder.setLayout(bar)
+        root.addWidget(holder)
+
+    def _tool(self, label: str, cb) -> QPushButton:
+        b = QPushButton(label)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setFixedHeight(30)
+        b.setStyleSheet(f"""
+            QPushButton {{
+                background:{C.PANEL2}; color:{C.TEXT};
+                border:1px solid {C.BORDER}; border-radius:6px;
+                padding:0 10px; font-size:11px;
+            }}
+            QPushButton:hover {{ border-color:{C.PRI}; }}
+        """)
+        b.clicked.connect(lambda _=False: cb())
+        return b
+
+    # -- Playback -----------------------------------------------------------
     def play_url(self, url: str):
-        """Play a URL in VLC."""
-        if not HAS_VLC or not self.instance:
+        if not self.player or not self.instance:
             return
         try:
             media = self.instance.media_new(url)
-            media_list = self.instance.media_list_new()
-            media_list.add_media(media)
-            self.media_list_player.set_media_list(media_list)
-            self.media_list_player.play()
+            self.player.set_media(media)
+            # Bind VLC's output to our Qt frame so it renders inline (no popup).
+            self.player.set_hwnd(int(self._video.winId()))
+            self.player.audio_set_volume(self._vol.value())
+            self.player.play()
+            self._play_btn.setText("⏸")
+            self._timer.start()
         except Exception:
             pass
 
+    def toggle_pause(self):
+        if not self.player:
+            return
+        self.player.pause()  # toggles
+        playing = self.player.is_playing()
+        self._play_btn.setText("⏸" if playing else "▶")
+
+    def skip(self, delta_ms: int):
+        if not self.player:
+            return
+        t = self.player.get_time()
+        if t < 0:
+            return
+        self.player.set_time(max(0, t + delta_ms))
+
+    def _on_seek_released(self):
+        self._dragging = False
+        if not self.player:
+            return
+        length = self.player.get_length()
+        if length > 0:
+            self.player.set_time(int(length * self._seek.value() / 1000))
+
+    def _on_volume(self, value: int):
+        if self.player:
+            self.player.audio_set_volume(int(value))
+
+    def _tick(self):
+        if not self.player or self._dragging:
+            return
+        length = self.player.get_length()
+        t = self.player.get_time()
+        if length > 0:
+            self._seek.setValue(int(1000 * t / length))
+            self._duration.setText(self._fmt(length))
+        self._elapsed.setText(self._fmt(t))
+
+    @staticmethod
+    def _fmt(ms: int) -> str:
+        if ms is None or ms < 0:
+            return "0:00"
+        s = ms // 1000
+        h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+    # -- Track menus --------------------------------------------------------
+    def _show_audio_menu(self):
+        if not self.player:
+            return
+        self._track_menu(self.player.audio_get_track_description(),
+                         self.player.audio_get_track(),
+                         self.player.audio_set_track,
+                         self._audio_btn)
+
+    def _show_subs_menu(self):
+        if not self.player:
+            return
+        self._track_menu(self.player.video_get_spu_description(),
+                         self.player.video_get_spu(),
+                         self.player.video_set_spu,
+                         self._sub_btn)
+
+    def _track_menu(self, descriptions, current, setter, anchor):
+        menu = QMenu(self)
+        try:
+            for tid, name in descriptions or []:
+                label = name.decode("utf-8", "ignore") if isinstance(name, bytes) else str(name)
+                act = menu.addAction(("● " if tid == current else "   ") + label)
+                act.triggered.connect(lambda _=False, i=tid: setter(i))
+        except Exception:
+            return
+        if menu.actions():
+            menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    # -- Lifecycle ----------------------------------------------------------
     def stop(self):
-        """Stop playback."""
-        if self.media_list_player:
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        if self.player:
             try:
-                self.media_list_player.stop()
+                self.player.stop()
             except Exception:
                 pass
+
+    def _on_close(self):
+        self.stop()
+        self.closed.emit()
 
 
 class MoviesModePanel(QWidget):
@@ -8660,11 +8831,12 @@ class MoviesModePanel(QWidget):
     _status_sig = pyqtSignal(str)
     _show_detail = pyqtSignal(object)
     _torrents_found = pyqtSignal(list, object)  # (torrents, movie)
+    _stream_ready = pyqtSignal(str, object)  # (stream_url, movie)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list = []
-        self._current_view = "grid"  # "grid" | "detail"
+        self._current_view = "grid"  # "grid" | "detail" | "player"
         self._detail_movie = None
         self._vlc_player = _VLCWidget(self) if HAS_VLC else None
         self._build_ui()
@@ -8672,6 +8844,7 @@ class MoviesModePanel(QWidget):
         self._status_sig.connect(self._set_status)
         self._show_detail.connect(self._show_movie_detail)
         self._torrents_found.connect(self._show_torrent_select)
+        self._stream_ready.connect(self._on_stream_ready)
         QTimer.singleShot(0, self._load_trending)
 
     def _build_ui(self):
@@ -8683,7 +8856,7 @@ class MoviesModePanel(QWidget):
         header_lay = QHBoxLayout()
         self._back_btn = QPushButton("←")
         self._back_btn.setFixedSize(36, 36)
-        self._back_btn.clicked.connect(self._show_grid_view)
+        self._back_btn.clicked.connect(self._on_back)
         self._back_btn.setVisible(False)
         self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._back_btn.setStyleSheet(f"background:{C.PANEL2}; border:1px solid {C.BORDER}; border-radius:6px;")
@@ -8757,6 +8930,11 @@ class MoviesModePanel(QWidget):
         detail_scroll.setWidget(self._detail_content)
         detail_lay.addWidget(detail_scroll)
         self._stack.addWidget(detail_container)
+
+        # Player view (index 2) — embedded VLC with controls.
+        if self._vlc_player:
+            self._vlc_player.closed.connect(self._close_player)
+            self._stack.addWidget(self._vlc_player)
 
         root.addWidget(self._stack, stretch=1)
 
@@ -8855,6 +9033,13 @@ class MoviesModePanel(QWidget):
 
         self._grid.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding),
                           (len(items) // 4) + 1, 0, 1, 4)
+
+    def _on_back(self):
+        """Contextual back: from the player, stop it; otherwise go to the grid."""
+        if self._current_view == "player":
+            self._close_player()
+        else:
+            self._show_grid_view()
 
     def _show_grid_view(self):
         self._current_view = "grid"
@@ -8983,22 +9168,46 @@ class MoviesModePanel(QWidget):
             return
 
         torrent = dialog.selected_torrent
-        self._set_status(f"▶ Iniciando «{movie.title}» (seeders: {torrent.seeders})…")
+        if not self._vlc_player:
+            self._set_status("VLC no disponible. Instala la app VLC de VideoLAN (videolan.org) en 64 bits.")
+            return
+
+        self._set_status(f"▶ Preparando «{movie.title}» (seeders: {torrent.seeders})… puede tardar unos segundos")
 
         def work():
             try:
                 from actions import vlc_player as vp
 
                 stream_url = vp.start_streaming(torrent.magnet, movie.title)
-                if self._vlc_player:
-                    self._vlc_player.play_url(stream_url)
-                    self._status_sig.emit(f"▶ Reproduciendo «{movie.title}» vía {torrent.source}")
-                else:
-                    self._status_sig.emit("VLC no disponible. Instala la app VLC de VideoLAN (videolan.org) en 64 bits.")
+                # Playback touches Qt widgets, so hand the URL to the main thread.
+                self._stream_ready.emit(stream_url, movie)
             except Exception as e:
                 self._status_sig.emit(f"Error iniciando reproducción: {e}")
 
         self._run_async(work)
+
+    def _on_stream_ready(self, stream_url: str, movie):
+        """Switch to the player view and start playback (main thread)."""
+        self._current_view = "player"
+        self._back_btn.setVisible(True)
+        self._title.setText(f"▶ {movie.title}")
+        self._stack.setCurrentWidget(self._vlc_player)
+        self._vlc_player.play_url(stream_url)
+        self._set_status(f"▶ Reproduciendo «{movie.title}»")
+
+    def _close_player(self):
+        """Stop playback + streaming and return to the detail view."""
+        if self._vlc_player:
+            self._vlc_player.stop()
+        try:
+            from actions import vlc_player as vp
+            self._run_async(vp.stop_streaming)
+        except Exception:
+            pass
+        if self._detail_movie:
+            self._show_movie_detail(self._detail_movie)
+        else:
+            self._show_grid_view()
 
 
 class SettingsModePanel(QWidget):
