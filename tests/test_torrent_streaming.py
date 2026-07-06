@@ -262,11 +262,23 @@ class OpenSubtitlesTests(unittest.TestCase):
         with self.assertRaises(osub.OpenSubtitlesError):
             osub.search("   ")
 
+    @patch("actions.opensubtitles.time.sleep", lambda *a: None)
     @patch("actions.opensubtitles.requests.get", return_value=MagicMock(
         status_code=200, json=lambda: [], raise_for_status=lambda: None))
     def test_search_no_results_raises(self, mock_get):
         with self.assertRaises(osub.OpenSubtitlesError):
             osub.search("zzznotexist")
+
+    @patch("actions.opensubtitles.time.sleep", lambda *a: None)
+    @patch("actions.opensubtitles.requests.get")
+    def test_search_retries_then_succeeds(self, mock_get):
+        # First call returns empty (rate-limited), second returns results.
+        empty = MagicMock(status_code=200, json=lambda: [], raise_for_status=lambda: None)
+        full = MagicMock(status_code=200, json=lambda: self.SEARCH_RESPONSE,
+                         raise_for_status=lambda: None)
+        mock_get.side_effect = [empty, full]
+        subs = osub.search("inception", language="es")
+        self.assertTrue(len(subs) >= 1)
 
     @patch("actions.opensubtitles.requests.get")
     def test_download_decompresses_gzip(self, mock_get):

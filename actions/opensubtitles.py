@@ -11,6 +11,7 @@ fetched twice.
 from __future__ import annotations
 
 import gzip
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,12 @@ API_BASE = "https://rest.opensubtitles.org/search"
 _USER_AGENT = "TemporaryUserAgent"
 _TIMEOUT = 12
 _CACHE_DIR = memory_path("subtitles")
+
+# The public endpoint occasionally rate-limits (429/5xx) or returns an empty
+# list under load even when subtitles exist; retry a few times with backoff.
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_BACKOFF = 1.0  # seconds, multiplied by attempt number
 
 # 2-letter (or already 3-letter) code -> OpenSubtitles 3-letter sublanguageid.
 _LANG_MAP = {
@@ -68,6 +75,25 @@ def _lang_id(language: str) -> str:
     return _LANG_MAP.get(language.lower(), "spa")
 
 
+def _get(url: str) -> requests.Response:
+    """GET with retries on transient rate-limit/server errors."""
+    last_err = "unknown error"
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            r = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT)
+            if r.status_code in _RETRY_STATUS:
+                last_err = f"HTTP {r.status_code} (busy)"
+                time.sleep(_BACKOFF * attempt)
+                continue
+            r.raise_for_status()
+            return r
+        except requests.RequestException as exc:
+            last_err = str(exc)
+            if attempt < _MAX_RETRIES:
+                time.sleep(_BACKOFF * attempt)
+    raise OpenSubtitlesError(f"OpenSubtitles unreachable: {last_err}")
+
+
 def search(query: str, language: str = "es", year: int = 0, limit: int = 10) -> list[Subtitle]:
     """Search OpenSubtitles for subtitles matching a title.
 
@@ -92,17 +118,24 @@ def search(query: str, language: str = "es", year: int = 0, limit: int = 10) -> 
     # url-encoded within the /query-.../sublanguageid-.../ segments.
     url = f"{API_BASE}/query-{quote(query)}/sublanguageid-{lang_id}"
 
-    try:
-        r = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-    except requests.RequestException as exc:
-        raise OpenSubtitlesError(f"OpenSubtitles search failed: {exc}") from exc
-    except ValueError as exc:
-        raise OpenSubtitlesError(f"Invalid OpenSubtitles response: {exc}") from exc
+    # An empty list can mean "no results" OR a silent rate-limit; retry a couple
+    # of times before believing there are genuinely none.
+    data = []
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            data = _get(url).json()
+        except ValueError as exc:
+            raise OpenSubtitlesError(f"Invalid OpenSubtitles response: {exc}") from exc
+        if isinstance(data, list) and data:
+            break
+        if attempt < _MAX_RETRIES:
+            time.sleep(_BACKOFF * attempt)
 
     if not isinstance(data, list) or not data:
-        raise OpenSubtitlesError(f"No subtitles found for '{query}'.")
+        raise OpenSubtitlesError(
+            f"OpenSubtitles no devolvió resultados para '{query}'. "
+            "Puede ser un límite temporal; prueba de nuevo en unos segundos."
+        )
 
     results: list[Subtitle] = []
     for item in data:
@@ -169,12 +202,7 @@ def download(subtitle, dest_dir: Optional[Path] = None) -> str:
         name = f"{Path(name).stem or 'subtitle'}.srt"
     dest = dest_dir / name
 
-    try:
-        r = requests.get(link, headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT)
-        r.raise_for_status()
-        raw = r.content
-    except requests.RequestException as exc:
-        raise OpenSubtitlesError(f"Subtitle download failed: {exc}") from exc
+    raw = _get(link).content
 
     # The legacy endpoint serves gzip-compressed subtitles; fall back to raw
     # bytes if the payload isn't actually gzipped.
