@@ -15,6 +15,8 @@ try:
 except ImportError:
     _PYAUTOGUI = False
 
+from actions import event_bus
+
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 
@@ -81,7 +83,7 @@ def _build_sandbox() -> dict:
     return sandbox
 
 
-def _execute_generated_code(code: str, player=None) -> str:
+def _execute_generated_code(code: str) -> str:
     if not code or code.strip() == "UNSAFE":
         return "This action cannot be performed safely."
 
@@ -104,9 +106,8 @@ def _execute_generated_code(code: str, player=None) -> str:
 
 def _ask_gemini_for_desktop_action(task: str) -> str:
 
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    from actions.genai_client import get_model
+    model = get_model("gemma-4-26b-a4b-it")
 
     desktop = str(_get_desktop())
 
@@ -415,7 +416,6 @@ def get_desktop_stats() -> str:
 def desktop_control(
     parameters: dict = None,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
     """
@@ -432,8 +432,7 @@ def desktop_control(
     action = params.get("action", "").lower().strip()
     task   = params.get("task", "").strip()
 
-    if player:
-        player.write_log(f"[desktop] {action or task[:40]}")
+    event_bus.log("desktop", f"[desktop] {action or task[:40]}")
 
     try:
         if action == "wallpaper":
@@ -465,16 +464,15 @@ def desktop_control(
                 return "Please describe what you want to do on the desktop."
 
             print(f"[Desktop] Asking Gemini: {actual_task}")
-            if player:
-                player.write_log("[Desktop] Generating action...")
+            event_bus.log("Desktop", "[Desktop] Generating action...")
 
             code = _ask_gemini_for_desktop_action(actual_task)
-            return _execute_generated_code(code, player=player)
+            return _execute_generated_code(code)
 
         else:
             if action:
                 code = _ask_gemini_for_desktop_action(action)
-                return _execute_generated_code(code, player=player)
+                return _execute_generated_code(code)
             return "No action or task specified."
 
     except Exception as e:

@@ -3,6 +3,8 @@ import subprocess
 import platform
 import shutil
 
+from actions import event_bus
+
 try:
     import psutil
     _PSUTIL = True
@@ -224,7 +226,6 @@ _OS_LAUNCHERS = {
 def open_app(
     parameters=None,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
     app_name = (parameters or {}).get("app_name", "").strip()
@@ -239,8 +240,7 @@ def open_app(
     normalized = _normalize(app_name)
     print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")
 
-    if player:
-        player.write_log(f"[open_app] {app_name}")
+    event_bus.log("open_app", f"[open_app] {app_name}")
 
     try:
         if launcher(normalized):

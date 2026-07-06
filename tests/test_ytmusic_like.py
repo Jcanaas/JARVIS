@@ -51,23 +51,40 @@ class YTMusicLikeTests(unittest.TestCase):
         self.assertEqual(ytmusic_headless.current()["videoId"], "song-id")
 
     @patch("actions.ytmusic_headless._send_command")
-    @patch("actions.ytmusic_headless._start_mpv")
-    @patch("actions.ytmusic_headless._resolve_stream_for_video", return_value=(None, 0))
+    @patch("actions.ytmusic_headless._start_mpv", return_value=False)
     @patch("actions.ytmusic_headless._wait_cached_stream", return_value=(None, 0))
     @patch("actions.ytmusic_headless._cached_stream", return_value=(None, 0))
-    def test_headless_does_not_send_page_url_when_stream_resolution_fails(
+    def test_headless_does_not_send_loadfile_when_mpv_fails_to_start(
         self,
         _cached,
         _wait,
-        _resolve,
         start,
         send,
     ):
         result = ytmusic_headless._play_video("song-id", "Song", "Artist")
 
-        self.assertIn("No se pudo resolver", result)
-        start.assert_not_called()
+        self.assertIn("mpv no pudo arrancarse", result)
         send.assert_not_called()
+
+    @patch("actions.ytmusic_headless._prefetch_next_tracks")
+    @patch("actions.ytmusic_headless._ensure_autoplay_worker")
+    @patch("actions.ytmusic_headless._send_command", return_value=False)
+    @patch("actions.ytmusic_headless._start_mpv", return_value=True)
+    @patch("actions.ytmusic_headless._wait_cached_stream", return_value=(None, 0))
+    @patch("actions.ytmusic_headless._cached_stream", return_value=(None, 0))
+    def test_headless_reports_error_when_loadfile_fails(
+        self,
+        _cached,
+        _wait,
+        start,
+        send,
+        _worker,
+        _prefetch,
+    ):
+        result = ytmusic_headless._play_video("song-id", "Song", "Artist")
+
+        self.assertIn("No se pudo cargar la canción", result)
+        _worker.assert_not_called()
 
 
 if __name__ == "__main__":

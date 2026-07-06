@@ -10,6 +10,8 @@ from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote_plus
 
+from actions import event_bus
+
 import pyautogui
 import numpy as np
 
@@ -560,18 +562,17 @@ def _get_transcript(video_id: str) -> str | None:
 
 
 def _summarize_with_gemini(transcript: str, video_url: str) -> str:
-    import google.generativeai as genai
+    from actions.genai_client import get_model
 
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
+    model = get_model(
+        "gemma-4-26b-a4b-it",
         system_instruction=(
             "You are JARVIS, an AI assistant. "
             "Summarize YouTube video transcripts clearly and concisely. "
             "Structure: 1-sentence overview, then 3-5 key points. "
             "Be direct. Address the user as 'sir'. "
             "Match the language of the transcript."
-        )
+        ),
     )
 
     max_chars = 80000
@@ -670,13 +671,12 @@ def _scrape_trending(region: str = "TR", max_results: int = 8) -> list[dict]:
         print(f"[YouTube] ⚠️ Trending scrape failed: {e}")
         return []
 
-def _handle_play(parameters: dict, player) -> str:
+def _handle_play(parameters: dict) -> str:
     query = parameters.get("query", "").strip()
     if not query:
         return "Please tell me what you'd like to watch, sir."
 
-    if player:
-        player.write_log(f"[YouTube] Searching: {query}")
+    event_bus.log("YouTube", f"[YouTube] Searching: {query}")
 
     print(f"[YouTube] 🔍 Scraping first non-Shorts video for: {query}")
 
@@ -697,7 +697,7 @@ def _handle_play(parameters: dict, player) -> str:
     return f"Opened YouTube search for: {query} (manual selection required)"
 
 
-def _handle_summarize(parameters: dict, player, speak) -> str:
+def _handle_summarize(parameters: dict, speak) -> str:
     if not _TRANSCRIPT_OK:
         return "youtube-transcript-api is not installed. Run: pip install youtube-transcript-api"
 
@@ -711,8 +711,7 @@ def _handle_summarize(parameters: dict, player, speak) -> str:
     if not video_id:
         return "Could not extract video ID from that URL, sir."
 
-    if player:
-        player.write_log(f"[YouTube] Summarizing: {url}")
+    event_bus.log("YouTube", f"[YouTube] Summarizing: {url}")
     if speak:
         speak("Fetching the transcript now, sir. One moment.")
 
@@ -738,7 +737,7 @@ def _handle_summarize(parameters: dict, player, speak) -> str:
     return summary
 
 
-def _handle_get_info(parameters: dict, player, speak) -> str:
+def _handle_get_info(parameters: dict, speak) -> str:
     url = parameters.get("url", "").strip()
     if not url:
         url = _ask_for_url("Please paste the YouTube video URL:")
@@ -749,8 +748,7 @@ def _handle_get_info(parameters: dict, player, speak) -> str:
     if not video_id:
         return "Could not extract video ID, sir."
 
-    if player:
-        player.write_log(f"[YouTube] Getting info: {url}")
+    event_bus.log("YouTube", f"[YouTube] Getting info: {url}")
 
     info = _scrape_video_info(video_id)
     if not info:
@@ -769,11 +767,10 @@ def _handle_get_info(parameters: dict, player, speak) -> str:
     return result
 
 
-def _handle_trending(parameters: dict, player, speak) -> str:
+def _handle_trending(parameters: dict, speak) -> str:
     region = parameters.get("region", "TR").upper()
 
-    if player:
-        player.write_log(f"[YouTube] Trending: {region}")
+    event_bus.log("YouTube", f"[YouTube] Trending: {region}")
 
     trending = _scrape_trending(region=region, max_results=8)
     if not trending:
@@ -793,7 +790,7 @@ def _handle_trending(parameters: dict, player, speak) -> str:
     return result
 
 
-def _handle_download_video(parameters: dict, player, speak) -> str:
+def _handle_download_video(parameters: dict, speak) -> str:
     query_or_url = (
         parameters.get("url")
         or parameters.get("query")
@@ -804,41 +801,40 @@ def _handle_download_video(parameters: dict, player, speak) -> str:
     quality = parameters.get("quality") or ""
     if not str(quality).strip():
         return "Antes de descargar el video, dime qué calidad quieres: baja, media, alta o best."
-    if player:
-        player.write_log(f"[YouTube] Downloading video: {query_or_url}")
+    event_bus.log("YouTube", f"[YouTube] Downloading video: {query_or_url}")
     result = download_video(query_or_url, output_dir=output_dir, quality=quality)
     if speak and isinstance(result, str) and not result.lower().startswith(("yt-dlp is not", "no valid")):
         speak("Video downloaded, sir.")
     return result
 
 
-def _handle_download_status(parameters: dict, player, speak) -> dict:
+def _handle_download_status(parameters: dict, speak) -> dict:
     return download_status()
 
 
-def _handle_open_download_folder(parameters: dict, player, speak) -> str:
+def _handle_open_download_folder(parameters: dict, speak) -> str:
     kind = parameters.get("kind", "video")
     return open_download_folder(kind)
 
 
-def _handle_cleanup_partial_downloads(parameters: dict, player, speak) -> list[str]:
+def _handle_cleanup_partial_downloads(parameters: dict, speak) -> list[str]:
     kind = parameters.get("kind", "video")
     return cleanup_partial_downloads(kind)
 
 
-def _handle_retry_failed_downloads(parameters: dict, player, speak) -> list[str]:
+def _handle_retry_failed_downloads(parameters: dict, speak) -> list[str]:
     output_dir = parameters.get("output_dir") or parameters.get("path") or ""
     return retry_failed_downloads(output_dir=output_dir)
 
 
-def _handle_set_default_quality(parameters: dict, player, speak) -> dict:
+def _handle_set_default_quality(parameters: dict, speak) -> dict:
     return set_default_quality(
         audio=parameters.get("audio_quality") or parameters.get("quality") or "",
         video=parameters.get("video_quality") or "",
     )
 
 
-def _handle_search_youtube_best_match(parameters: dict, player, speak) -> dict:
+def _handle_search_youtube_best_match(parameters: dict, speak) -> dict:
     query = parameters.get("query") or ""
     return search_youtube_best_match(query)
 
@@ -860,15 +856,13 @@ _ACTION_MAP = {
 def youtube_video(
     parameters:     dict,
     response=None,
-    player=None,
     session_memory=None,
     speak=None,
 ) -> str:
     params = parameters or {}
     action = params.get("action", "play").lower().strip()
 
-    if player:
-        player.write_log(f"[YouTube] Action: {action}")
+    event_bus.log("YouTube", f"[YouTube] Action: {action}")
     print(f"[YouTube] ▶️  Action: {action}  Params: {params}")
 
     handler = _ACTION_MAP.get(action)
@@ -880,8 +874,8 @@ def youtube_video(
 
     try:
         if action == "play":
-            return handler(params, player) or "Done."
-        return handler(params, player, speak) or "Done."
+            return handler(params) or "Done."
+        return handler(params, speak) or "Done."
     except Exception as e:
         print(f"[YouTube] ❌ Error in {action}: {e}")
         return f"YouTube {action} failed, sir: {e}"

@@ -59,7 +59,7 @@ _add_tree("whatsapp_bridge", "whatsapp_bridge",
 hiddenimports = []
 _collect_pkgs = [
     "googleapiclient", "google_auth_oauthlib", "google.auth", "google.oauth2",
-    "google.generativeai", "google.genai",
+    "google.genai",
     "yt_dlp", "qrcode", "comtypes", "pycaw", "duckduckgo_search",
     "youtube_transcript_api", "pptx", "dateutil", "bs4",
 ]

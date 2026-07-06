@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from actions import event_bus
+
 
 CAPABILITY_SECTIONS = [
     (
@@ -13,6 +15,7 @@ CAPABILITY_SECTIONS = [
             "Extraer solo los nombres de canciones desde un array de tracks.",
             "Descargar audio de playlists, liked songs o rangos concretos.",
             "Descargar videos de YouTube por URL o busqueda.",
+            "Buscar y reproducir películas y series en streaming via torrents (búsqueda, tendencias).",
             "Preguntar calidad antes de descargar audio/video.",
             "Ver progreso de descargas, cancelar, pausar, reanudar y reintentar fallidas.",
             "Previsualizar playlists antes de descargarlas.",
@@ -136,12 +139,11 @@ CAPABILITY_SECTIONS = [
 ]
 
 
-def capabilities_catalog(parameters: dict | None = None, player=None, speak=None) -> str:
+def capabilities_catalog(parameters: dict | None = None, speak=None) -> str:
     params = parameters or {}
     compact = str(params.get("format", "")).lower().strip() == "compact"
 
-    if player:
-        player.write_log("[Capabilities] catalog")
+    event_bus.log("Capabilities", "[Capabilities] catalog")
 
     lines = [
         "Puedo hacer bastante mas que reproducir musica. Lista amplia de capacidades:",

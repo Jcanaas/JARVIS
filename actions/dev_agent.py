@@ -13,12 +13,13 @@ def get_base_dir():
 
 
 from actions.paths import config_path
+from actions import event_bus
 BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = config_path("api_keys.json")
 PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
-MODEL_PLANNER    = "gemini-2.5-flash"
-MODEL_WRITER     = "gemini-2.5-flash"
+MODEL_PLANNER    = "gemma-4-26b-a4b-it"
+MODEL_WRITER     = "gemma-4-26b-a4b-it"
 
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -26,9 +27,8 @@ def _get_api_key() -> str:
 
 
 def _get_model(model_name: str):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model_name)
+    from actions.genai_client import get_model
+    return get_model(model_name)
 
 
 def _strip_fences(text: str) -> str:
@@ -436,13 +436,11 @@ def _build_project(
     project_name: str,
     timeout: int,
     speak=None,
-    player=None,
 ) -> str:
 
     def log(msg: str):
         print(f"[DevAgent] {msg}")
-        if player:
-            player.write_log(f"[DevAgent] {msg}")
+        event_bus.log("DevAgent", f"[DevAgent] {msg}")
 
     log("Planning project structure...")
     try:
@@ -575,7 +573,6 @@ def _build_project(
 def dev_agent(
     parameters: dict,
     response=None,
-    player=None,
     session_memory=None,
     speak=None,
 ) -> str:
@@ -594,5 +591,4 @@ def dev_agent(
         project_name = project_name,
         timeout      = timeout,
         speak        = speak,
-        player       = player,
     )

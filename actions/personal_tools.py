@@ -14,6 +14,8 @@ except Exception:
     pyperclip = None
     _PYPERCLIP = False
 
+from actions import event_bus
+
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -195,12 +197,11 @@ def clipboard_history(limit: int = 10) -> list[dict]:
     return _load_clipboard_history()[:max(1, int(limit or 10))]
 
 
-def personal_tools(parameters: dict, player=None, speak=None):
+def personal_tools(parameters: dict, speak=None):
     params = parameters or {}
     action = str(params.get("action", "")).lower().strip()
 
-    if player:
-        player.write_log(f"[Personal] {action}")
+    event_bus.log("Personal", f"[Personal] {action}")
 
     if action == "memory_list":
         return memory_list(category=params.get("category", ""), limit=int(params.get("limit") or 50))

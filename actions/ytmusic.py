@@ -1206,9 +1206,32 @@ def get_artist_details(query: str = "", browse_id: str = "") -> Dict:
             top_songs.append(item)
 
     def _release_items(section: str) -> List[Dict]:
+        sec = info.get(section, {}) or {}
+        results = list(sec.get("results") or [])
+        # get_artist() only returns a preview (~10). If the section exposes a
+        # browseId+params, fetch the artist's COMPLETE list for that section.
+        sec_browse = sec.get("browseId")
+        sec_params = sec.get("params")
+        if sec_browse and sec_params:
+            full = None
+            for _kwargs in ({"limit": None}, {}):
+                try:
+                    full = yt.get_artist_albums(sec_browse, sec_params, **_kwargs)
+                    if full:
+                        break
+                except Exception:
+                    full = None
+                    continue
+            if full:
+                results = full
         out = []
-        for raw in (info.get(section, {}).get("results") or []):
+        seen_ids = set()
+        for raw in results:
             rid = raw.get("browseId") or ""
+            if rid and rid in seen_ids:
+                continue
+            if rid:
+                seen_ids.add(rid)
             out.append({
                 "browseId": rid,
                 "albumId": rid,
@@ -1447,6 +1470,48 @@ def get_history(limit: int = 20) -> List[Dict]:
     return out
 
 
+def get_recommendations(limit: int = 50) -> List[Dict]:
+    """Return personalized recommended tracks from the YouTube Music home feed.
+
+    The official YouTube Data API v3 cannot return a personalized recommendation
+    list: ``activities.list`` with ``home=true`` only yields generic
+    "Popular on YouTube" uploads, never items whose ``snippet.type`` is
+    ``recommendation`` (see the long-standing deprecation note). Instead we use
+    the same internal endpoint the YouTube Music website itself uses — an
+    authenticated ``get_home()`` call returns the real personalized home feed.
+    We flatten its sections into a flat list of playable tracks.
+    """
+    lim = _optional_limit(limit) or 50
+    yt = _get_ytmusic(require_auth=True)
+    try:
+        home = yt.get_home(limit=8)
+    except Exception as exc:
+        if _is_liked_songs_auth_error(exc):
+            yt = _refresh_ytmusic_auth()
+            home = yt.get_home(limit=8)
+        else:
+            raise
+
+    out: List[Dict] = []
+    seen: set[str] = set()
+    for section in home or []:
+        section_title = str(section.get("title") or "") if isinstance(section, dict) else ""
+        for raw in (section.get("contents") or []) if isinstance(section, dict) else []:
+            if not isinstance(raw, dict):
+                continue
+            vid = raw.get("videoId")
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            item = _track_result(raw)
+            item["url"] = _song_url(vid)
+            item["section"] = section_title
+            out.append(item)
+            if len(out) >= lim:
+                return out
+    return out
+
+
 def like_song(query: str) -> str:
     yt      = _get_ytmusic(require_auth=True)
     results = yt.search(query, filter="songs", limit=1)
@@ -1483,7 +1548,7 @@ def set_song_like(video_id: str, liked: bool) -> bool:
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
-def ytmusic(parameters: dict, player=None, speak=None) -> str:
+def ytmusic(parameters: dict, speak=None) -> str:
     """Dispatcher cleaned to prefer headless backend (mpv) and keep search/metadata helpers."""
     action = parameters.get("action", "play")
     query = parameters.get("query") or parameters.get("song") or ""
@@ -1807,6 +1872,17 @@ def ytmusic(parameters: dict, player=None, speak=None) -> str:
                 lines.append(f"- {s['title']} — {s['artists']}")
             return "\n".join(lines)
 
+        # ── RECOMMENDATIONS ──────────────────────────────────────────────────
+        elif action in ("recommendations", "home", "recomendaciones"):
+            limit = int(parameters.get("limit") or 50)
+            recs = get_recommendations(limit)
+            if not recs:
+                return "No hay recomendaciones disponibles o falta autenticación."
+            lines = [f"{len(recs)} recomendaciones para ti:"]
+            for s in recs:
+                lines.append(f"- {s['title']} — {s['artists']}")
+            return "\n".join(lines)
+
         # ── HISTORY ──────────────────────────────────────────────────────────
         elif action == "history":
             limit   = int(parameters.get("limit") or 20)
@@ -1829,7 +1905,7 @@ def ytmusic(parameters: dict, player=None, speak=None) -> str:
                 f"Acción desconocida: {action}. "
                 "Usa: play, pause, play_resume, toggle_play, next, previous, "
                 "volume, current_song, shuffle, like, search, lyrics, "
-                "artist_info, album_info, liked_songs, history, like_song, "
+                "artist_info, album_info, liked_songs, history, recommendations, like_song, "
                 "list_playlist_tracks, playlist_names, download_playlist_audio, download_liked_audio."
             )
 
@@ -1887,6 +1963,8 @@ def export_liked_to_file(output_path: str, limit: Optional[int] = None) -> Dict:
         "tracks": tracks,
     }
     out = Path(output_path)
+    if out.suffix.lower() != ".json":
+        out = out.with_suffix(".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"name": payload["name"], "count": len(tracks), "path": str(out)}
@@ -1925,9 +2003,36 @@ def export_playlist_to_file(query_or_id: str, output_path: str) -> Dict:
         "tracks": tracks,
     }
     out = Path(output_path)
+    if out.suffix.lower() != ".json":
+        out = out.with_suffix(".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"name": name, "count": len(tracks), "path": str(out)}
+
+
+def export_tracks_to_file(tracks: List[Dict], name: str, output_path: str) -> Dict:
+    """Save an already-loaded list of track dicts to *output_path*.
+
+    Unlike export_playlist_to_file this does not re-fetch from the server, so it
+    works for any list currently shown in the UI (including imported ones).
+    """
+    norm = [_track_to_export(t) for t in (tracks or []) if (t.get("videoId") or t.get("video_id") or t.get("id"))]
+    if not norm:
+        raise ValueError("La lista no tiene canciones que exportar.")
+    payload = {
+        "jarvis_playlist": True,
+        "version": _PLAYLIST_FORMAT_VERSION,
+        "name": name or "Playlist",
+        "type": "playlist",
+        "exported_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        "tracks": norm,
+    }
+    out = Path(output_path)
+    if out.suffix.lower() != ".json":
+        out = out.with_suffix(".json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"name": payload["name"], "count": len(norm), "path": str(out)}
 
 
 def import_playlist_from_file(file_path: str) -> List[Dict]:

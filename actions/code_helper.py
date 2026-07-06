@@ -5,6 +5,8 @@ import re
 import time
 from pathlib import Path
 
+from actions import event_bus
+
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -16,7 +18,7 @@ BASE_DIR           = get_base_dir()
 API_CONFIG_PATH    = config_path("api_keys.json")
 DESKTOP            = Path.home() / "Desktop"
 MAX_BUILD_ATTEMPTS = 3
-GEMINI_MODEL       = "gemini-2.5-flash"
+GEMINI_MODEL       = "gemma-4-26b-a4b-it"
 
 
 def _get_api_key() -> str:
@@ -25,9 +27,8 @@ def _get_api_key() -> str:
 
 
 def _get_gemini(model: str = GEMINI_MODEL):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model)
+    from actions.genai_client import get_model
+    return get_model(model)
 
 
 def _clean_code(text: str) -> str:
@@ -145,7 +146,7 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
 
     return "write"
 
-def _write(description: str, language: str, output_path: str, player=None) -> tuple[str, Path]:
+def _write(description: str, language: str, output_path: str) -> tuple[str, Path]:
     lang  = language or "python"
     model = _get_gemini()
 
@@ -225,17 +226,16 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
         return f"Execution error: {e}"
 
 
-def _build(description, language, output_path, args, timeout, speak=None, player=None) -> str:
+def _build(description, language, output_path, args, timeout, speak=None) -> str:
     if not description:
         return "Please describe what you want me to build, sir."
 
-    if player:
-        player.write_log("[Code] Build started...")
+    event_bus.log("Code", "[Code] Build started...")
 
     lang = language or "python"
 
     try:
-        code, path = _write(description, lang, output_path, player)
+        code, path = _write(description, lang, output_path)
         print(f"[Code] ✅ Written: {path}")
     except Exception as e:
         msg = f"Could not write initial code: {e}"
@@ -245,8 +245,7 @@ def _build(description, language, output_path, args, timeout, speak=None, player
     last_output = ""
     for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
         print(f"[Code] 🔄 Attempt {attempt}/{MAX_BUILD_ATTEMPTS}")
-        if player:
-            player.write_log(f"[Code] Attempt {attempt}...")
+        event_bus.log("Code", f"[Code] Attempt {attempt}...")
 
         last_output = _run_file(path, args, timeout)
 
@@ -260,8 +259,7 @@ def _build(description, language, output_path, args, timeout, speak=None, player
             return f"{msg}\n\nOutput:\n{last_output}"
 
         print(f"[Code] ⚠️ Error on attempt {attempt}, fixing...")
-        if player:
-            player.write_log(f"[Code] Fixing (attempt {attempt})...")
+        event_bus.log("Code", f"[Code] Fixing (attempt {attempt})...")
 
         try:
             code = _fix_code(code, last_output, description)
@@ -278,20 +276,19 @@ def _build(description, language, output_path, args, timeout, speak=None, player
     if speak: speak(msg)
     return f"{msg}\n\nLast code saved to: {path}"
 
-def _write_action(description, language, output_path, player) -> str:
+def _write_action(description, language, output_path) -> str:
     if not description:
         return "Please describe what you want me to write, sir."
-    if player:
-        player.write_log("[Code] Writing code...")
+    event_bus.log("Code", "[Code] Writing code...")
     try:
-        code, path = _write(description, language, output_path, player)
+        code, path = _write(description, language, output_path)
         print(f"[Code] ✅ Written: {path}")
         return f"Code written. Saved to: {path}\n\nPreview:\n{_preview(code)}"
     except Exception as e:
         return f"Could not generate code: {e}"
 
 
-def _edit_action(file_path, instruction, player) -> str:
+def _edit_action(file_path, instruction) -> str:
     if not file_path:
         return "Please provide a file path to edit, sir."
     if not instruction:
@@ -301,8 +298,7 @@ def _edit_action(file_path, instruction, player) -> str:
     if err:
         return err
 
-    if player:
-        player.write_log("[Code] Editing file...")
+    event_bus.log("Code", "[Code] Editing file...")
 
     model  = _get_gemini()
     prompt = f"""You are an expert code editor.
@@ -327,7 +323,7 @@ Updated code:"""
     return f"File edited. {status}\n\nPreview:\n{_preview(edited)}"
 
 
-def _explain_action(file_path, code, player) -> str:
+def _explain_action(file_path, code) -> str:
     if file_path and not code:
         code, err = _read_file(file_path)
         if err:
@@ -335,8 +331,7 @@ def _explain_action(file_path, code, player) -> str:
     if not code:
         return "Please provide code or a file path to explain, sir."
 
-    if player:
-        player.write_log("[Code] Analyzing code...")
+    event_bus.log("Code", "[Code] Analyzing code...")
 
     model  = _get_gemini()
     prompt = f"""Explain what this code does in simple, clear language.
@@ -355,18 +350,17 @@ Explanation:"""
         return f"Could not explain code: {e}"
 
 
-def _run_action(file_path, args, timeout, player) -> str:
+def _run_action(file_path, args, timeout) -> str:
     if not file_path:
         return "Please provide a file path to run, sir."
     p = Path(file_path)
     if not p.exists():
         return f"File not found: {file_path}"
-    if player:
-        player.write_log(f"[Code] Running {p.name}...")
+    event_bus.log("Code", f"[Code] Running {p.name}...")
     return _run_file(p, args, timeout)
 
 
-def _optimize_action(file_path, code, language, output_path, player) -> str:
+def _optimize_action(file_path, code, language, output_path) -> str:
 
     if file_path and not code:
         code, err = _read_file(file_path)
@@ -375,8 +369,7 @@ def _optimize_action(file_path, code, language, output_path, player) -> str:
     if not code:
         return "Please provide code or a file path to optimize, sir."
 
-    if player:
-        player.write_log("[Code] Optimizing code...")
+    event_bus.log("Code", "[Code] Optimizing code...")
 
     lang  = language or "python"
     model = _get_gemini()
@@ -422,10 +415,9 @@ Optimized code:"""
     )
 
 
-def _screen_debug_action(description, file_path, player, speak=None) -> str:
+def _screen_debug_action(description, file_path, speak=None) -> str:
 
-    if player:
-        player.write_log("[Code] Taking screenshot for analysis...")
+    event_bus.log("Code", "[Code] Taking screenshot for analysis...")
 
     print("[Code] 📸 Capturing screen for debug...")
 
@@ -474,7 +466,7 @@ Be specific and actionable. If you see an error message, quote it exactly."""
         ]
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.1-flash-lite",
             contents=contents,
         )
 
@@ -510,7 +502,6 @@ Be specific and actionable. If you see an error message, quote it exactly."""
 def code_helper(
     parameters: dict,
     response=None,
-    player=None,
     session_memory=None,
     speak=None
 ) -> str:
@@ -542,29 +533,28 @@ def code_helper(
         print(f"[Code] 🤖 Auto-detected: {action}")
 
     if action == "write":
-        return _write_action(description, language, output_path, player)
+        return _write_action(description, language, output_path)
 
     elif action == "edit":
         return _edit_action(
             file_path,
             description or p.get("instruction", ""),
-            player
         )
 
     elif action == "explain":
-        return _explain_action(file_path, code, player)
+        return _explain_action(file_path, code)
 
     elif action == "run":
-        return _run_action(file_path, args, timeout, player)
+        return _run_action(file_path, args, timeout)
 
     elif action == "build":
-        return _build(description, language, output_path, args, timeout, speak, player)
+        return _build(description, language, output_path, args, timeout, speak)
 
     elif action == "optimize":
-        return _optimize_action(file_path, code, language, output_path, player)
+        return _optimize_action(file_path, code, language, output_path)
 
     elif action == "screen_debug":
-        return _screen_debug_action(description, file_path, player, speak)
+        return _screen_debug_action(description, file_path, speak)
 
     else:
         return f"Unknown action: '{action}'. Use write, edit, explain, run, build, optimize, or screen_debug."

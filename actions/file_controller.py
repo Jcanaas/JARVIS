@@ -4,6 +4,8 @@ import platform
 from pathlib import Path
 from datetime import datetime
 
+from actions import event_bus
+
 try:
     import send2trash
     _SEND2TRASH = True
@@ -470,7 +472,6 @@ def get_file_info(path: str, name: str = "") -> str:
 def file_controller(
     parameters: dict = None,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
     params = parameters or {}
@@ -478,8 +479,7 @@ def file_controller(
     path   = params.get("path", "desktop")
     name   = params.get("name", "")
 
-    if player:
-        player.write_log(f"[file] {action} {name or path}")
+    event_bus.log("file", f"[file] {action} {name or path}")
 
     try:
         if action == "list":

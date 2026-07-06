@@ -36,6 +36,8 @@ except ImportError:
 from google import genai
 from google.genai import types as gtypes
 
+from actions import event_bus
+
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -211,16 +213,12 @@ class _VisionSession:
         self._out_queue:  Optional[asyncio.Queue]             = None
         self._audio_in:   Optional[asyncio.Queue]             = None
         self._ready_evt:  threading.Event                     = threading.Event()
-        self._player                                           = None
         self._lock:       threading.Lock                       = threading.Lock()
 
-    def start(self, player=None, timeout: float = 25.0) -> None:
+    def start(self, timeout: float = 25.0) -> None:
         with self._lock:
             if self._thread and self._thread.is_alive():
-                if player is not None:
-                    self._player = player
                 return
-            self._player = player
             self._thread = threading.Thread(
                 target=self._run_event_loop,
                 daemon=True,
@@ -337,10 +335,10 @@ class _VisionSession:
                         transcript.append(chunk)
 
                 if sc.turn_complete:
-                    if transcript and self._player:
+                    if transcript:
                         full = re.sub(r"\s+", " ", " ".join(transcript)).strip()
                         if full:
-                            self._player.write_log(f"Jarvis: {full}")
+                            event_bus.log("Vision", f"Jarvis: {full}")
                             print(f"[Vision] 💬 {full}")
                     transcript = []
 
@@ -372,20 +370,17 @@ _session_lock = threading.Lock()
 _session_up   = False
 
 
-def _ensure_session(player=None) -> None:
+def _ensure_session() -> None:
     global _session_up
     with _session_lock:
         if not _session_up:
-            _session.start(player=player)
+            _session.start()
             _session_up = True
-        elif player is not None:
-            _session._player = player
 
 
 def screen_process(
     parameters:     dict,
     response=None,
-    player=None,
     session_memory=None,
 ) -> bool:
 
@@ -400,7 +395,7 @@ def screen_process(
     print(f"[Vision] ▶ angle={angle!r}  question='{user_text[:80]}'")
 
     try:
-        _ensure_session(player=player)
+        _ensure_session()
     except Exception as e:
         print(f"[Vision] ❌ Could not start session: {e}")
         return False
@@ -420,9 +415,9 @@ def screen_process(
     return True
 
 
-def warmup_session(player=None) -> None:
+def warmup_session() -> None:
     try:
-        _ensure_session(player=player)
+        _ensure_session()
     except Exception as e:
         print(f"[Vision] ⚠️  Warmup failed: {e}")
 

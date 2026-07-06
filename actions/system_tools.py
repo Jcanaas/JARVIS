@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from actions import event_bus
+
 
 try:
     import psutil
@@ -213,11 +215,10 @@ def file_reveal(path: str) -> str:
         return f"No se pudo abrir en el explorador: {e}"
 
 
-def system_tools(parameters: dict, player=None, speak=None):
+def system_tools(parameters: dict, speak=None):
     params = parameters or {}
     action = str(params.get("action", "")).lower().strip()
-    if player:
-        player.write_log(f"[System] {action}")
+    event_bus.log("System", f"[System] {action}")
 
     if action == "system_status":
         return system_status(limit=int(params.get("limit") or 5))

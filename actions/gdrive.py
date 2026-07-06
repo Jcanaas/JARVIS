@@ -543,7 +543,7 @@ def _format_files(title: str, files: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-def gdrive(parameters: dict, player=None, speak=None, progress_hook=None) -> str:
+def gdrive(parameters: dict, speak=None, progress_hook=None) -> str:
     action = str(parameters.get("action", "list_files")).lower().strip()
 
     try:

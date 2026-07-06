@@ -25,10 +25,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-try:
-    from google import genai  # new SDK
-except Exception:
-    import google.generativeai as genai  # type: ignore
+from actions import event_bus
 
 
 def _get_api_key() -> str:
@@ -39,8 +36,8 @@ def _get_api_key() -> str:
 
 
 def _gemini_client():
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel("gemini-2.5-flash")
+    from actions.genai_client import get_model
+    return get_model("gemini-3.1-flash-lite")
 
 
 def _detect_type(path: Path) -> str:
@@ -777,7 +774,7 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
 
     return f"Unknown PPTX action: '{action}'. Try: summarize, extract_text, analyze"
 
-def file_processor(parameters: dict, player=None, speak=None) -> str:
+def file_processor(parameters: dict, speak=None) -> str:
     file_path_str = parameters.get("file_path", "").strip()
     if not file_path_str:
         return "No file path provided."
@@ -795,8 +792,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
 
     log_msg = f"[FileProcessor] {file_type.upper()} | {path.name} | action={action or 'auto'}"
     print(log_msg)
-    if player:
-        player.write_log(log_msg)
+    event_bus.log("FileProcessor", log_msg)
 
     if file_type == "unknown":
         try:

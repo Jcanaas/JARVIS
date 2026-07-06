@@ -10,6 +10,7 @@ def _get_base_dir() -> Path:
 
 
 from actions.paths import config_path
+from actions import event_bus
 BASE_DIR        = _get_base_dir()
 API_CONFIG_PATH = config_path("api_keys.json")
 
@@ -24,7 +25,7 @@ def _gemini_search(query: str) -> str:
 
     client   = genai.Client(api_key=_get_api_key())
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.1-flash-lite",
         contents=query,
         config={"tools": [{"google_search": {}}]},
     )
@@ -98,7 +99,6 @@ def _compare(items: list[str], aspect: str) -> str:
 def web_search(
     parameters:     dict,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
     params = parameters or {}
@@ -113,8 +113,7 @@ def web_search(
     if items and mode != "compare":
         mode = "compare"
 
-    if player:
-        player.write_log(f"[Search] {query or ', '.join(items)}")
+    event_bus.log("Search", f"[Search] {query or ', '.join(items)}")
 
     print(f"[WebSearch] Query: {query!r}  Mode: {mode}")
 

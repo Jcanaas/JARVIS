@@ -54,7 +54,27 @@ let messages = [];
 let latestQR = null;
 let isReady = false;
 let reconnecting = false;
+// Coarse lifecycle state surfaced to the Python UI so it can show a proper
+// loading screen instead of a bare "waiting for QR" that never resolves:
+//   starting   → Chromium launching / WhatsApp Web loading, no QR yet
+//   qr         → a QR code is available to scan (latestQR set)
+//   loading    → phone linked, WhatsApp Web syncing (loading_screen events)
+//   ready      → fully connected
+//   auth_failure / disconnected → transient error, auto-reconnecting
+let clientState = 'starting';
+let stateDetail = '';
+let initWatchdog = null;
+
+function setState(state, detail) {
+  clientState = state;
+  stateDetail = detail || '';
+}
 const messageAcks = new Map();
+// Our own per-chat unread counter. whatsapp-web.js `chat.unreadCount` is
+// unreliable for messages that arrive during the session (often stays 0 until a
+// full resync), so we track unread ourselves: increment on each incoming
+// message and reset when the chat is read (mark_read) or answered (fromMe).
+const unreadByChat = new Map();  // chatId -> unread count
 
 // Caches to avoid hammering WhatsApp servers with repeated lookups.
 const nameCache = new Map();        // id -> display name (or null)
@@ -78,6 +98,12 @@ function loadState() {
         if (ack !== null && ack !== undefined) messageAcks.set(id, ack);
       }
     }
+    if (data.unread && typeof data.unread === 'object') {
+      for (const [id, n] of Object.entries(data.unread)) {
+        const count = parseInt(n, 10);
+        if (count > 0) unreadByChat.set(id, count);
+      }
+    }
     console.log(`Restored ${messages.length} messages and ${messageAcks.size} acks from disk`);
   } catch (e) {
     // No state file yet, or it is corrupt — start clean.
@@ -91,6 +117,7 @@ function _writeState() {
   const payload = JSON.stringify({
     messages: messages.slice(-MAX_BUFFERED_MESSAGES),
     acks: Object.fromEntries(messageAcks),
+    unread: Object.fromEntries(unreadByChat),
   });
   const tmp = `${STATE_FILE}.tmp`;
   try {
@@ -136,6 +163,63 @@ function clientReady() {
   return !!(isReady && client.info && client.info.wid);
 }
 
+// Chromium leaves Singleton* lock files in its user-data dir. If the previous
+// bridge (or its Chromium) was killed abruptly, those locks can make the next
+// launch hang or fail to spawn the browser — the classic "it works after a
+// restart" symptom. Since we only reach here after successfully binding the
+// HTTP port (so no other bridge instance is live), it is safe to remove them.
+function clearStaleChromiumLocks() {
+  const profileDir = path.join(DATA_DIR, '.wwebjs_auth');
+  const locks = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (locks.includes(entry.name)) {
+        try {
+          fs.unlinkSync(full);
+          console.log(`Removed stale Chromium lock: ${full}`);
+        } catch (e) {
+          // best effort — a live lock means another Chromium still owns it
+        }
+      }
+    }
+  };
+  walk(profileDir);
+}
+
+// Guard against a silently hung initialize() *or* a hung post-auth sync: if
+// the client doesn't reach 'ready' within the timeout — whether it's still
+// waiting for a QR/browser launch, or stuck on "sincronizando" after the
+// phone confirmed the session — force a full reconnect so it self-heals
+// instead of leaving the UI stuck forever. Re-armed on 'authenticated' and
+// on every 'loading_screen' tick (see below) since a real sync can take a
+// while and each progress event proves it's still alive.
+function armInitWatchdog(seconds = 45) {
+  clearInitWatchdog();
+  initWatchdog = setTimeout(() => {
+    initWatchdog = null;
+    if (!isReady) {
+      console.warn(`init watchdog: not ready after ${seconds}s (state=${clientState}) — forcing reconnect`);
+      reconnect('init-timeout');
+    }
+  }, seconds * 1000);
+}
+
+function clearInitWatchdog() {
+  if (initWatchdog) {
+    clearTimeout(initWatchdog);
+    initWatchdog = null;
+  }
+}
+
 // --- Crash guards: never let an unhandled async error kill the bridge ---
 process.on('unhandledRejection', (reason) => {
   console.error('unhandledRejection:', reason && reason.message ? reason.message : reason);
@@ -148,6 +232,8 @@ async function reconnect(reason) {
   if (reconnecting) return;
   reconnecting = true;
   isReady = false;
+  latestQR = null;
+  setState('starting', 'Reiniciando conexión…');
   nameCache.clear();
   profilePicCache.clear();
   console.warn(`Reconnecting WhatsApp client (${reason || 'manual'})...`);
@@ -157,8 +243,15 @@ async function reconnect(reason) {
     // ignore: client may already be dead
   }
   const attempt = () => {
+    try {
+      clearStaleChromiumLocks();
+    } catch (e) {
+      // best effort
+    }
+    armInitWatchdog();
     client.initialize().catch((err) => {
       console.error('initialize failed, retrying in 10s:', err && err.message ? err.message : err);
+      setState('starting', 'Reintentando iniciar el navegador…');
       setTimeout(attempt, 10000);
     });
   };
@@ -270,10 +363,22 @@ async function serializeMessage(m, chatId = null) {
   };
 }
 
+client.on('loading_screen', (percent, message) => {
+  // Fires while WhatsApp Web syncs after the phone is linked. Each tick is
+  // proof of life, so reset (not clear) the watchdog: if the ticks stop
+  // coming — or never start — for too long, we still want to self-heal.
+  armInitWatchdog(90);
+  const pct = parseInt(percent, 10);
+  setState('loading', Number.isFinite(pct) ? `Cargando WhatsApp… ${pct}%` : (message || 'Cargando WhatsApp…'));
+});
+
 client.on('qr', (qr) => {
   console.log('QR_RECEIVED');
   latestQR = qr;
   isReady = false;
+  setState('qr', 'Escanea el código con tu teléfono');
+  // A QR means the browser is up and waiting for the user — not hung.
+  clearInitWatchdog();
   qrcode.generate(qr, { small: true });
 });
 
@@ -281,17 +386,30 @@ client.on('ready', () => {
   console.log('WhatsApp client ready');
   isReady = true;
   latestQR = null;
+  setState('ready', '');
+  clearInitWatchdog();
 });
 
-client.on('authenticated', () => { console.log('Authenticated'); latestQR = null; });
+client.on('authenticated', () => {
+  console.log('Authenticated');
+  latestQR = null;
+  setState('loading', 'Sesión verificada, sincronizando…');
+  // Session confirmed but not synced yet: 'loading_screen' may or may not
+  // fire depending on the WhatsApp Web version, so this is the only
+  // guaranteed backstop against a sync that silently hangs — reconnect if
+  // 'ready' doesn't arrive within 90s.
+  armInitWatchdog(90);
+});
 client.on('auth_failure', (msg) => {
   console.error('Auth failure', msg);
   isReady = false;
+  setState('auth_failure', 'Fallo de autenticación, reintentando…');
   reconnect('auth_failure');
 });
 client.on('disconnected', (reason) => {
   console.warn('WhatsApp client disconnected', reason);
   isReady = false;
+  setState('disconnected', 'Conexión perdida, reconectando…');
   reconnect(`disconnected: ${reason}`);
 });
 
@@ -316,14 +434,46 @@ client.on('message', (msg) => {
     console.log(`[MSG IN] from=${entry.from} author=${entry.author || '-'} name=${entry.senderName || '-'} type=${entry.type} body=${entry.body.slice(0,60)}`);;
     messages.push(entry);
     if (messages.length > MAX_BUFFERED_MESSAGES) messages.shift();
+    // Count this as unread for its chat (the `message` event is incoming only).
+    if (!msg.fromMe && entry.chatId) {
+      unreadByChat.set(entry.chatId, (unreadByChat.get(entry.chatId) || 0) + 1);
+    }
     persistState();
   } catch (e) {
     console.error('message processing failed', e);
   }
 });
 
+// Fires for every message create, including ones the user sends from the phone
+// or other devices. Sending in a chat means the user is there → mark it read.
+client.on('message_create', (msg) => {
+  try {
+    if (msg.fromMe && msg.to) {
+      if (unreadByChat.get(msg.to)) {
+        unreadByChat.set(msg.to, 0);
+        persistState();
+      }
+    }
+  } catch (e) {
+    // best effort
+  }
+});
+
 app.get('/qr', (req, res) => {
-  res.json({ ok: true, ready: isReady, qr: latestQR });
+  res.json({
+    ok: true,
+    ready: isReady,
+    qr: latestQR,
+    state: clientState,
+    detail: stateDetail,
+  });
+});
+
+// Force a fresh connection attempt (used by the UI "Reintentar" button when a
+// link/loading gets stuck). Token-protected like the other write endpoints.
+app.post('/reconnect', requireToken, (req, res) => {
+  reconnect('manual');
+  res.json({ ok: true, state: clientState });
 });
 
 app.get('/status', (req, res) => {
@@ -368,7 +518,9 @@ app.get('/chats', async (req, res) => {
         chatId: id,
         name: c.name || c.formattedTitle || (c.contact && (c.contact.name || c.contact.pushname)) || id,
         isGroup: !!c.isGroup,
-        unread: c.unreadCount || 0,
+        // whatsapp-web.js unreadCount is authoritative when it reflects a read
+        // (e.g. on the phone); our own counter fills in live messages it misses.
+        unread: Math.max(c.unreadCount || 0, unreadByChat.get(id) || 0),
         timestamp: (last && last.timestamp) || c.timestamp || 0,
         preview: last ? messageBody(last) : '',
         fromMe: last ? !!last.fromMe : false,
@@ -394,19 +546,67 @@ app.get('/profile_picture', async (req, res) => {
   }
 });
 
+// Cache decoded media so HTTP range requests (used by the audio player to seek)
+// don't re-download the file from WhatsApp on every byte range.
+const mediaCache = new Map();  // id -> { buffer, mimetype, filename, ts }
+const MEDIA_CACHE_TTL_MS = 5 * 60 * 1000;
+const MEDIA_CACHE_MAX = 40;
+
+async function loadMedia(id) {
+  const cached = mediaCache.get(id);
+  if (cached && (Date.now() - cached.ts) < MEDIA_CACHE_TTL_MS) {
+    cached.ts = Date.now();
+    return cached;
+  }
+  const msg = await client.getMessageById(id);
+  if (!msg) return { error: 'message not found', status: 404 };
+  if (!msg.hasMedia) return { error: 'message has no media', status: 404 };
+  const media = await msg.downloadMedia();
+  if (!media) return { error: 'media unavailable', status: 404 };
+  const entry = {
+    buffer: Buffer.from(media.data, 'base64'),
+    mimetype: media.mimetype || 'application/octet-stream',
+    filename: media.filename || `whatsapp_media_${Date.now()}`,
+    ts: Date.now(),
+  };
+  mediaCache.set(id, entry);
+  if (mediaCache.size > MEDIA_CACHE_MAX) {
+    mediaCache.delete(mediaCache.keys().next().value);  // evict oldest
+  }
+  return entry;
+}
+
 app.get('/media', async (req, res) => {
   const id = (req.query.id || '').toString();
   if (!id) return res.status(400).json({ ok: false, error: 'missing id' });
   try {
-    const msg = await client.getMessageById(id);
-    if (!msg) return res.status(404).json({ ok: false, error: 'message not found' });
-    if (!msg.hasMedia) return res.status(404).json({ ok: false, error: 'message has no media' });
-    const media = await msg.downloadMedia();
-    if (!media) return res.status(404).json({ ok: false, error: 'media unavailable' });
-    const buffer = Buffer.from(media.data, 'base64');
-    const filename = media.filename || `whatsapp_media_${Date.now()}`;
-    res.setHeader('Content-Type', media.mimetype || 'application/octet-stream');
+    const entry = await loadMedia(id);
+    if (entry.error) return res.status(entry.status || 404).json({ ok: false, error: entry.error });
+    const { buffer, mimetype, filename } = entry;
+    const total = buffer.length;
+    res.setHeader('Content-Type', mimetype);
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    // Advertise range support so QMediaPlayer can seek within the stream.
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    const range = req.headers.range;
+    const match = range ? /^bytes=(\d*)-(\d*)$/.exec(range.trim()) : null;
+    if (match) {
+      let start = match[1] === '' ? 0 : parseInt(match[1], 10);
+      let end = match[2] === '' ? total - 1 : parseInt(match[2], 10);
+      if (isNaN(start)) start = 0;
+      if (isNaN(end) || end >= total) end = total - 1;
+      if (start > end || start >= total) {
+        res.setHeader('Content-Range', `bytes */${total}`);
+        return res.status(416).end();
+      }
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+      res.setHeader('Content-Length', end - start + 1);
+      return res.end(buffer.subarray(start, end + 1));
+    }
+
+    res.setHeader('Content-Length', total);
     res.send(buffer);
   } catch (e) {
     console.error('media error', e);
@@ -441,6 +641,13 @@ app.post('/send', requireToken, async (req, res) => {
         id: m.id ? m.id._serialized : null,
         from: fromId,
         to: to,
+        // Chat identity for consumers that group messages by chat (Python's
+        // manager/UI). Without this, replies sent through this endpoint (e.g.
+        // by Jarvis via voice command) were keyed by the bot's own JID instead
+        // of the chat, so an already-open chat window never noticed them.
+        chatId: to,
+        fromMe: true,
+        type: 'chat',
         body: body,
         timestamp: Date.now(),
         direction: 'out',
@@ -488,6 +695,9 @@ app.post('/send_media', requireToken, async (req, res) => {
         id: m.id ? m.id._serialized : null,
         from: fromId,
         to: to,
+        // See the /send handler above for why chatId/fromMe are needed here.
+        chatId: to,
+        fromMe: true,
         body: caption || `[${m.type || 'media'}]`,
         type: m.type || 'document',
         timestamp: Date.now(),
@@ -534,6 +744,11 @@ app.post('/mark_read', requireToken, async (req, res) => {
   try {
     if (!clientReady()) return res.status(503).json({ ok: false, ready: false, error: 'client not ready' });
     const seen = await client.sendSeen(chatId);
+    // Clear our own unread counter for this chat.
+    if (unreadByChat.get(chatId)) {
+      unreadByChat.set(chatId, 0);
+      persistState();
+    }
     res.json({ ok: true, chatId, seen: seen !== false });
   } catch (e) {
     console.error('mark_read error', e);
@@ -632,9 +847,19 @@ app.get('/resolve', async (req, res) => {
 });
 
 // Persist remaining state on shutdown so nothing in the debounce window is lost.
+// Also destroy the client so Chromium releases its profile lock cleanly — a
+// hard kill here is what leaves the stale locks that break the next launch.
+let _exiting = false;
 function gracefulExit() {
+  if (_exiting) return;
+  _exiting = true;
   try { flushState(); } catch (e) { /* best effort */ }
-  process.exit(0);
+  // Never let cleanup block shutdown for more than a moment.
+  const bail = setTimeout(() => process.exit(0), 3000);
+  Promise.resolve()
+    .then(() => client.destroy())
+    .catch(() => {})
+    .finally(() => { clearTimeout(bail); process.exit(0); });
 }
 process.on('SIGINT', gracefulExit);
 process.on('SIGTERM', gracefulExit);
@@ -643,9 +868,18 @@ const PORT = process.env.PORT || 3000;
 loadState();
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`WhatsApp bridge listening on 127.0.0.1:${PORT}`);
+  // We own the port → no other bridge is live → safe to clear stale locks that
+  // a previous abrupt shutdown may have left behind.
+  try {
+    clearStaleChromiumLocks();
+  } catch (e) {
+    // best effort
+  }
   const boot = () => {
+    armInitWatchdog();
     client.initialize().catch((err) => {
       console.error('initial initialize failed, retrying in 10s:', err && err.message ? err.message : err);
+      setState('starting', 'Reintentando iniciar el navegador…');
       setTimeout(boot, 10000);
     });
   };

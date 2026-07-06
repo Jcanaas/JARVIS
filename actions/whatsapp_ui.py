@@ -8,16 +8,21 @@ from typing import Optional
 
 import requests
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    QBuffer, QByteArray, QEasingCurve, QIODevice, QPointF, QPropertyAnimation,
+    QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal,
+)
 from PyQt6.QtGui import (
-    QBrush, QColor, QDesktopServices, QFontMetrics, QIcon, QPainter,
+    QBrush, QColor, QDesktopServices, QFontMetrics, QIcon, QMovie, QPainter,
     QPainterPath, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QTextEdit, QPushButton, QLabel, QMessageBox, QSizePolicy, QScrollArea, QFrame,
-    QAbstractItemView, QLineEdit, QFileDialog, QStackedWidget,
+    QAbstractItemView, QLineEdit, QFileDialog, QStackedWidget, QSlider,
+    QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
 )
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from .whatsapp import (
     list_recent_chats, get_contact_name, get_conversation, get_message_acks,
@@ -33,15 +38,74 @@ import wave
 import tempfile
 from actions.file_processor import _process_audio
 
-BG = "#080B12"
+BG = "#0A0C16"
 PANEL = "rgba(255, 255, 255, 0.050)"
 PANEL2 = "rgba(255, 255, 255, 0.085)"
 BORDER = "rgba(255, 255, 255, 0.080)"
-PRI = "#7DD3FC"
-ACC = "#A7F3D0"
+PRI = "#B6C4FF"
+ACC = "#4ADE80"
 TEXT = "#F8FAFC"
 TEXT_DIM = "#CBD5E1"
 TEXT_MED = "#94A3B8"
+
+
+class _ElidedLabel(QLabel):
+    """QLabel que recorta con '…' en vez de forzar el ancho de su fila.
+
+    Un QLabel normal nunca se encoge por debajo de su texto, así que en
+    paneles estrechos empuja la columna de hora/contador fuera del área
+    visible. Este acepta cualquier ancho y pinta el texto elidido.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setFont(self.font())
+        p.setPen(self.palette().color(self.foregroundRole()))
+        elided = QFontMetrics(self.font()).elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, self.width()
+        )
+        p.drawText(self.rect(), int(self.alignment()), elided)
+
+
+def _fade_in(w: QWidget, duration: int = 200):
+    """Aparición suave de un widget nuevo (burbujas de mensaje)."""
+    eff = QGraphicsOpacityEffect(w)
+    eff.setOpacity(0.0)
+    w.setGraphicsEffect(eff)
+    anim = QPropertyAnimation(eff, b"opacity", w)
+    anim.setDuration(duration)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    anim.finished.connect(lambda: w.setGraphicsEffect(None))
+    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+def _pulse_glow(w: QWidget, color: str = "#7C9AFF", radius: int = 70):
+    """Destello azul puntual en un control (feedback al enviar)."""
+    eff = w.graphicsEffect()
+    if not isinstance(eff, QGraphicsDropShadowEffect):
+        eff = QGraphicsDropShadowEffect(w)
+        eff.setOffset(0, 0)
+        eff.setBlurRadius(0.0)
+        w.setGraphicsEffect(eff)
+    col = QColor(color)
+    col.setAlpha(255)
+    eff.setColor(col)
+    anim = QPropertyAnimation(eff, b"blurRadius", w)
+    anim.setDuration(550)
+    anim.setKeyValueAt(0.0, eff.blurRadius())
+    anim.setKeyValueAt(0.25, float(radius))
+    anim.setKeyValueAt(1.0, 0.0)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
 
 def _wa_icon(name: str, color: str = TEXT_DIM, size: int = 20) -> QIcon:
@@ -83,6 +147,17 @@ def _wa_icon(name: str, color: str = TEXT_DIM, size: int = 20) -> QIcon:
         painter.drawRoundedRect(QRectF(9, 2.5, 6, 19), 3, 3)
         line(12, 6.5, 12, 16)
         painter.restore()
+    elif name == "play":
+        painter.setBrush(QBrush(QColor(color)))
+        path = QPainterPath()
+        path.moveTo(8, 5); path.lineTo(19, 12); path.lineTo(8, 19); path.closeSubpath()
+        painter.drawPath(path)
+    elif name == "pause":
+        painter.setBrush(QBrush(QColor(color)))
+        painter.drawRoundedRect(QRectF(7, 5, 3.6, 14), 1.4, 1.4)
+        painter.drawRoundedRect(QRectF(13.4, 5, 3.6, 14), 1.4, 1.4)
+    elif name == "transcribe":
+        line(5, 7, 19, 7); line(5, 11, 16, 11); line(5, 15, 19, 15); line(5, 19, 13, 19)
     painter.end()
     return QIcon(pm)
 
@@ -97,22 +172,23 @@ def _wa_icon_button(name: str, tooltip: str, size: int = 38, accent: bool = Fals
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     button.setStyleSheet(f"""
         QPushButton {{
-            background: {"rgba(56,189,248,0.16)" if accent else "rgba(255,255,255,0.045)"};
-            border: 1px solid {"rgba(125,211,252,0.30)" if accent else "rgba(255,255,255,0.09)"};
+            background: {"rgba(94,130,255,0.16)" if accent else "rgba(255,255,255,0.045)"};
+            border: 1px solid {"rgba(182,196,255,0.30)" if accent else "rgba(255,255,255,0.09)"};
             border-radius: 10px;
             padding: 0;
         }}
         QPushButton:hover {{
-            background: rgba(125,211,252,0.14);
-            border-color: rgba(125,211,252,0.34);
+            background: rgba(182,196,255,0.14);
+            border-color: rgba(182,196,255,0.34);
         }}
-        QPushButton:focus {{ border: 2px solid rgba(125,211,252,0.58); }}
+        QPushButton:focus {{ border: 2px solid rgba(182,196,255,0.58); }}
     """)
     return button
 
 
 class _SendTextEdit(QTextEdit):
     send_requested = pyqtSignal()
+    files_pasted = pyqtSignal(list)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -124,6 +200,26 @@ class _SendTextEdit(QTextEdit):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def canInsertFromMimeData(self, source) -> bool:
+        # Por defecto QTextEdit rechaza un portapapeles que solo tenga imagen,
+        # así que insertFromMimeData nunca se llamaría al pegar una captura.
+        if source.hasImage() or source.hasUrls():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source):
+        want = source.hasUrls() or (
+            source.hasImage() and not source.hasText() and not source.hasHtml()
+        )
+        if want:
+            from actions.clipboard_files import mime_to_files
+
+            paths = mime_to_files(source)
+            if paths:
+                self.files_pasted.emit(paths)
+                return
+        super().insertFromMimeData(source)
 
 
 class _AckIndicator(QWidget):
@@ -147,7 +243,7 @@ class _AckIndicator(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor("#59C7FF" if self._ack >= 3 else "#B8C7D6")
+        color = QColor("#7C9AFF" if self._ack >= 3 else "#BCC3E2")
         pen = QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
 
@@ -163,6 +259,221 @@ class _AckIndicator(QWidget):
             draw_check(6)
 
 
+class _WaSpinner(QWidget):
+    """Lightweight rotating-arc spinner for the WhatsApp loading screen."""
+
+    def __init__(self, size: int = 64, parent=None):
+        super().__init__(parent)
+        self._size = size
+        self.setFixedSize(size, size)
+        self._angle = 0
+        self._wanted = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(28)
+        self._timer.timeout.connect(self._advance)
+
+    def start(self):
+        self._wanted = True
+        if self.isVisible() and not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self):
+        self._wanted = False
+        self._timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._wanted and not self._timer.isActive():
+            self._timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def _advance(self):
+        self._angle = (self._angle + 6) % 360
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = 5
+        rect = QRectF(m, m, self._size - 2 * m, self._size - 2 * m)
+        # Faint track ring…
+        p.setPen(QPen(QColor(182, 196, 255, 40), 4, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap))
+        p.drawArc(rect, 0, 360 * 16)
+        # …with a bright rotating sweep on top.
+        p.setPen(QPen(QColor("#7C9AFF"), 4, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap))
+        p.drawArc(rect, -self._angle * 16, 100 * 16)
+
+
+def _fmt_audio_time(ms: int) -> str:
+    total = max(0, int(ms)) // 1000
+    return f"{total // 60}:{total % 60:02d}"
+
+
+class _SeekSlider(QSlider):
+    """Horizontal slider that jumps to the clicked position (click-to-seek).
+
+    A plain QSlider only pages towards a groove click; here a click moves the
+    handle straight to where the user pressed, then emits pressed/released so the
+    owning player seeks immediately.
+    """
+
+    def mousePressEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.maximum() > self.minimum()
+            and self.width() > 0
+        ):
+            ratio = min(1.0, max(0.0, event.position().x() / self.width()))
+            span = self.maximum() - self.minimum()
+            self.setValue(int(self.minimum() + round(span * ratio)))
+            self.sliderPressed.emit()
+            self.sliderReleased.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class _AudioPlayer(QWidget):
+    """Inline voice-note / audio player: play-pause, seek bar and time label.
+
+    The QMediaPlayer is created lazily on first play so rendering a chat full of
+    audios stays cheap. Only one player sounds at a time — starting playback
+    pauses any other audio in the same window.
+    """
+
+    def __init__(self, url: str, window: "WhatsAppWindow", is_ptt: bool = False, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self._window = window
+        self._player: QMediaPlayer | None = None
+        self._output: QAudioOutput | None = None
+        self._duration = 0
+        self._seeking = False
+        self._rate = 1.0
+        self._rates = (1.0, 1.5, 2.0)
+
+        self.setStyleSheet("background: transparent;")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 2, 0, 0)
+        row.setSpacing(9)
+
+        self._play_btn = QPushButton()
+        self._play_btn.setIcon(_wa_icon("play", PRI, 18))
+        self._play_btn.setIconSize(QSize(18, 18))
+        self._play_btn.setFixedSize(34, 34)
+        self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._play_btn.setToolTip("Reproducir nota de voz" if is_ptt else "Reproducir audio")
+        self._play_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(182,196,255,0.14);
+                border: 1px solid rgba(182,196,255,0.30);
+                border-radius: 17px; padding: 0;
+            }}
+            QPushButton:hover {{ background: rgba(182,196,255,0.22); }}
+        """)
+        self._play_btn.clicked.connect(self._toggle)
+        row.addWidget(self._play_btn)
+
+        self._slider = _SeekSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, 0)
+        self._slider.setFixedWidth(140)
+        self._slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 4px; border-radius: 2px; background: rgba(255,255,255,0.14);
+            }}
+            QSlider::sub-page:horizontal {{ background: {PRI}; border-radius: 2px; }}
+            QSlider::handle:horizontal {{
+                width: 12px; margin: -5px 0; border-radius: 6px;
+                background: {PRI}; border: none;
+            }}
+        """)
+        self._slider.sliderPressed.connect(lambda: setattr(self, "_seeking", True))
+        self._slider.sliderReleased.connect(self._on_seek_release)
+        row.addWidget(self._slider)
+
+        self._time = QLabel("0:00")
+        self._time.setStyleSheet(f"color: {TEXT_MED}; font-size: 11px; background: transparent;")
+        row.addWidget(self._time)
+
+        self._speed_btn = QPushButton("1x")
+        self._speed_btn.setFixedSize(38, 26)
+        self._speed_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._speed_btn.setToolTip("Velocidad de reproducción")
+        self._speed_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(182,196,255,0.10);
+                border: 1px solid rgba(182,196,255,0.24);
+                border-radius: 9px; padding: 0;
+                color: {PRI}; font-size: 11px; font-weight: 700;
+            }}
+            QPushButton:hover {{ background: rgba(182,196,255,0.20); }}
+        """)
+        self._speed_btn.clicked.connect(self._cycle_speed)
+        row.addWidget(self._speed_btn)
+        row.addStretch()
+
+    def _ensure_player(self):
+        if self._player is not None:
+            return
+        self._output = QAudioOutput()
+        self._player = QMediaPlayer()
+        self._player.setAudioOutput(self._output)
+        self._player.setSource(QUrl(self._url))
+        self._player.setPlaybackRate(self._rate)
+        self._player.durationChanged.connect(self._on_duration)
+        self._player.positionChanged.connect(self._on_position)
+        self._player.playbackStateChanged.connect(self._on_state)
+
+    def _toggle(self):
+        self._ensure_player()
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+        else:
+            self._window._stop_other_audio(self)
+            self._player.play()
+
+    def pause(self):
+        if self._player is not None:
+            self._player.pause()
+
+    def _cycle_speed(self):
+        idx = (self._rates.index(self._rate) + 1) % len(self._rates) if self._rate in self._rates else 0
+        self._rate = self._rates[idx]
+        label = f"{self._rate:g}x"
+        self._speed_btn.setText(label)
+        if self._player is not None:
+            self._player.setPlaybackRate(self._rate)
+
+    def _on_duration(self, ms: int):
+        self._duration = ms
+        self._slider.setRange(0, ms)
+        self._time.setText(_fmt_audio_time(ms))
+
+    def _on_position(self, ms: int):
+        if not self._seeking:
+            self._slider.setValue(ms)
+        remaining = self._duration - ms if self._duration else 0
+        self._time.setText(_fmt_audio_time(remaining if self._duration else ms))
+
+    def _on_seek_release(self):
+        self._seeking = False
+        if self._player is not None:
+            self._player.setPosition(self._slider.value())
+
+    def _on_state(self, state):
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self._play_btn.setIcon(_wa_icon("pause" if playing else "play", PRI, 18))
+        if state == QMediaPlayer.PlaybackState.StoppedState:
+            self._slider.setValue(0)
+            self._time.setText(_fmt_audio_time(self._duration))
+
+
 class WhatsAppWindow(QWidget):
     close_requested = pyqtSignal()
     avatar_loaded = pyqtSignal(str, str)
@@ -174,6 +485,7 @@ class WhatsAppWindow(QWidget):
     message_acks_loaded = pyqtSignal(str, object)
     media_preview_loaded = pyqtSignal(str, object, str)
     suggestion_ready = pyqtSignal(str, str, str)
+    transcription_ready = pyqtSignal(str, str, str)
     incoming_message = pyqtSignal(dict)
     bridge_state = pyqtSignal(dict)
 
@@ -212,6 +524,10 @@ class WhatsAppWindow(QWidget):
         self._media_preview_labels: dict[str, list[QLabel]] = {}
         self._media_preview_cache: dict[str, bytes] = {}
         self._media_preview_loading: set[str] = set()
+        # Inline audio players (only one sounds at a time) + transcription targets.
+        self._audio_players: list = []
+        self._transcribe_widgets: dict[str, tuple] = {}
+        self._transcribing: set[str] = set()
         self._chat_filter = "all"
         self._loading_chats = False
         self._loading_chat_ids: set[str] = set()
@@ -258,20 +574,20 @@ class WhatsAppWindow(QWidget):
                 font-weight: 600;
             }}
             QPushButton:hover {{
-                background: rgba(125, 211, 252, 0.16);
-                border-color: rgba(125, 211, 252, 0.40);
+                background: rgba(182, 196, 255, 0.16);
+                border-color: rgba(182, 196, 255, 0.40);
                 color: {TEXT};
             }}
             QLineEdit {{
                 background: rgba(3, 10, 18, 0.72);
                 color: {TEXT};
-                border: 1px solid rgba(125, 211, 252, 0.13);
+                border: 1px solid rgba(182, 196, 255, 0.13);
                 border-radius: 8px;
                 padding: 8px 11px;
                 font-size: 12px;
             }}
             QLineEdit:focus {{
-                border-color: rgba(125, 211, 252, 0.45);
+                border-color: rgba(182, 196, 255, 0.45);
                 background: rgba(7, 19, 31, 0.92);
             }}
             QScrollBar:vertical {{
@@ -281,14 +597,14 @@ class WhatsAppWindow(QWidget):
                 border: none;
             }}
             QScrollBar::handle:vertical {{
-                background: rgba(125, 211, 252, 0.24);
+                background: rgba(182, 196, 255, 0.24);
                 border: none;
                 border-radius: 3px;
                 min-height: 34px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: rgba(125, 211, 252, 0.42);
-                border-color: rgba(125, 211, 252, 0.45);
+                background: rgba(182, 196, 255, 0.42);
+                border-color: rgba(182, 196, 255, 0.45);
             }}
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical,
@@ -311,6 +627,7 @@ class WhatsAppWindow(QWidget):
         self.message_acks_loaded.connect(self._apply_message_acks)
         self.media_preview_loaded.connect(self._apply_media_preview)
         self.suggestion_ready.connect(self._apply_suggested_reply)
+        self.transcription_ready.connect(self._apply_transcription)
         self.incoming_message.connect(self._handle_incoming_message)
         self.bridge_state.connect(self._apply_bridge_state)
         # Polls the bridge while WhatsApp is unlinked so the in-panel QR stays
@@ -377,15 +694,15 @@ class WhatsAppWindow(QWidget):
                 QListWidget#WaChatList::item {
                     background: transparent;
                     border: none;
-                    border-bottom: 1px solid rgba(125, 211, 252, 0.07);
+                    border-bottom: 1px solid rgba(182, 196, 255, 0.07);
                     padding: 0;
                 }
                 QListWidget#WaChatList::item:hover {
-                    background: rgba(125, 211, 252, 0.055);
+                    background: rgba(182, 196, 255, 0.055);
                 }
                 QListWidget#WaChatList::item:selected {
-                    background: rgba(56, 189, 248, 0.12);
-                    border-left: 2px solid #38BDF8;
+                    background: rgba(94, 130, 255, 0.12);
+                    border-left: 2px solid #5E82FF;
                 }
             """)
 
@@ -398,7 +715,7 @@ class WhatsAppWindow(QWidget):
             self.chat_host.setStyleSheet("""
                 QWidget#WaChatHost {
                     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                        stop:0 #06111B, stop:0.55 #081722, stop:1 #07131D);
+                        stop:0 #080D20, stop:0.55 #0B1128, stop:1 #0A0F26);
                 }
             """)
             self.chat_layout = QVBoxLayout(self.chat_host)
@@ -420,6 +737,7 @@ class WhatsAppWindow(QWidget):
 
         self.reply_edit = _SendTextEdit()
         self.reply_edit.send_requested.connect(self.send_reply)
+        self.reply_edit.files_pasted.connect(self._send_pasted_files)
         self.reply_edit.setPlaceholderText('Escribe un mensaje' if self.chat_mode else 'Escribe la respuesta aqui...')
         if self.chat_mode:
             self.reply_edit.setMinimumHeight(42)
@@ -428,14 +746,14 @@ class WhatsAppWindow(QWidget):
                 QTextEdit {{
                     background: rgba(3, 11, 19, 0.76);
                     color: {TEXT};
-                    border: 1px solid rgba(125, 211, 252, 0.13);
+                    border: 1px solid rgba(182, 196, 255, 0.13);
                     border-radius: 10px;
                     padding: 9px 12px;
                     font-size: 13px;
                 }}
                 QTextEdit:focus {{
                     background: rgba(5, 16, 27, 0.94);
-                    border-color: rgba(125, 211, 252, 0.42);
+                    border-color: rgba(182, 196, 255, 0.42);
                 }}
             """)
 
@@ -474,7 +792,7 @@ class WhatsAppWindow(QWidget):
             root.setObjectName("WaRoot")
             root.setStyleSheet("""
                 QFrame#WaRoot {
-                    background: #07131D;
+                    background: #0A0F26;
                     border: none;
                     border-radius: 10px;
                 }
@@ -490,7 +808,7 @@ class WhatsAppWindow(QWidget):
             chats_panel.setStyleSheet("""
                 QFrame#WaChatsPanel {
                     background: rgba(8, 20, 30, 0.98);
-                    border-left: 1px solid rgba(125, 211, 252, 0.12);
+                    border-left: 1px solid rgba(182, 196, 255, 0.12);
                 }
             """)
             chats_col = QVBoxLayout(chats_panel)
@@ -529,7 +847,7 @@ class WhatsAppWindow(QWidget):
             chat_panel.setObjectName("WaChatPanel")
             chat_panel.setStyleSheet("""
                 QFrame#WaChatPanel {
-                    background: #07131D;
+                    background: #0A0F26;
                     border: none;
                 }
             """)
@@ -543,7 +861,7 @@ class WhatsAppWindow(QWidget):
             top_bar.setStyleSheet("""
                 QFrame#WaTopBar {
                     background: rgba(9, 24, 35, 0.98);
-                    border-bottom: 1px solid rgba(125, 211, 252, 0.12);
+                    border-bottom: 1px solid rgba(182, 196, 255, 0.12);
                 }
             """)
             top_lay = QHBoxLayout(top_bar)
@@ -552,7 +870,7 @@ class WhatsAppWindow(QWidget):
             self.header_avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.header_avatar.setFixedSize(38, 38)
             self.header_avatar.setScaledContents(True)
-            self.header_avatar.setStyleSheet("background: rgba(125,211,252,0.20); border-radius: 19px; color: white; font-weight: 800;")
+            self.header_avatar.setStyleSheet("background: rgba(182,196,255,0.20); border-radius: 19px; color: white; font-weight: 800;")
             title_box = QVBoxLayout()
             title_box.setSpacing(1)
             title_box.addWidget(self.chat_header)
@@ -562,7 +880,7 @@ class WhatsAppWindow(QWidget):
             top_lay.addStretch()
             privacy = QLabel("CIFRADO")
             privacy.setStyleSheet("""
-                color: rgba(167, 243, 208, 0.82);
+                color: rgba(74, 222, 128, 0.82);
                 background: rgba(52, 211, 153, 0.08);
                 border: 1px solid rgba(52, 211, 153, 0.16);
                 border-radius: 6px;
@@ -580,7 +898,7 @@ class WhatsAppWindow(QWidget):
             input_bar.setStyleSheet("""
                 QFrame#WaInputBar {
                     background: rgba(9, 24, 35, 0.98);
-                    border-top: 1px solid rgba(125, 211, 252, 0.12);
+                    border-top: 1px solid rgba(182, 196, 255, 0.12);
                 }
             """)
             input_lay = QHBoxLayout(input_bar)
@@ -662,7 +980,7 @@ class WhatsAppWindow(QWidget):
         page.setStyleSheet("""
             QFrame#WaQrPage {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #06111B, stop:0.55 #081722, stop:1 #07131D);
+                    stop:0 #080D20, stop:0.55 #0B1128, stop:1 #0A0F26);
                 border-radius: 10px;
             }
         """)
@@ -671,64 +989,160 @@ class WhatsAppWindow(QWidget):
         lay.setSpacing(14)
         lay.addStretch()
 
-        title = QLabel("Vincula WhatsApp")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT};")
-        lay.addWidget(title)
+        self._qr_title = QLabel("Conectando WhatsApp")
+        self._qr_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._qr_title.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT};")
+        lay.addWidget(self._qr_title)
 
-        subtitle = QLabel(
+        self._qr_subtitle = QLabel(
             "Abre WhatsApp en tu telefono → Dispositivos vinculados →\n"
             "Vincular un dispositivo, y escanea este codigo."
         )
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {TEXT_MED};")
-        lay.addWidget(subtitle)
+        self._qr_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._qr_subtitle.setWordWrap(True)
+        self._qr_subtitle.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {TEXT_MED};")
+        lay.addWidget(self._qr_subtitle)
 
+        # Loading state: an animated spinner shown while the bridge starts up or
+        # syncs, so the user sees clear progress instead of a stuck "waiting".
+        self._qr_spinner = _WaSpinner(64)
+        lay.addWidget(self._qr_spinner, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # Linking state: the actual QR image (hidden until a code is available).
         self._qr_image = QLabel()
         self._qr_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._qr_image.setFixedSize(280, 280)
         self._qr_image.setStyleSheet("background: #FFFFFF; border-radius: 10px;")
         lay.addWidget(self._qr_image, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        self._qr_status = QLabel("Conectando con el bridge…")
+        self._qr_status = QLabel("Iniciando el bridge…")
         self._qr_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._qr_status.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {TEXT_DIM};")
         lay.addWidget(self._qr_status)
 
+        # Escape hatch: appears only when a link/loading has stalled, forcing a
+        # fresh connection attempt on the bridge.
+        self._qr_retry = QPushButton("Reintentar")
+        self._qr_retry.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._qr_retry.setFixedHeight(34)
+        self._qr_retry.setStyleSheet(
+            "QPushButton { background: rgba(124,154,255,0.16); color: #B6C4FF;"
+            " border: 1px solid rgba(124,154,255,0.36); border-radius: 8px;"
+            " padding: 0 22px; font-size: 11px; font-weight: 700; }"
+            " QPushButton:hover { background: rgba(124,154,255,0.26); }"
+            " QPushButton:disabled { color: #7F91A8; border-color: rgba(255,255,255,0.10); }"
+        )
+        self._qr_retry.clicked.connect(self._on_qr_retry)
+        self._qr_retry.hide()
+        lay.addWidget(self._qr_retry, 0, Qt.AlignmentFlag.AlignHCenter)
+
         lay.addStretch()
+
+        # How many consecutive polls we've waited without a QR/ready; used to
+        # reveal the retry button only once things are actually stuck.
+        self._qr_wait_polls = 0
+        self._set_qr_mode("loading")
         return page
 
+    def _set_qr_mode(self, mode: str):
+        """Toggle between the 'loading' spinner view and the 'qr' image view."""
+        loading = mode == "loading"
+        self._qr_spinner.setVisible(loading)
+        if loading:
+            self._qr_spinner.start()
+        else:
+            self._qr_spinner.stop()
+        self._qr_image.setVisible(not loading)
+        self._qr_subtitle.setVisible(not loading)
+        self._qr_title.setText("Vincula WhatsApp" if not loading else "Conectando WhatsApp")
+
+    def _on_qr_retry(self):
+        self._qr_retry.setEnabled(False)
+        self._qr_retry.setText("Reintentando…")
+        self._qr_wait_polls = 0
+
+        def worker():
+            try:
+                from actions.whatsapp import bridge_reconnect
+                bridge_reconnect()
+            except Exception:
+                pass
+            # Re-enable shortly after so a stuck retry can be tried again.
+            QTimer.singleShot(4000, self._reset_qr_retry)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _reset_qr_retry(self):
+        self._qr_retry.setEnabled(True)
+        self._qr_retry.setText("Reintentar")
+
     def _render_qr(self, payload: dict):
-        """Paint the QR from a /qr bridge payload onto the in-panel view."""
-        qr_raw = (payload or {}).get("qr")
+        """Drive the in-panel linking view from a /qr bridge payload.
+
+        Shows an animated loading screen while the bridge is starting or the
+        phone is syncing, and only swaps to the QR image once a code exists.
+        """
+        payload = payload or {}
+        qr_raw = payload.get("qr")
+        # `state` is authoritative on newer bridges; fall back to inferring it
+        # from the ready/qr fields so an older bridge still behaves sanely.
+        state = payload.get("state")
+        detail = payload.get("detail") or ""
+        if not state:
+            if not payload:
+                state = "starting"
+            elif payload.get("ready"):
+                state = "ready"
+            elif qr_raw:
+                state = "qr"
+            else:
+                state = "starting"
+
+        if state == "qr" and qr_raw:
+            self._qr_wait_polls = 0
+            self._qr_retry.hide()
+            self._set_qr_mode("qr")
+            try:
+                import io
+                import qrcode
+                img = qrcode.make(qr_raw)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                pix = QPixmap()
+                pix.loadFromData(buf.read())
+                pix = pix.scaled(
+                    264, 264,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._qr_image.setPixmap(pix)
+                self._qr_status.setText("Escanea el codigo con tu telefono")
+            except Exception as exc:
+                self._qr_image.clear()
+                self._qr_status.setText(f"No se pudo generar el QR — {exc}")
+            return
+
+        # Any non-QR state → loading screen with the bridge's own detail text.
+        self._set_qr_mode("loading")
         if not payload:
-            self._qr_image.clear()
-            self._qr_status.setText("Bridge de WhatsApp no disponible. Reintentando…")
-            return
-        if not qr_raw:
-            self._qr_image.clear()
-            self._qr_status.setText("Esperando codigo QR…")
-            return
-        try:
-            import io
-            import qrcode
-            img = qrcode.make(qr_raw)
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            buf.seek(0)
-            pix = QPixmap()
-            pix.loadFromData(buf.read())
-            pix = pix.scaled(
-                264, 264,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._qr_image.setPixmap(pix)
-            self._qr_status.setText("Escanea el codigo con tu telefono")
-        except Exception as exc:
-            self._qr_image.clear()
-            self._qr_status.setText(f"No se pudo generar el QR — {exc}")
+            msg = "Iniciando el bridge de WhatsApp…"
+        elif state in ("auth_failure", "disconnected"):
+            msg = detail or "Reconectando con WhatsApp…"
+        elif state == "loading":
+            msg = detail or "Sincronizando WhatsApp…"
+        else:  # starting / unknown
+            msg = detail or "Preparando la vinculación…"
+        self._qr_status.setText(msg)
+
+        # Reveal the retry button once we've been stuck for a while (~20s at a
+        # 2.5s poll). Syncing (loading) legitimately takes longer than a QR
+        # wait, so give it a bigger grace period (~75s) instead of hiding the
+        # button outright — a hung sync must still be manually recoverable.
+        self._qr_wait_polls += 1
+        threshold = 30 if state == "loading" else 8
+        if self._qr_wait_polls >= threshold:
+            self._qr_retry.show()
 
     def _apply_bridge_state(self, status: dict):
         """React to bridge readiness: show chats or the in-panel QR linker."""
@@ -886,9 +1300,9 @@ class WhatsAppWindow(QWidget):
         if active:
             return f"""
                 QPushButton {{
-                    background: rgba(56, 189, 248, 0.16);
+                    background: rgba(94, 130, 255, 0.16);
                     color: {TEXT};
-                    border: 1px solid rgba(125, 211, 252, 0.28);
+                    border: 1px solid rgba(182, 196, 255, 0.28);
                     border-radius: 7px;
                     padding: 6px 11px;
                     font-size: 11px;
@@ -906,7 +1320,7 @@ class WhatsAppWindow(QWidget):
                 font-weight: 650;
             }}
             QPushButton:hover {{
-                background: rgba(125, 211, 252, 0.13);
+                background: rgba(182, 196, 255, 0.13);
                 color: {TEXT};
             }}
         """
@@ -1056,6 +1470,33 @@ class WhatsAppWindow(QWidget):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _merge_pending_messages(self, chat_id: str, bridge_msgs: list) -> list:
+        """Merge pending messages from whatsapp_pending.json with bridge messages."""
+        try:
+            from actions.paths import DATA_DIR
+            import json
+            pending_file = DATA_DIR / "whatsapp_pending.json"
+            if not pending_file.exists():
+                return bridge_msgs
+
+            pending_data = json.loads(pending_file.read_text(encoding="utf-8"))
+            bridge_ids = {m.get("id") for m in bridge_msgs}
+
+            # Add pending messages that aren't already in bridge messages
+            for msg in pending_data.values():
+                if isinstance(msg, dict):
+                    msg_from = str(msg.get("from") or "").strip()
+                    msg_id = msg.get("id")
+                    # Only include if it's from this chat and not already loaded
+                    if msg_from == chat_id and msg_id not in bridge_ids:
+                        bridge_msgs.append(msg)
+
+            # Sort by timestamp
+            bridge_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
+            return bridge_msgs
+        except Exception:
+            return bridge_msgs
+
     def _apply_loaded_conversation(self, chat_id: str, msgs, display_name: str):
         chat_id = str(chat_id or "")
         self._loading_chat_ids.discard(chat_id)
@@ -1068,6 +1509,8 @@ class WhatsAppWindow(QWidget):
             error = str(msgs.get("error") or "")
             msgs = msgs.get("messages") or []
         msgs = msgs if isinstance(msgs, list) else []
+        # Merge pending messages from whatsapp_pending.json
+        msgs = self._merge_pending_messages(chat_id, msgs)
         # If the bridge returned as many messages as we asked for, older ones
         # likely still exist, so keep pagination enabled for this chat.
         requested = self._chat_fetch_limit.get(chat_id, self._chat_page_size)
@@ -1088,6 +1531,11 @@ class WhatsAppWindow(QWidget):
     def _begin_message_render(self, msgs: list[dict], display_name: str, preserve_scroll: bool = False):
         self._render_scroll_mode = "preserve" if preserve_scroll else "bottom"
         self._clear_chat()
+        # Anchor messages to the bottom (WhatsApp-style): a single stretch at the
+        # TOP absorbs spare space, so the newest message always sits at the
+        # bottom and later addWidget() calls (optimistic sends, live messages)
+        # append below every existing bubble instead of after a trailing stretch.
+        self.chat_layout.addStretch()
         self._render_total_count = len(msgs)
         render_msgs = msgs[-800:] if len(msgs) > 800 else msgs
         if self._render_total_count > len(render_msgs):
@@ -1112,7 +1560,8 @@ class WhatsAppWindow(QWidget):
         if not self._render_queue:
             if self._message_render_timer.isActive():
                 self._message_render_timer.stop()
-            self.chat_layout.addStretch()
+            # Bottom anchoring is handled by the leading stretch added in
+            # _begin_message_render; no trailing stretch here.
             if self._render_scroll_mode == "preserve":
                 QTimer.singleShot(20, self._restore_scroll_after_more)
             else:
@@ -1155,9 +1604,9 @@ class WhatsAppWindow(QWidget):
         avatar.setScaledContents(True)
         avatar.setStyleSheet(f"""
             QLabel {{
-                background: rgba(125, 211, 252, 0.16);
+                background: rgba(182, 196, 255, 0.16);
                 color: {TEXT};
-                border: 1px solid rgba(125, 211, 252, 0.16);
+                border: 1px solid rgba(182, 196, 255, 0.16);
                 border-radius: 22px;
                 font-weight: 700;
             }}
@@ -1175,15 +1624,13 @@ class WhatsAppWindow(QWidget):
 
         text_col = QVBoxLayout()
         text_col.setSpacing(3)
-        name_lbl = QLabel(name)
+        name_lbl = _ElidedLabel(name)
         name_lbl.setStyleSheet(f"color: {TEXT}; font-weight: 700; font-size: 13px;")
-        name_lbl.setMaximumWidth(205)
         name_lbl.setToolTip(name)
-        preview_lbl = QLabel(preview or "Sin mensajes")
+        preview_lbl = _ElidedLabel(preview or "Sin mensajes")
         preview_lbl.setStyleSheet(f"color: {TEXT_MED}; font-size: 11px;")
-        preview_lbl.setWordWrap(False)
-        preview_lbl.setMaximumWidth(220)
-        preview_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        if preview:
+            preview_lbl.setToolTip(preview)
         text_col.addWidget(name_lbl)
         text_col.addWidget(preview_lbl)
 
@@ -1205,7 +1652,7 @@ class WhatsAppWindow(QWidget):
             )
             badge.setStyleSheet("""
                 QLabel {
-                    background: #38BDF8;
+                    background: #5E82FF;
                     color: white;
                     border-radius: 9px;
                     font-size: 10px;
@@ -1372,7 +1819,7 @@ class WhatsAppWindow(QWidget):
         chat_id = str(chat_id or "").strip()
         if not chat_id:
             return
-        now = int(time.time())
+        now = int(time.time() * 1000)  # ms, to match bridge chat timestamps for sorting
         for chat in self._all_chats:
             if str(chat.get("chatId") or "") == chat_id:
                 chat["preview"] = preview
@@ -1394,40 +1841,65 @@ class WhatsAppWindow(QWidget):
             self.chat_list.setCurrentItem(self._chat_items[chat_id])
 
     def _handle_incoming_message(self, entry: dict):
-        """React to a new incoming message detected by the manager (GUI thread)."""
+        """React to a new message detected by the manager (GUI thread) —
+        incoming, sent from the linked phone, or sent by Jarvis via voice."""
         if not self.chat_mode:
             return
+        # 'from' is the chat id here (the manager normalizes it that way — see
+        # whatsapp_manager.py), regardless of who actually sent the message.
         chat_id = str((entry or {}).get("from") or "").strip()
         if not chat_id:
             return
-        # If the affected chat is open, show the message right away.
         if chat_id == self.current_chat_id:
+            # Append straight from the entry we already have. Calling
+            # load_conversation() here would look like a refresh but does
+            # nothing: this chat is always in _conversation_cache while open,
+            # so it hits the cache branch and just re-renders the stale list.
             self._append_incoming_message(chat_id, entry)
-            self._mark_open_chat_read(chat_id)
-        # Reconcile the chat list (preview, order, unread) with WhatsApp's real
-        # state, coalescing bursts into a single refresh.
+        # Always refresh chat list (preview, order, unread count).
         self._incoming_refresh_timer.start(800)
 
     def _append_incoming_message(self, chat_id: str, entry: dict):
-        msg = {
-            "id": entry.get("id"),
-            "from": chat_id,
-            "to": "me",
-            "chatId": chat_id,
-            "author": entry.get("author"),
-            "senderName": entry.get("senderName"),
-            "body": entry.get("body") or "",
-            "type": entry.get("type") or "chat",
-            "fromMe": False,
-            "direction": "in",
-            "timestamp": entry.get("timestamp"),
-        }
+        from_me = bool(entry.get("fromMe"))
+        body = entry.get("body") or ""
+        timestamp = entry.get("timestamp")
         cached, name = self._conversation_cache.get(chat_id, (None, self.current_chat_name or chat_id))
         if cached is None:
             return  # conversation not loaded yet; the upcoming load will include it
-        mid = str(msg.get("id") or "").strip()
+        mid = str(entry.get("id") or "").strip()
         if mid and any(str(m.get("id") or "") == mid for m in cached):
             return  # already present (dedup against poll/refresh)
+        if from_me:
+            # A message sent from *this* panel already exists as an optimistic
+            # "local-…" bubble; _apply_message_send_result() swaps in the real
+            # id once the bridge confirms. Skip it here so it doesn't flash as
+            # a second, briefly-duplicated bubble while that swap is pending.
+            for m in reversed(cached):
+                if (
+                    m.get("_pending")
+                    and bool(m.get("fromMe"))
+                    and (m.get("body") or "") == body
+                    and abs(int(m.get("timestamp") or 0) - int(timestamp or 0)) < 15000
+                ):
+                    return
+        msg = {
+            "id": entry.get("id"),
+            "from": chat_id,
+            "to": chat_id if from_me else "me",
+            "chatId": chat_id,
+            "author": entry.get("author"),
+            "senderName": entry.get("senderName"),
+            "body": body,
+            "type": entry.get("type") or "chat",
+            "fromMe": from_me,
+            "direction": "out" if from_me else "in",
+            "timestamp": timestamp,
+            "hasMedia": bool(entry.get("hasMedia") or entry.get("mediaUrl")),
+            "mediaUrl": entry.get("mediaUrl"),
+            "mentionedIds": entry.get("mentionedIds") or [],
+            "mentions": entry.get("mentions") or {},
+            "ack": entry.get("ack"),
+        }
         cached = [dict(m) for m in cached] + [msg]
         self._conversation_cache[chat_id] = (cached, name)
         # Render the bubble only if this chat is on screen and idle.
@@ -1436,8 +1908,8 @@ class WhatsAppWindow(QWidget):
             and chat_id not in self._loading_chat_ids
             and not self._message_render_timer.isActive()
         ):
-            who = msg.get("senderName") or name or chat_id
-            self._add_message_bubble(msg, who, False)
+            who = "Yo" if from_me else (entry.get("senderName") or name or chat_id)
+            self._add_message_bubble(msg, who, from_me, animate=True)
             QTimer.singleShot(20, self._scroll_bottom)
 
     def _mark_open_chat_read(self, chat_id: str):
@@ -1535,6 +2007,13 @@ class WhatsAppWindow(QWidget):
         self._render_chat_list()
 
     def _clear_chat(self):
+        for player in self._audio_players:
+            try:
+                player.pause()
+            except RuntimeError:
+                pass
+        self._audio_players.clear()
+        self._transcribe_widgets.clear()
         self._message_bubbles.clear()
         self._message_text_labels.clear()
         self._message_meta_labels.clear()
@@ -1555,8 +2034,8 @@ class WhatsAppWindow(QWidget):
         label.setMaximumWidth(430)
         label.setStyleSheet(f"""
             color: {TEXT_MED};
-            background: rgba(125, 211, 252, 0.035);
-            border: 1px solid rgba(125, 211, 252, 0.08);
+            background: rgba(182, 196, 255, 0.035);
+            border: 1px solid rgba(182, 196, 255, 0.08);
             border-radius: 10px;
             padding: 22px 26px;
             font-size: 12px;
@@ -1611,7 +2090,7 @@ class WhatsAppWindow(QWidget):
         pill.setStyleSheet(
             "color: rgba(203, 213, 225, 0.78);"
             "background: rgba(9, 24, 35, 0.92);"
-            "border: 1px solid rgba(125, 211, 252, 0.12);"
+            "border: 1px solid rgba(182, 196, 255, 0.12);"
             "border-radius: 10px;"
             "padding: 4px 12px;"
             "font-size: 10px; font-weight: 700;"
@@ -1695,7 +2174,8 @@ class WhatsAppWindow(QWidget):
         if changed:
             self._conversation_cache[chat_id] = (updated, name)
 
-    def _add_message_bubble(self, msg: dict, who: str, from_me: bool):
+    def _add_message_bubble(self, msg: dict, who: str, from_me: bool,
+                            animate: bool = False):
         if msg.get("_sep"):
             self._add_day_separator(str(msg.get("_sep")))
             return
@@ -1714,7 +2194,7 @@ class WhatsAppWindow(QWidget):
         bubble.setStyleSheet(f"""
             QFrame#msgOut {{
                 background: rgba(22, 91, 151, 0.76);
-                border: 1px solid rgba(125, 211, 252, 0.13);
+                border: 1px solid rgba(182, 196, 255, 0.13);
                 border-radius: 10px;
             }}
             QFrame#msgIn {{
@@ -1727,7 +2207,31 @@ class WhatsAppWindow(QWidget):
         lay.setContentsMargins(13, 9, 11, 7)
         lay.setSpacing(6)
 
+        has_media = bool(msg.get("hasMedia") or msg.get("mediaUrl"))
+        msg_type_raw = str(msg.get("type") or "").lower()
         body = self._format_mentions((msg.get("body") or "").strip(), msg)
+        # The bridge fills media messages with a placeholder body like "[nota de
+        # voz]" / "[imagen]". When we render the actual media widget below, hide
+        # that placeholder so it isn't shown next to the player (real captions,
+        # which aren't fully bracketed, are kept).
+        if has_media and re.fullmatch(r"\[[^\[\]]+\]", body or ""):
+            body = ""
+
+        # Stickers: fully transparent bubble (no background, no border).
+        is_sticker = msg_type_raw == "sticker"
+        if is_sticker:
+            bubble.setStyleSheet("QFrame { background: transparent; border: none; }")
+
+        # Pure-media messages (no caption text): remove excess padding so the
+        # image fills the bubble edge-to-edge.
+        transcription = msg.get("transcription", "").strip()
+        is_pure_media = has_media and not body and not transcription
+        if is_sticker:
+            lay.setContentsMargins(0, 0, 0, 0)
+        elif is_pure_media:
+            lay.setContentsMargins(4, 4, 4, 4)
+        # else keep default (13, 9, 11, 7) set above
+
         if body:
             text = QLabel(body)
             text.setWordWrap(True)
@@ -1739,6 +2243,18 @@ class WhatsAppWindow(QWidget):
             text.setMaximumWidth(text_w)
             lay.addWidget(text)
             self._message_text_labels.append(text)
+
+        # Show audio transcription if available (transcription already set above)
+        if transcription:
+            transcript_label = QLabel(f"📝 {transcription}")
+            transcript_label.setWordWrap(True)
+            transcript_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            transcript_label.setAlignment(Qt.AlignmentFlag.AlignRight if from_me else Qt.AlignmentFlag.AlignLeft)
+            transcript_label.setStyleSheet(f"color: {TEXT_DIM}; font-size: 12px; font-style: italic; background: transparent; margin-top: 4px;")
+            transcript_w = self._message_text_width(transcript_label, transcription, bubble_w)
+            transcript_label.setMinimumWidth(transcript_w)
+            transcript_label.setMaximumWidth(transcript_w)
+            lay.addWidget(transcript_label)
 
         if msg.get("hasMedia") or msg.get("mediaUrl"):
             self._add_media_widget(lay, msg)
@@ -1789,6 +2305,8 @@ class WhatsAppWindow(QWidget):
         wrapper.setStyleSheet("background: transparent;")
         wrapper.setLayout(row)
         self.chat_layout.addWidget(wrapper)
+        if animate:
+            _fade_in(wrapper)
         self._message_bubbles.append(bubble)
 
     def _bubble_max_width(self) -> int:
@@ -1883,20 +2401,21 @@ class WhatsAppWindow(QWidget):
             lay.addWidget(label)
             return
 
-        visual_types = {"image", "sticker", "video"}
+        visual_types = {"image", "sticker", "video", "gif"}
         if msg_type in visual_types:
-            preview = QLabel("Cargando vista previa...")
+            max_w = 160 if msg_type == "sticker" else 260
+            placeholder_h = max_w if msg_type == "sticker" else 140
+            preview = QLabel()
             preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            preview.setFixedSize(300, 180 if msg_type == "video" else 230)
-            preview.setStyleSheet("""
-                QLabel {
-                    color: rgba(203, 213, 225, 0.72);
-                    background: rgba(2, 8, 15, 0.52);
-                    border: 1px solid rgba(255, 255, 255, 0.07);
-                    border-radius: 8px;
-                    font-size: 11px;
-                }
-            """)
+            preview.setFixedSize(max_w, placeholder_h)
+            # No background, no border — the image IS the content.
+            # For video only, keep a subtle dark background behind the thumbnail.
+            if msg_type == "video":
+                preview.setStyleSheet(
+                    "QLabel { background: rgba(2, 8, 15, 0.52); border-radius: 8px; }"
+                )
+            else:
+                preview.setStyleSheet("QLabel { background: transparent; }")
             lay.addWidget(preview)
             self._media_preview_labels.setdefault(url, []).append(preview)
             cached = self._media_preview_cache.get(url)
@@ -1904,10 +2423,29 @@ class WhatsAppWindow(QWidget):
                 self._set_media_preview(preview, cached, msg_type)
             else:
                 self._load_media_preview(url, msg_type)
+
+            # "Abrir" button — skip for stickers (they have no useful external URL)
+            if msg_type != "sticker":
+                btn = QPushButton("Abrir")
+                btn.setToolTip("Abrir archivo multimedia")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setStyleSheet("""
+                    QPushButton {
+                        color: rgba(226, 232, 240, 0.78);
+                        background: transparent; border: none;
+                        border-radius: 7px; padding: 3px 6px;
+                        text-align: right; font-size: 10px; font-weight: 650;
+                    }
+                    QPushButton:hover { color: #B6C4FF; background: rgba(182,196,255,0.08); }
+                """)
+                btn.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+                lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        elif msg_type in {"audio", "ptt"}:
+            self._add_audio_widget(lay, msg, url)
+            return
         else:
             title = QLabel({
-                "audio": "Audio",
-                "ptt": "Nota de voz",
                 "document": "Documento",
             }.get(msg_type, "Archivo multimedia"))
             title.setStyleSheet(
@@ -1916,29 +2454,105 @@ class WhatsAppWindow(QWidget):
                 "padding: 12px 14px; font-size: 12px; font-weight: 650;"
             )
             lay.addWidget(title)
+            btn = QPushButton("Abrir")
+            btn.setToolTip("Abrir archivo multimedia")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    color: rgba(226, 232, 240, 0.88); background: transparent;
+                    border: none; border-radius: 7px; padding: 5px 8px;
+                    text-align: right; font-size: 10px; font-weight: 650;
+                }
+                QPushButton:hover { color: #B6C4FF; background: rgba(182,196,255,0.08); }
+            """)
+            btn.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+            lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignRight)
 
-        btn = QPushButton("Abrir")
-        btn.setToolTip("Abrir archivo multimedia")
-        btn.setAccessibleName("Abrir archivo multimedia")
+    def _add_audio_widget(self, lay: QVBoxLayout, msg: dict, url: str):
+        is_ptt = str(msg.get("type") or "").lower() == "ptt"
+        player = _AudioPlayer(url, self, is_ptt=is_ptt)
+        self._audio_players.append(player)
+        lay.addWidget(player)
+
+        # If a transcription already exists, the bubble shows it above already.
+        if str(msg.get("transcription") or "").strip():
+            return
+
+        key = str(msg.get("id") or url)
+        btn = QPushButton("  Transcribir")
+        btn.setIcon(_wa_icon("transcribe", TEXT_MED, 15))
+        btn.setIconSize(QSize(14, 14))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setStyleSheet("""
             QPushButton {
-                color: rgba(226, 232, 240, 0.88);
-                background: transparent;
-                border: none;
-                border-radius: 7px;
-                padding: 5px 8px;
-                text-align: right;
-                font-size: 10px;
-                font-weight: 650;
+                color: rgba(226, 232, 240, 0.85); background: transparent;
+                border: none; border-radius: 7px; padding: 4px 6px;
+                text-align: left; font-size: 11px; font-weight: 650;
             }
-            QPushButton:hover {
-                color: #7DD3FC;
-                background: rgba(125, 211, 252, 0.08);
-            }
+            QPushButton:hover { color: #B6C4FF; background: rgba(182, 196, 255, 0.08); }
+            QPushButton:disabled { color: rgba(148, 163, 184, 0.6); }
         """)
-        btn.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
-        lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignRight)
+        result_label = QLabel()
+        result_label.setWordWrap(True)
+        result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        result_label.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 12px; font-style: italic;"
+            " background: transparent; margin-top: 2px;"
+        )
+        result_label.hide()
+        btn.clicked.connect(lambda _=False, m=dict(msg), k=key: self._transcribe_audio(m, k))
+        self._transcribe_widgets[key] = (result_label, btn)
+        lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(result_label)
+
+    def _stop_other_audio(self, current: "_AudioPlayer"):
+        for player in self._audio_players:
+            if player is not current:
+                try:
+                    player.pause()
+                except RuntimeError:
+                    pass
+
+    def _transcribe_audio(self, msg: dict, key: str):
+        if key in self._transcribing or key not in self._transcribe_widgets:
+            return
+        _label, btn = self._transcribe_widgets[key]
+        self._transcribing.add(key)
+        btn.setEnabled(False)
+        btn.setText("  Transcribiendo...")
+
+        def worker():
+            text = ""
+            error = ""
+            try:
+                from .whatsapp import transcribe_message_audio
+
+                text = transcribe_message_audio(msg) or ""
+                if not text:
+                    error = "No se pudo transcribir el audio."
+            except Exception as exc:
+                error = str(exc)
+            self.transcription_ready.emit(key, text, error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_transcription(self, key: str, text: str, error: str):
+        self._transcribing.discard(key)
+        target = self._transcribe_widgets.get(key)
+        if not target:
+            return
+        label, btn = target
+        try:
+            if error:
+                btn.setEnabled(True)
+                btn.setText("  Reintentar transcripción")
+                QMessageBox.warning(self, "Transcripción", error)
+                return
+            label.setText(f"📝 {text}")
+            label.show()
+            btn.hide()
+        except RuntimeError:
+            pass
 
     def _load_media_preview(self, url: str, msg_type: str):
         if not url or url in self._media_preview_loading:
@@ -1996,44 +2610,96 @@ class WhatsAppWindow(QWidget):
                 self._media_preview_labels[url].remove(label)
 
     def _set_media_preview(self, label: QLabel, raw: bytes, msg_type: str):
+        max_w = 160 if msg_type == "sticker" else 260
+
+        # ── Animated content (GIF magic bytes, or sticker/gif type) ──────────
+        is_gif_bytes = len(raw) >= 6 and raw[:6] in (b"GIF87a", b"GIF89a")
+        try_animate = is_gif_bytes or msg_type in {"gif", "sticker"}
+        if try_animate:
+            ba = QByteArray(bytes(raw))
+            buf = QBuffer(ba)
+            buf.open(QIODevice.OpenModeFlag.ReadOnly)
+            movie = QMovie()
+            movie.setDevice(buf)
+            movie.setCacheMode(QMovie.CacheMode.CacheAll)
+            if movie.isValid():
+                movie.jumpToFrame(0)
+                src_sz = movie.currentPixmap().size()
+                if src_sz.width() > 0 and movie.frameCount() != 1:
+                    w = min(max_w, src_sz.width())
+                    h = max(1, int(src_sz.height() * w / src_sz.width()))
+                    movie.setScaledSize(QSize(w, h))
+                    label.setFixedSize(w, h)
+                    label.setMovie(movie)
+                    label._movie = movie  # prevent GC
+                    label._buf   = buf
+                    label._ba    = ba
+                    movie.setSpeed(100)
+                    movie.start()
+                    label.setText("")
+                    return
+            # fall through to static path if movie invalid or single-frame
+
+        # ── Static image ──────────────────────────────────────────────────────
         pixmap = QPixmap()
         if not pixmap.loadFromData(raw):
             label.setText("Vista previa no disponible")
             return
-        target = label.size()
-        scaled = pixmap.scaled(
-            target,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+
+        src_w, src_h = pixmap.width(), pixmap.height()
+        if src_w <= 0 or src_h <= 0:
+            label.setText("Vista previa no disponible")
+            return
+
+        w = min(max_w, src_w)
+        h = max(1, int(src_h * w / src_w))
+        scaled = pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+
         if msg_type == "video":
-            canvas = QPixmap(target)
-            canvas.fill(QColor("#07131D"))
+            canvas = QPixmap(QSize(w, h))
+            canvas.fill(QColor("#0A0F26"))
             painter = QPainter(canvas)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            x = (target.width() - scaled.width()) // 2
-            y = (target.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
-            center = QPointF(target.width() / 2, target.height() / 2)
+            painter.drawPixmap(0, 0, scaled)
+            cx, cy = w / 2, h / 2
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(3, 12, 22, 205))
-            painter.drawEllipse(center, 27, 27)
+            painter.drawEllipse(QPointF(cx, cy), 24.0, 24.0)
             painter.setBrush(QColor("#F8FAFC"))
             play = QPainterPath()
-            play.moveTo(center.x() - 6, center.y() - 10)
-            play.lineTo(center.x() + 11, center.y())
-            play.lineTo(center.x() - 6, center.y() + 10)
+            play.moveTo(cx - 5, cy - 9)
+            play.lineTo(cx + 10, cy)
+            play.lineTo(cx - 5, cy + 9)
             play.closeSubpath()
             painter.drawPath(play)
             painter.end()
             scaled = canvas
+
+        label.setFixedSize(w, h)
         label.setText("")
         label.setPixmap(scaled)
 
     def _scroll_bottom(self):
         try:
             bar = self.chat_scroll.verticalScrollBar()
-            bar.setValue(bar.maximum())
+            target = bar.maximum()
+            distance = target - bar.value()
+            # Saltos grandes (abrir un chat) van directos; los pequeños
+            # (mensaje nuevo) se animan para que el chat no dé tirones.
+            if distance <= 0 or distance > bar.pageStep() * 2 or not self.isVisible():
+                bar.setValue(target)
+                return
+            anim = getattr(self, "_scroll_anim", None)
+            if anim is not None:
+                anim.stop()
+            anim = QPropertyAnimation(bar, b"value", self)
+            anim.setDuration(240)
+            anim.setStartValue(bar.value())
+            anim.setEndValue(target)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._scroll_anim = anim
+            anim.start()
         except Exception:
             pass
 
@@ -2191,10 +2857,26 @@ class WhatsAppWindow(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "Adjuntar archivo", "", "Todos los archivos (*.*)")
         if not path:
             return
-        filename = Path(path).name
         caption = self.reply_edit.toPlainText().strip()
         self.reply_edit.clear()
-        to_id = target
+        self._send_media_file(path, target, caption)
+
+    def _send_pasted_files(self, paths):
+        if not self.chat_mode:
+            return
+        target = self.current_chat_id or self.chat_id or self.contact
+        if not target or "@" not in target:
+            QMessageBox.information(self, 'Info', 'Selecciona un chat primero')
+            return
+        caption = self.reply_edit.toPlainText().strip()
+        self.reply_edit.clear()
+        for index, path in enumerate(paths or []):
+            if path and Path(str(path)).is_file():
+                # Solo el primer archivo lleva el texto como pie de foto.
+                self._send_media_file(str(path), target, caption if index == 0 else "")
+
+    def _send_media_file(self, path: str, to_id: str, caption: str = ""):
+        filename = Path(path).name
         label = caption or filename
         optimistic = {
             "id": f"local-{int(time.time() * 1000)}",
@@ -2205,16 +2887,20 @@ class WhatsAppWindow(QWidget):
             "type": "document",
             "fromMe": True,
             "direction": "out",
-            "timestamp": int(time.time()),
+            "timestamp": int(time.time() * 1000),
             "_pending": True,
         }
-        cached, name = self._conversation_cache.get(target, ([], self.current_chat_name or target))
+        cached, name = self._conversation_cache.get(to_id, ([], self.current_chat_name or to_id))
         cached = [dict(m) for m in cached] + [optimistic]
-        self._conversation_cache[target] = (cached, name)
-        if target == self.current_chat_id:
-            self._add_message_bubble(optimistic, "Yo", True)
+        self._conversation_cache[to_id] = (cached, name)
+        if to_id == self.current_chat_id:
+            self._add_message_bubble(optimistic, "Yo", True, animate=True)
             QTimer.singleShot(20, self._scroll_bottom)
-        self._update_chat_preview(target, f"\U0001F4CE {label}")
+        try:
+            _pulse_glow(self.send_btn)
+        except Exception:
+            pass
+        self._update_chat_preview(to_id, f"\U0001F4CE {label}")
 
         def worker():
             response = {}
@@ -2223,7 +2909,7 @@ class WhatsAppWindow(QWidget):
                 response = send_whatsapp_media(to=to_id, file_path=path, caption=caption)
             except Exception as exc:
                 error = str(exc)
-            self.message_send_finished.emit(optimistic["id"], target, response, error)
+            self.message_send_finished.emit(optimistic["id"], to_id, response, error)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2250,15 +2936,19 @@ class WhatsAppWindow(QWidget):
                 "type": "chat",
                 "fromMe": True,
                 "direction": "out",
-                "timestamp": int(time.time()),
+                "timestamp": int(time.time() * 1000),
                 "_pending": True,
             }
             cached, name = self._conversation_cache.get(target, ([], self.current_chat_name or target))
             cached = [dict(m) for m in cached] + [optimistic]
             self._conversation_cache[target] = (cached, name)
             if target == self.current_chat_id:
-                self._add_message_bubble(optimistic, "Yo", True)
+                self._add_message_bubble(optimistic, "Yo", True, animate=True)
                 QTimer.singleShot(20, self._scroll_bottom)
+            try:
+                _pulse_glow(self.send_btn)
+            except Exception:
+                pass
             self._update_chat_preview(target, text)
 
             def worker():
@@ -2287,11 +2977,10 @@ class WhatsAppWindow(QWidget):
     def _apply_message_send_result(self, local_id: str, chat_id: str, response, error: str):
         cached, name = self._conversation_cache.get(chat_id, ([], self.current_chat_name or chat_id))
         updated = []
-        found = False
+        final_msg: dict | None = None
         for raw in cached:
             message = dict(raw)
             if str(message.get("id") or "") == local_id:
-                found = True
                 message.pop("_pending", None)
                 if error:
                     message["_failed"] = True
@@ -2301,16 +2990,43 @@ class WhatsAppWindow(QWidget):
                         message["id"] = response["id"]
                     if isinstance(response, dict) and response.get("ack") is not None:
                         message["ack"] = response["ack"]
+                final_msg = message
             updated.append(message)
-        if not found:
+        if final_msg is None:
             return
         self._conversation_cache[chat_id] = (updated, name)
-        if chat_id == self.current_chat_id:
+        if chat_id != self.current_chat_id:
+            return
+        # Actualiza la burbuja optimista in situ: re-renderizar toda la
+        # conversación aquí hacía saltar el scroll arriba y abajo y cortaba
+        # la animación de aparición del mensaje recién enviado.
+        meta = self._message_meta_labels.pop(local_id, None)
+        indicator = self._message_ack_indicators.pop(local_id, None)
+        if meta is None and indicator is None:
             self._apply_loaded_conversation(
-                chat_id,
-                {"messages": updated, "error": ""},
-                name,
+                chat_id, {"messages": updated, "error": ""}, name,
             )
+            return
+        new_id = str(final_msg.get("id") or local_id)
+        if meta is not None:
+            self._message_meta_labels[new_id] = meta
+            meta_text, _read = self._outgoing_meta_text(final_msg)
+            meta.setText(meta_text)
+            if error:
+                meta.setStyleSheet("""
+                    QLabel {
+                        color: #fca5a5;
+                        font-size: 10px;
+                        background: transparent;
+                        padding-top: 1px;
+                    }
+                """)
+        if indicator is not None:
+            self._message_ack_indicators[new_id] = indicator
+            try:
+                indicator.set_ack(int(final_msg.get("ack")))
+            except (TypeError, ValueError):
+                pass
 
 
 def main():

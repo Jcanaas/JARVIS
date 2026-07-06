@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from .whatsapp import fetch_messages, is_ignored_message, resolve_contact, send_whatsapp
+from .whatsapp import fetch_messages, is_ignored_message, resolve_contact, send_whatsapp, transcribe_message_audio
 
 from actions.paths import RESOURCE_DIR, DATA_DIR
 ROOT = RESOURCE_DIR
@@ -86,14 +86,14 @@ class WhatsAppManager:
                 _backoff = 1.0
                 if msgs:
                     new_entries = []
+                    msg_map = {}  # Map message IDs to bridge messages for audio transcription
                     newest_timestamp = self._last_ts
                     with self._lock:
                         for m in msgs:
                             if is_ignored_message(m):
                                 continue
-                            # skip outgoing messages
-                            if m.get('direction') == 'out':
-                                continue
+                            # Process all messages: incoming (need responses) + outgoing (sent from mobile).
+                            # Outgoing messages from the mobile should appear in the chat UI.
                             mid = m.get('id') or f"{m.get('from')}_{m.get('timestamp')}"
                             try:
                                 newest_timestamp = max(newest_timestamp, int(m.get("timestamp") or 0))
@@ -103,19 +103,40 @@ class WhatsAppManager:
                             if mid in self._seen:
                                 continue
                             self._seen.add(mid)
+                            from_me = bool(m.get('fromMe')) or str(m.get('direction') or '').lower() == 'out'
                             entry = {
                                 'id': mid,
-                                'from': m.get('from'),
+                                # 'from' is used throughout as "the chat this
+                                # message belongs to", not "who sent it". The
+                                # bridge already computes that correctly as
+                                # chatId (msg.fromMe ? msg.to : msg.from); for
+                                # our own outgoing messages msg.from is *our*
+                                # JID, which would point every self-sent message
+                                # (phone or Jarvis) at the wrong chat and make
+                                # an already-open conversation never refresh.
+                                'from': m.get('chatId') or m.get('from'),
                                 'author': m.get('author') or None,
+                                'authorName': m.get('authorName') or None,
                                 'senderName': m.get('senderName') or None,
                                 'body': m.get('body') or '',
                                 'type': m.get('type', 'chat'),
                                 'timestamp': m.get('timestamp'),
+                                'fromMe': from_me,
+                                'ack': m.get('ack'),
+                                # Preserve media metadata so the chat UI can render
+                                # the inline player/transcription for audio, images,
+                                # etc. (without these the bubble shows only "[nota de
+                                # voz]" and similar placeholders).
+                                'hasMedia': bool(m.get('hasMedia') or m.get('mediaUrl')),
+                                'mediaUrl': m.get('mediaUrl') or None,
+                                'mentionedIds': m.get('mentionedIds') or [],
+                                'mentions': m.get('mentions') or {},
                                 'draft': None,
                                 'sent': False,
                             }
                             self._pending[mid] = entry
                             new_entries.append(entry)
+                            msg_map[mid] = m  # Store bridge message for transcription
                         if new_entries:
                             _save_pending(self._pending)
                         # Advance only to data actually received. Advancing to "now"
@@ -132,6 +153,18 @@ class WhatsAppManager:
                                 print(f"[WA] announce error: {e}", file=sys.stderr)
                     elif new_entries:
                         print(f"[WA] {len(new_entries)} msg(s), callback not set yet", file=sys.stderr)
+                    # Transcribe audio asynchronously (don't block polling)
+                    for entry in new_entries:
+                        msg_type = str(entry.get('type') or '').lower()
+                        if msg_type in {'audio', 'ptt'}:
+                            bridge_msg = msg_map.get(entry['id'])
+                            if bridge_msg:
+                                threading.Thread(
+                                    target=self._transcribe_entry_audio,
+                                    args=(entry, bridge_msg),
+                                    daemon=True,
+                                ).start()
+
                     # Notify any extra listeners (e.g. the live chat UI).
                     for entry in new_entries:
                         for listener in list(self._message_listeners):
@@ -156,6 +189,23 @@ class WhatsAppManager:
 
     def stop(self):
         self._stop.set()
+
+    def _transcribe_entry_audio(self, entry: Dict[str, Any], msg_bridge: Dict[str, Any]) -> None:
+        """Transcribe audio message asynchronously. Updates entry with 'transcription' key."""
+        try:
+            import sys
+            transcript = transcribe_message_audio(msg_bridge)
+            if transcript:
+                entry['transcription'] = transcript
+                with self._lock:
+                    self._pending[entry['id']] = entry
+                    _save_pending(self._pending)
+                print(f"[WA] transcribed: {entry.get('from')} → {transcript[:100]}", file=sys.stderr)
+            else:
+                print(f"[WA] transcription failed for {entry.get('id')}", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"[WA] transcription error: {e}", file=sys.stderr)
 
     def add_message_listener(self, listener) -> None:
         """Register a callable invoked with each new incoming message entry."""
@@ -212,18 +262,28 @@ class WhatsAppManager:
             return [dict(session) for session in self._auto_reply_sessions.values()]
 
     def _schedule_auto_reply(self, entry: Dict[str, Any]):
+        # Never auto-reply to our own outgoing messages (the poller also feeds
+        # messages sent from the phone into the manager).
+        if entry.get("fromMe"):
+            return
         chat_id = str(entry.get("from") or "").strip()
         if not chat_id:
             return
         now = time.time()
+        rule = None
         with self._lock:
             session = self._auto_reply_sessions.get(chat_id)
-            if not session:
-                return
-            if float(session.get("expires_at") or 0) <= now:
+            if session and float(session.get("expires_at") or 0) <= now:
                 self._auto_reply_sessions.pop(chat_id, None)
-                return
-            self._auto_reply_queues.setdefault(chat_id, []).append(dict(entry))
+                session = None
+            # Temporary voice/command sessions take precedence over rules.
+            if not session:
+                rule = self._match_rule(chat_id)
+                if not rule:
+                    return
+            queued = dict(entry)
+            queued["rule"] = rule  # None for temporary sessions
+            self._auto_reply_queues.setdefault(chat_id, []).append(queued)
             if chat_id in self._auto_reply_busy:
                 return
             self._auto_reply_busy.add(chat_id)
@@ -233,27 +293,54 @@ class WhatsAppManager:
             daemon=True,
         ).start()
 
+    @staticmethod
+    def _match_rule(chat_id: str) -> Optional[Dict[str, Any]]:
+        """First persistent rule covering chat_id right now, or None."""
+        try:
+            from .whatsapp_rules import match_rule
+
+            return match_rule(chat_id)
+        except Exception:
+            return None
+
     def _run_auto_reply_queue(self, chat_id: str):
         while not self._stop.is_set():
             with self._lock:
                 queue = self._auto_reply_queues.get(chat_id) or []
-                session = self._auto_reply_sessions.get(chat_id)
-                if not queue or not session or float(session.get("expires_at") or 0) <= time.time():
+                if not queue:
                     self._auto_reply_queues.pop(chat_id, None)
                     self._auto_reply_busy.discard(chat_id)
                     return
                 entry = queue.pop(0)
+            rule = entry.get("rule") or None
+            # Re-validate per entry: a temporary session may have expired, or a
+            # rule may have been disabled / fallen out of its schedule while the
+            # message sat in the queue.
+            if rule is None:
+                with self._lock:
+                    session = self._auto_reply_sessions.get(chat_id)
+                    if not session or float(session.get("expires_at") or 0) <= time.time():
+                        self._auto_reply_sessions.pop(chat_id, None)
+                        continue
+            elif self._match_rule(chat_id) is None:
+                continue
             response_text = ""
             error = ""
             try:
-                generator = self._reply_generator
-                if generator is None:
-                    from .whatsapp_ai import generate_whatsapp_reply
+                body = str(entry.get("body") or "")
+                if rule:
+                    from .whatsapp_ai import generate_rule_reply
 
-                    generator = generate_whatsapp_reply
-                response_text = str(
-                    generator(chat_id, str(entry.get("body") or ""))
-                ).strip()
+                    response_text = str(
+                        generate_rule_reply(chat_id, body, str(rule.get("prompt") or ""))
+                    ).strip()
+                else:
+                    generator = self._reply_generator
+                    if generator is None:
+                        from .whatsapp_ai import generate_whatsapp_reply
+
+                        generator = generate_whatsapp_reply
+                    response_text = str(generator(chat_id, body)).strip()
                 if not response_text:
                     raise RuntimeError("La IA generó una respuesta vacía.")
                 self._message_sender(to=chat_id, body=response_text)

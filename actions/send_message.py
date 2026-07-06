@@ -4,6 +4,8 @@ import sys
 import time
 from pathlib import Path
 
+from actions import event_bus
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -244,7 +246,6 @@ def _resolve_platform(platform_str: str):
 def send_message(
     parameters: dict,
     response=None,
-    player=None,
     session_memory=None,
 ) -> str:
     params       = parameters or {}
@@ -275,8 +276,7 @@ def send_message(
 
     preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
     print(f"[SendMessage] 📨 {platform} → {receiver}: {preview}")
-    if player:
-        player.write_log(f"[msg] {platform} → {receiver}")
+    event_bus.log("msg", f"[msg] {platform} → {receiver}")
 
     try:
         # Prefer bridge for explicit bridge requests or when receiver looks like a WA id or can be resolved
@@ -316,7 +316,6 @@ def send_message(
         result = f"Could not send message: {e}"
 
     print(f"[SendMessage] {'✅' if 'sent' in result.lower() else '❌'} {result}")
-    if player:
-        player.write_log(f"[msg] {result}")
+    event_bus.log("msg", f"[msg] {result}")
 
     return result

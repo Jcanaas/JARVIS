@@ -103,18 +103,22 @@ def _list_request_parts(
     label: str = "INBOX",
     unread_only: bool = False,
     query: str = "",
-) -> tuple[str, list[str] | None]:
+) -> tuple[str, list[str] | None, bool]:
     q_parts = [str(query or "").strip()]
     if unread_only:
         q_parts.append("is:unread")
     label = str(label or "").strip()
+    include_spam_trash = False
     if label and label.upper() not in {"ALL", "ANYWHERE", "ALL_MAIL", "TODO"}:
-        label_ids = [label]
+        label_ids = [label.upper()]
+        # messages.list oculta SPAM y TRASH salvo que se pida explícitamente.
+        if label.upper() in {"SPAM", "TRASH"}:
+            include_spam_trash = True
     else:
         label_ids = None
         if not query:
             q_parts.append("in:anywhere")
-    return " ".join(part for part in q_parts if part), label_ids
+    return " ".join(part for part in q_parts if part), label_ids, include_spam_trash
 
 
 def _message_summary(message: dict) -> Dict:
@@ -122,6 +126,7 @@ def _message_summary(message: dict) -> Dict:
     return {
         "id": message["id"],
         "from": _header(headers, "From"),
+        "to": _header(headers, "To"),
         "subject": _header(headers, "Subject"),
         "date": _header(headers, "Date"),
         "snippet": message.get("snippet", ""),
@@ -129,7 +134,12 @@ def _message_summary(message: dict) -> Dict:
     }
 
 
-def _all_message_ids(query: str, label_ids: list[str] | None, refresh: bool = False) -> list[str]:
+def _all_message_ids(
+    query: str,
+    label_ids: list[str] | None,
+    refresh: bool = False,
+    include_spam_trash: bool = False,
+) -> list[str]:
     cache = _load_cache()
     key = _query_key(query, label_ids)
     cached = cache["indexes"].get(key)
@@ -147,6 +157,8 @@ def _all_message_ids(query: str, label_ids: list[str] | None, refresh: bool = Fa
         }
         if label_ids:
             request["labelIds"] = label_ids
+        if include_spam_trash:
+            request["includeSpamTrash"] = True
         if page_token:
             request["pageToken"] = page_token
         response = svc.users().messages().list(**request).execute()
@@ -193,7 +205,7 @@ def _message_metadata(message_ids: list[str]) -> list[Dict]:
                     userId="me",
                     id=message_id,
                     format="metadata",
-                    metadataHeaders=["From", "Subject", "Date"],
+                    metadataHeaders=["From", "To", "Subject", "Date"],
                 ),
                 request_id=message_id,
             )
@@ -368,8 +380,10 @@ def get_email_page(
     refresh: bool = False,
 ) -> Dict:
     page_size = max(1, min(100, int(page_size or 50)))
-    query_text, label_ids = _list_request_parts(label, unread_only, query)
-    message_ids = _all_message_ids(query_text, label_ids, refresh=refresh)
+    query_text, label_ids, include_spam_trash = _list_request_parts(label, unread_only, query)
+    message_ids = _all_message_ids(
+        query_text, label_ids, refresh=refresh, include_spam_trash=include_spam_trash
+    )
     total = len(message_ids)
     pages = max(1, math.ceil(total / page_size))
     page = max(1, min(int(page or 1), pages))
@@ -492,21 +506,46 @@ def render_email_preview(email_id: str, html_body: str, width: int = 760) -> Dic
     return {"id": email_id, "image_path": str(image_path)}
 
 
-def send_email(to: str, subject: str, body: str) -> str:
+def send_email(to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
     svc = _get_service()
-    msg = MIMEText(body)
+    files = [str(p).strip() for p in (attachments or []) if str(p or "").strip()]
+
+    if files:
+        from email import encoders
+        from email.mime.base import MIMEBase
+        from email.mime.multipart import MIMEMultipart
+
+        msg = MIMEMultipart()
+        msg.attach(MIMEText(body))
+        for path in files:
+            file = Path(path)
+            if not file.is_file():
+                raise FileNotFoundError(f"No existe el adjunto: {path}")
+            ctype, encoding = mimetypes.guess_type(str(file))
+            if ctype is None or encoding is not None:
+                ctype = "application/octet-stream"
+            maintype, _, subtype = ctype.partition("/")
+            part = MIMEBase(maintype, subtype or "octet-stream")
+            part.set_payload(file.read_bytes())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=file.name)
+            msg.attach(part)
+    else:
+        msg = MIMEText(body)
+
     msg["to"]      = to
     msg["subject"] = subject
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
     svc.users().messages().send(userId="me", body={"raw": raw}).execute()
-    return f"Correo enviado a {to}."
+    suffix = f" con {len(files)} adjunto(s)" if files else ""
+    return f"Correo enviado a {to}{suffix}."
 
 
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
-def gmail(parameters: dict, player=None, speak=None) -> str:
+def gmail(parameters: dict, speak=None) -> str:
     """Main entry point called by Jarvis _execute_tool."""
     action = parameters.get("action", "list_emails")
 
@@ -548,9 +587,12 @@ def gmail(parameters: dict, player=None, speak=None) -> str:
             to      = parameters.get("to") or ""
             subject = parameters.get("subject") or "(sin asunto)"
             body    = parameters.get("body") or ""
+            attachments = parameters.get("attachments")
+            if isinstance(attachments, str):
+                attachments = [p.strip() for p in attachments.split(";") if p.strip()]
             if not to:
                 return "Necesito el destinatario."
-            return send_email(to, subject, body)
+            return send_email(to, subject, body, attachments=attachments)
 
         else:
             return f"Acción desconocida: {action}. Usa list_emails, search_emails, read_email o send_email."
