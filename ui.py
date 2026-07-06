@@ -6650,10 +6650,13 @@ class _PanelControls(QWidget):
     keeps its existing wiring.
     """
 
-    def __init__(self, panel, video_box):
+    def __init__(self, panel, video_box, is_active=None):
         super().__init__(panel)
         self._panel = panel
         self._box = video_box
+        # Optional predicate deciding when the bar may show. Defaults to the
+        # YouTube panel's own layout check; other panels pass their own.
+        self._is_active = is_active
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -6719,9 +6722,13 @@ class _PanelControls(QWidget):
     def _sync(self):
         panel = self._panel
         try:
+            if self._is_active is not None:
+                active = self._is_active()
+            else:
+                active = (panel.stack.currentIndex() == 1
+                          and panel._detached_mode is None)
             show = (
-                panel.stack.currentIndex() == 1
-                and panel._detached_mode is None
+                active
                 and panel.isVisible()
                 and self._box.isVisible()
                 and not panel.window().isMinimized()
@@ -8616,21 +8623,17 @@ class _MovieCard(QWidget):
         self.clicked.emit(self.movie)
 
 
-class _VLCWidget(QWidget):
-    """Embedded VLC video player with playback controls.
+class _VLCBackend:
+    """Thin wrapper around a VLC media player with an mpv-like interface.
 
-    Renders video into a Qt surface (no external window) and exposes a control
-    bar: play/pause, seek, ±10s skip, volume, and audio-track / subtitle menus.
+    Renders into an existing native Qt surface (via set_hwnd), so the same
+    _AspectVideo / _PanelControls / _FloatOverlay machinery the YouTube player
+    uses can drive it unchanged.
     """
 
-    closed = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
         self.instance = None
         self.player = None
-        self._dragging = False
-
         if HAS_VLC:
             try:
                 self.instance = vlc.Instance()
@@ -8639,189 +8642,93 @@ class _VLCWidget(QWidget):
                 self.instance = None
                 self.player = None
 
-        self._build_ui()
+    def available(self) -> bool:
+        return self.player is not None
 
-        # Poll position/duration a few times a second to drive the seek bar.
-        self._timer = QTimer(self)
-        self._timer.setInterval(500)
-        self._timer.timeout.connect(self._tick)
-
-    # -- UI -----------------------------------------------------------------
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # Video surface (VLC renders into this via set_hwnd).
-        self._video = QFrame()
-        self._video.setStyleSheet("background:#000;")
-        self._video.setMinimumHeight(320)
-        root.addWidget(self._video, stretch=1)
-
-        # Control bar.
-        bar = QHBoxLayout()
-        bar.setContentsMargins(10, 8, 10, 10)
-        bar.setSpacing(8)
-
-        self._play_btn = self._tool("⏸", self.toggle_pause)
-        bar.addWidget(self._play_btn)
-        bar.addWidget(self._tool("⏮ 10", lambda: self.skip(-10000)))
-        bar.addWidget(self._tool("10 ⏭", lambda: self.skip(10000)))
-
-        self._elapsed = QLabel("0:00")
-        self._elapsed.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; font-size:11px;")
-        bar.addWidget(self._elapsed)
-
-        self._seek = QSlider(Qt.Orientation.Horizontal)
-        self._seek.setRange(0, 1000)
-        self._seek.sliderPressed.connect(lambda: setattr(self, "_dragging", True))
-        self._seek.sliderReleased.connect(self._on_seek_released)
-        bar.addWidget(self._seek, stretch=1)
-
-        self._duration = QLabel("0:00")
-        self._duration.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; font-size:11px;")
-        bar.addWidget(self._duration)
-
-        # Audio track + subtitle menus.
-        self._audio_btn = self._tool("🔊 Audio", self._show_audio_menu)
-        bar.addWidget(self._audio_btn)
-        self._sub_btn = self._tool("💬 Subs", self._show_subs_menu)
-        bar.addWidget(self._sub_btn)
-
-        self._vol = QSlider(Qt.Orientation.Horizontal)
-        self._vol.setFixedWidth(90)
-        self._vol.setRange(0, 100)
-        self._vol.setValue(90)
-        self._vol.valueChanged.connect(self._on_volume)
-        bar.addWidget(self._vol)
-
-        bar.addWidget(self._tool("✕", self._on_close))
-
-        holder = QWidget()
-        holder.setStyleSheet(f"background:{C.PANEL};")
-        holder.setLayout(bar)
-        root.addWidget(holder)
-
-    def _tool(self, label: str, cb) -> QPushButton:
-        b = QPushButton(label)
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setFixedHeight(30)
-        b.setStyleSheet(f"""
-            QPushButton {{
-                background:{C.PANEL2}; color:{C.TEXT};
-                border:1px solid {C.BORDER}; border-radius:6px;
-                padding:0 10px; font-size:11px;
-            }}
-            QPushButton:hover {{ border-color:{C.PRI}; }}
-        """)
-        b.clicked.connect(lambda _=False: cb())
-        return b
-
-    # -- Playback -----------------------------------------------------------
-    def play_url(self, url: str):
-        if not self.player or not self.instance:
-            return
-        try:
-            media = self.instance.media_new(url)
-            self.player.set_media(media)
-            # Bind VLC's output to our Qt frame so it renders inline (no popup).
-            self.player.set_hwnd(int(self._video.winId()))
-            self.player.audio_set_volume(self._vol.value())
-            self.player.play()
-            self._play_btn.setText("⏸")
-            self._timer.start()
-        except Exception:
-            pass
-
-    def toggle_pause(self):
+    def play_url(self, url: str, hwnd: int, volume: int = 90):
         if not self.player:
             return
-        self.player.pause()  # toggles
-        playing = self.player.is_playing()
-        self._play_btn.setText("⏸" if playing else "▶")
+        media = self.instance.media_new(url)
+        self.player.set_media(media)
+        self.set_hwnd(hwnd)
+        self.player.audio_set_volume(int(volume))
+        self.player.play()
 
-    def skip(self, delta_ms: int):
-        if not self.player:
-            return
-        t = self.player.get_time()
-        if t < 0:
-            return
-        self.player.set_time(max(0, t + delta_ms))
+    def set_hwnd(self, hwnd: int):
+        if self.player and hwnd:
+            self.player.set_hwnd(int(hwnd))
 
-    def _on_seek_released(self):
-        self._dragging = False
-        if not self.player:
-            return
-        length = self.player.get_length()
-        if length > 0:
-            self.player.set_time(int(length * self._seek.value() / 1000))
-
-    def _on_volume(self, value: int):
+    # -- transport (names mirror the mpv wrapper used by YouTube) -----------
+    def toggle(self):
         if self.player:
-            self.player.audio_set_volume(int(value))
+            self.player.pause()  # VLC's pause() toggles
 
-    def _tick(self):
-        if not self.player or self._dragging:
-            return
-        length = self.player.get_length()
-        t = self.player.get_time()
-        if length > 0:
-            self._seek.setValue(int(1000 * t / length))
-            self._duration.setText(self._fmt(length))
-        self._elapsed.setText(self._fmt(t))
+    def pause(self):
+        if self.player:
+            self.player.set_pause(1)
 
-    @staticmethod
-    def _fmt(ms: int) -> str:
-        if ms is None or ms < 0:
-            return "0:00"
-        s = ms // 1000
-        h, m, sec = s // 3600, (s % 3600) // 60, s % 60
-        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+    def set_volume(self, v: int):
+        if self.player:
+            self.player.audio_set_volume(int(v))
 
-    # -- Track menus --------------------------------------------------------
-    def _show_audio_menu(self):
-        if not self.player:
-            return
-        self._track_menu(self.player.audio_get_track_description(),
-                         self.player.audio_get_track(),
-                         self.player.audio_set_track,
-                         self._audio_btn)
+    def seek_abs(self, seconds: float):
+        if self.player:
+            self.player.set_time(int(max(0.0, seconds) * 1000))
 
-    def _show_subs_menu(self):
-        if not self.player:
-            return
-        self._track_menu(self.player.video_get_spu_description(),
-                         self.player.video_get_spu(),
-                         self.player.video_set_spu,
-                         self._sub_btn)
+    def seek_rel(self, delta: float):
+        if self.player:
+            t = self.player.get_time()
+            if t is not None and t >= 0:
+                self.player.set_time(max(0, int(t + delta * 1000)))
 
-    def _track_menu(self, descriptions, current, setter, anchor):
-        menu = QMenu(self)
-        try:
-            for tid, name in descriptions or []:
-                label = name.decode("utf-8", "ignore") if isinstance(name, bytes) else str(name)
-                act = menu.addAction(("● " if tid == current else "   ") + label)
-                act.triggered.connect(lambda _=False, i=tid: setter(i))
-        except Exception:
-            return
-        if menu.actions():
-            menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+    def position(self):
+        if self.player:
+            t = self.player.get_time()
+            return t / 1000.0 if t and t > 0 else 0.0
+        return 0.0
 
-    # -- Lifecycle ----------------------------------------------------------
+    def duration(self):
+        if self.player:
+            length = self.player.get_length()
+            return length / 1000.0 if length and length > 0 else 0.0
+        return 0.0
+
+    def paused(self):
+        return not self.is_playing()
+
+    def is_playing(self):
+        return bool(self.player and self.player.is_playing())
+
+    def is_running(self):
+        return bool(self.player and self.player.get_media() is not None)
+
     def stop(self):
-        try:
-            self._timer.stop()
-        except Exception:
-            pass
         if self.player:
             try:
                 self.player.stop()
             except Exception:
                 pass
 
-    def _on_close(self):
-        self.stop()
-        self.closed.emit()
+    # -- track selection ----------------------------------------------------
+    def audio_tracks(self):
+        return self.player.audio_get_track_description() if self.player else []
+
+    def current_audio(self):
+        return self.player.audio_get_track() if self.player else -1
+
+    def set_audio_track(self, tid):
+        if self.player:
+            self.player.audio_set_track(tid)
+
+    def subtitle_tracks(self):
+        return self.player.video_get_spu_description() if self.player else []
+
+    def current_subtitle(self):
+        return self.player.video_get_spu() if self.player else -1
+
+    def set_subtitle(self, tid):
+        if self.player:
+            self.player.video_set_spu(tid)
 
 
 class MoviesModePanel(QWidget):
@@ -8832,19 +8739,33 @@ class MoviesModePanel(QWidget):
     _show_detail = pyqtSignal(object)
     _torrents_found = pyqtSignal(list, object)  # (torrents, movie)
     _stream_ready = pyqtSignal(str, object)  # (stream_url, movie)
+    _pos_sig = pyqtSignal(float, float, bool)  # position, duration, playing
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list = []
         self._current_view = "grid"  # "grid" | "detail" | "player"
         self._detail_movie = None
-        self._vlc_player = _VLCWidget(self) if HAS_VLC else None
+        self._playing_movie = None
+
+        # Playback backend + player state (mirrors the YouTube player).
+        self._player = _VLCBackend() if HAS_VLC else None
+        self._duration = 0.0
+        self._user_dragging = False
+        self._detached_mode = None          # None | "floating" | "fullscreen"
+        self._float_window = None
+        self._fs_window = None
+        self._float_overlay = None
+        self._poll_thread = None
+        self._poll_stop = threading.Event()
+
         self._build_ui()
         self._results_ready.connect(self._on_results)
         self._status_sig.connect(self._set_status)
         self._show_detail.connect(self._show_movie_detail)
         self._torrents_found.connect(self._show_torrent_select)
         self._stream_ready.connect(self._on_stream_ready)
+        self._pos_sig.connect(self._apply_position)
         QTimer.singleShot(0, self._load_trending)
 
     def _build_ui(self):
@@ -8931,10 +8852,59 @@ class MoviesModePanel(QWidget):
         detail_lay.addWidget(detail_scroll)
         self._stack.addWidget(detail_container)
 
-        # Player view (index 2) — embedded VLC with controls.
-        if self._vlc_player:
-            self._vlc_player.closed.connect(self._close_player)
-            self._stack.addWidget(self._vlc_player)
+        # Player view (index 2) — YouTube-style embedded video with a hover
+        # control bar and a floating/detach mode. VLC renders into the native
+        # surface via set_hwnd.
+        player_page = QWidget()
+        pp = QVBoxLayout(player_page)
+        pp.setContentsMargins(0, 0, 0, 0)
+        pp.setSpacing(8)
+
+        self.video_surface = QWidget()
+        self.video_surface.setObjectName("MoviesSurface")
+        self.video_surface.setStyleSheet("QWidget#MoviesSurface { background:#000000; border-radius:12px; }")
+        self.video_surface.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.video_surface.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        surf_lay = QVBoxLayout(self.video_surface)
+        surf_lay.setContentsMargins(0, 0, 0, 0)
+        self._placeholder = QLabel("Preparando reproducción…")
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setStyleSheet("color:rgba(203,213,225,0.45); font-size:13px; background:transparent;")
+        surf_lay.addWidget(self._placeholder)
+
+        self.video_box = _AspectVideo(self.video_surface)
+        self.video_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.video_box.setMinimumHeight(220)
+
+        self._player_col = QVBoxLayout()
+        self._player_col.setContentsMargins(0, 0, 0, 0)
+        self._player_col.setSpacing(0)
+        self._player_col.addWidget(self.video_box, 0, Qt.AlignmentFlag.AlignHCenter)
+        pp.addLayout(self._player_col)
+        pp.addStretch(1)
+        self._stack.addWidget(player_page)
+
+        # Hover control bar overlaid on the in-panel video (reused from YouTube).
+        if self._player and self._player.available():
+            self._pc = _PanelControls(
+                self, self.video_box,
+                is_active=lambda: self._current_view == "player" and self._detached_mode is None,
+            )
+            # Movies don't use like/download; hide those buttons.
+            self._pc.like_btn.hide()
+            self._pc.download_btn.hide()
+            self.play_btn = self._pc.play_btn
+            self.seek = self._pc.seek
+            self.time_lbl = self._pc.time_lbl
+            self.volume = self._pc.volume
+            self.play_btn.clicked.connect(self._toggle_play)
+            self.seek.sliderPressed.connect(lambda: setattr(self, "_user_dragging", True))
+            self.seek.sliderReleased.connect(self._on_seek_released)
+            self.volume.valueChanged.connect(self._on_volume)
+            self._pc.float_btn.clicked.connect(self._toggle_floating_video)
+            self._pc.fullscreen_btn.clicked.connect(lambda: self._detach_video("fullscreen"))
+        else:
+            self._pc = None
 
         root.addWidget(self._stack, stretch=1)
 
@@ -9168,11 +9138,21 @@ class MoviesModePanel(QWidget):
             return
 
         torrent = dialog.selected_torrent
-        if not self._vlc_player:
+        if not (self._player and self._player.available()):
             self._set_status("VLC no disponible. Instala la app VLC de VideoLAN (videolan.org) en 64 bits.")
             return
 
-        self._set_status(f"▶ Preparando «{movie.title}» (seeders: {torrent.seeders})… puede tardar unos segundos")
+        # Switch to the player view immediately with a "loading" placeholder,
+        # then start the stream on a worker thread.
+        self._playing_movie = movie
+        self._current_view = "player"
+        self._back_btn.setVisible(True)
+        self._title.setText(f"▶ {movie.title}")
+        self._stack.setCurrentIndex(2)
+        self._placeholder.setText(f"Preparando «{movie.title}» (seeders: {torrent.seeders})…")
+        self._placeholder.show()
+        QTimer.singleShot(0, self._size_video)
+        self._set_status(f"▶ Preparando «{movie.title}»… puede tardar unos segundos")
 
         def work():
             try:
@@ -9187,18 +9167,230 @@ class MoviesModePanel(QWidget):
         self._run_async(work)
 
     def _on_stream_ready(self, stream_url: str, movie):
-        """Switch to the player view and start playback (main thread)."""
-        self._current_view = "player"
-        self._back_btn.setVisible(True)
-        self._title.setText(f"▶ {movie.title}")
-        self._stack.setCurrentWidget(self._vlc_player)
-        self._vlc_player.play_url(stream_url)
+        """Start VLC playback into the native surface (main thread)."""
+        if self._current_view != "player" or self._playing_movie is not movie:
+            return  # user backed out before the stream was ready
+        self._placeholder.hide()
+        hwnd = int(self.video_surface.winId())
+        self._player.play_url(stream_url, hwnd, self.volume.value())
+        for b in (self.play_btn, self.seek, self.volume,
+                  self._pc.float_btn, self._pc.fullscreen_btn):
+            b.setEnabled(True)
+        self.play_btn.set_shape(_MediaBtn.PAUSE)
+        self._start_poller()
         self._set_status(f"▶ Reproduciendo «{movie.title}»")
+
+    # -- transport controls -------------------------------------------------
+    def _toggle_play(self):
+        if self._player:
+            self._player.toggle()
+
+    def _on_volume(self, value: int):
+        if self._player:
+            self._player.set_volume(value)
+
+    def _on_seek_released(self):
+        self._user_dragging = False
+        if not self._player or self._duration <= 0:
+            return
+        frac = self.seek.value() / 1000.0
+        self._player.seek_abs(frac * self._duration)
+
+    def _forward_video(self):
+        if self._player:
+            self._player.seek_rel(10)
+
+    def _rewind_video(self):
+        if self._player:
+            self._player.seek_rel(-10)
+
+    def _start_poller(self):
+        if self._poll_thread is not None and self._poll_thread.is_alive():
+            return
+        self._poll_stop.clear()
+
+        def loop():
+            while not self._poll_stop.is_set():
+                player = self._player
+                if player is not None and player.is_running():
+                    pos = player.position()
+                    dur = player.duration()
+                    playing = player.is_playing()
+                    self._pos_sig.emit(float(pos), float(dur or 0.0), playing)
+                time.sleep(0.6)
+
+        self._poll_thread = threading.Thread(target=loop, daemon=True)
+        self._poll_thread.start()
+
+    def _apply_position(self, pos: float, dur: float, playing: bool):
+        self._duration = dur
+        self.play_btn.set_shape(_MediaBtn.PAUSE if playing else _MediaBtn.PLAY)
+        if self._float_overlay is not None:
+            self._float_overlay.set_playing(playing)
+        if not self._user_dragging and dur > 0:
+            self.seek.setValue(int(max(0.0, min(1.0, pos / dur)) * 1000))
+        self.time_lbl.setText(f"{self._fmt_clock(pos)} / {self._fmt_clock(dur)}")
+
+    @staticmethod
+    def _fmt_clock(seconds: float) -> str:
+        seconds = int(max(0, seconds))
+        h, m, s = seconds // 3600, (seconds % 3600) // 60, seconds % 60
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    def _size_video(self):
+        """Fix the in-panel video box to 16:9 based on available width."""
+        if self._detached_mode is not None:
+            return
+        try:
+            w = self.video_box.parentWidget().width() or self.width()
+            h = int(round(min(w, 1100) * 9 / 16))
+            self.video_box.setFixedHeight(max(220, h))
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._current_view == "player":
+            self._size_video()
+
+    # -- floating / fullscreen ---------------------------------------------
+    def _toggle_floating_video(self):
+        if self._detached_mode == "floating":
+            self._reattach_video()
+        else:
+            self._detach_video("floating")
+
+    def _rebind_surface(self):
+        """Re-point VLC at the surface's current HWND after a reparent."""
+        if self._player and self._player.available():
+            try:
+                self._player.set_hwnd(int(self.video_surface.winId()))
+            except Exception:
+                pass
+
+    def _on_pip_moved(self, p):
+        if self._float_window is not None:
+            self._float_window.move(p)
+
+    def _on_pip_resized(self, w, h):
+        if self._float_window is not None:
+            self._float_window.resize(w, h)
+
+    def _detach_video(self, mode: str):
+        if self.video_box is None:
+            return
+        if self._detached_mode is not None:
+            self._reattach_video()
+
+        win = _DetachWindow(self._reattach_video)
+        win.setWindowTitle("JARVIS — Película")
+        win.setStyleSheet("background:#000000;")
+        wlay = QVBoxLayout(win)
+        wlay.setContentsMargins(0, 0, 0, 0)
+        wlay.setSpacing(0)
+
+        self._player_col.removeWidget(self.video_box)
+        self.video_box.setMinimumSize(0, 0)
+        self.video_box.setMaximumSize(16777215, 16777215)
+        self.video_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        wlay.addWidget(self.video_box, stretch=1)
+
+        hint = QLabel(
+            "Reproduciendo en pantalla completa" if mode == "fullscreen"
+            else "Reproduciendo en ventana flotante"
+        )
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet(
+            "color:rgba(203,213,225,0.5); font-size:13px;"
+            "background:rgba(10,12,26,0.4); border:1px solid rgba(182,196,255,0.10);"
+            "border-radius:12px;"
+        )
+        self._player_col.insertWidget(0, hint, stretch=1)
+        self._detached_hint = hint
+        self._detached_mode = mode
+
+        overlay = _FloatOverlay({
+            "toggle": self._toggle_play,
+            "rewind": self._rewind_video,
+            "forward": self._forward_video,
+            "restore": self._reattach_video,
+            "moved": self._on_pip_moved,
+            "resized": self._on_pip_resized,
+        }, draggable=(mode == "floating"), resizable=(mode == "floating"))
+        self._float_overlay = overlay
+        if self._playing_movie is not None:
+            overlay.set_meta(getattr(self._playing_movie, "title", ""), "")
+
+        if mode == "fullscreen":
+            self._fs_window = win
+            win.showFullScreen()
+            screen = win.screen() or QApplication.primaryScreen()
+            overlay.setGeometry(screen.geometry())
+            for target in (win, overlay):
+                shortcut = QShortcut(QKeySequence("Escape"), target)
+                shortcut.activated.connect(self._reattach_video)
+        else:
+            self._float_window = win
+            win.setWindowFlags(
+                Qt.WindowType.Window
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+            )
+            win.setMinimumSize(320, 180)
+            pip_w, pip_h = 480, 270
+            try:
+                geo = QApplication.primaryScreen().availableGeometry()
+                pos = QPoint(geo.right() - pip_w - 20, geo.bottom() - pip_h - 40)
+            except Exception:
+                pos = QPoint(80, 80)
+            win.resize(pip_w, pip_h)
+            win.move(pos)
+            win.show()
+            overlay.setMinimumSize(320, 180)
+            overlay.resize(pip_w, pip_h)
+            overlay.move(pos)
+
+        overlay.show()
+        overlay.raise_()
+        QTimer.singleShot(0, self._rebind_surface)
+
+    def _reattach_video(self):
+        if self._detached_mode is None:
+            return
+        self._detached_mode = None
+        win = self._fs_window or self._float_window
+        overlay = self._float_overlay
+        self._fs_window = None
+        self._float_window = None
+        self._float_overlay = None
+        hint = getattr(self, "_detached_hint", None)
+        if hint is not None:
+            self._player_col.removeWidget(hint)
+            hint.deleteLater()
+            self._detached_hint = None
+        # Reparent the video back BEFORE the window dies (destroying the surface
+        # while VLC renders into it would crash).
+        if win is not None and win.layout() is not None:
+            win.layout().removeWidget(self.video_box)
+        self.video_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._player_col.insertWidget(0, self.video_box, 0, Qt.AlignmentFlag.AlignHCenter)
+        if overlay is not None:
+            overlay.close()
+            overlay.deleteLater()
+        if win is not None:
+            win.close()
+            win.deleteLater()
+        QTimer.singleShot(0, self._size_video)
+        QTimer.singleShot(0, self._rebind_surface)
 
     def _close_player(self):
         """Stop playback + streaming and return to the detail view."""
-        if self._vlc_player:
-            self._vlc_player.stop()
+        if self._detached_mode is not None:
+            self._reattach_video()
+        self._poll_stop.set()
+        if self._player:
+            self._player.stop()
+        self._playing_movie = None
         try:
             from actions import vlc_player as vp
             self._run_async(vp.stop_streaming)
