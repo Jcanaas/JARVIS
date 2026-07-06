@@ -8542,6 +8542,7 @@ class MoviesModePanel(QWidget):
         self._items: list = []
         self._current_view = "grid"  # "grid" | "detail"
         self._detail_movie = None
+        self._media_player = None
         self._build_ui()
         self._results_ready.connect(self._on_results)
         self._status_sig.connect(self._set_status)
@@ -8837,6 +8838,8 @@ class MoviesModePanel(QWidget):
             try:
                 from actions import torrent_search as ts
                 from actions import peerflix_player as pp
+                from PyQt6.QtMultimedia import QMediaPlayer
+                from PyQt6.QtCore import QUrl
 
                 torrents = ts.search(movie.title, limit=5)
                 if not torrents:
@@ -8844,8 +8847,19 @@ class MoviesModePanel(QWidget):
                     return
 
                 best = torrents[0]
-                self._status_sig.emit(f"▶ Reproduciendo «{movie.title}» (seeders: {best.seeders})")
-                pp.play(best.magnet, movie.title)
+                self._status_sig.emit(f"▶ Iniciando reproducción de «{movie.title}» (seeders: {best.seeders})")
+
+                # Start peerflix and get streaming URL
+                stream_url = pp.play(best.magnet, movie.title)
+
+                # Create media player if not exists
+                if not self._media_player:
+                    self._media_player = QMediaPlayer(self)
+
+                # Play the stream
+                self._media_player.setSource(QUrl(stream_url))
+                self._media_player.play()
+                self._status_sig.emit(f"▶ Reproduciendo «{movie.title}»")
             except Exception as e:
                 self._status_sig.emit(f"Error: {e}")
 

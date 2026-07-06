@@ -157,36 +157,46 @@ class TorrentSearchTests(unittest.TestCase):
 # Peerflix Player                                                            #
 # --------------------------------------------------------------------------- #
 class PeerflixPlayerTests(unittest.TestCase):
-    @patch("actions.peerflix_player.webbrowser.open")
-    def test_play_opens_peerflix_url(self, mock_open):
-        magnet = "magnet:?xt=urn:btih:abc123"
-        result = pp.play(magnet, "Fight Club")
-        self.assertTrue(result)
-        mock_open.assert_called_once()
-        # Verify URL contains peerflix.mov
-        url = mock_open.call_args[0][0]
-        self.assertIn("peerflix.mov", url)
-        self.assertIn("magnet=", url)
+    @patch("actions.peerflix_player._locate_peerflix", return_value="peerflix")
+    @patch("actions.peerflix_player.subprocess.Popen")
+    @patch("actions.peerflix_player.time.sleep")
+    def test_play_returns_streaming_url(self, mock_sleep, mock_popen, mock_locate):
+        # Mock peerflix process
+        proc = MagicMock()
+        mock_popen.return_value = proc
+        # Mock _port_available to return False (port in use = listening)
+        with patch("actions.peerflix_player._port_available", return_value=False):
+            magnet = "magnet:?xt=urn:btih:abc123"
+            result = pp.play(magnet, "Fight Club")
+            self.assertIn("http://127.0.0.1", result)
+            self.assertIn("6881", result)
 
-    @patch("actions.peerflix_player.webbrowser.open")
-    def test_play_encodes_magnet_and_title(self, mock_open):
-        magnet = "magnet:?xt=urn:btih:test&tr=tracker"
-        result = pp.play(magnet, "My Movie")
-        self.assertTrue(result)
-        url = mock_open.call_args[0][0]
-        self.assertIn("title=", url)
-        # Verify URL encoding (? and & should be encoded)
-        self.assertNotIn("?xt=", url)
+    @patch("actions.peerflix_player._locate_peerflix", return_value="peerflix")
+    @patch("actions.peerflix_player.subprocess.Popen")
+    @patch("actions.peerflix_player.time.sleep")
+    def test_play_timeout_raises(self, mock_sleep, mock_popen, mock_locate):
+        proc = MagicMock()
+        mock_popen.return_value = proc
+        # Mock _port_available to always return True (port always free = not listening)
+        with patch("actions.peerflix_player._port_available", return_value=True):
+            with self.assertRaises(pp.PeerflixError):
+                pp.play("magnet:?xt=urn:btih:abc123")
 
-    @patch("actions.peerflix_player.webbrowser.open", side_effect=Exception("No browser"))
-    def test_play_without_browser_raises(self, mock_open):
+    @patch("actions.peerflix_player._locate_peerflix", side_effect=pp.PeerflixError("not found"))
+    def test_play_without_peerflix_raises(self, mock_locate):
         with self.assertRaises(pp.PeerflixError):
             pp.play("magnet:?xt=urn:btih:abc")
 
-    def test_get_status_always_ready(self):
+    @patch("actions.peerflix_player._locate_peerflix", return_value="peerflix")
+    def test_get_status_when_available(self, mock_locate):
         status = pp.get_status()
         self.assertIsNotNone(status)
         self.assertIn("ready", status)
+
+    @patch("actions.peerflix_player._locate_peerflix", side_effect=pp.PeerflixError("not found"))
+    def test_get_status_when_unavailable(self, mock_locate):
+        status = pp.get_status()
+        self.assertIsNone(status)
 
 
 if __name__ == "__main__":
