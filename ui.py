@@ -9169,20 +9169,27 @@ class MoviesModePanel(QWidget):
             kind = getattr(movie, "media_type", "movie")
             found: list = []
 
-            # Source 1: Torrentio (aggregates Spanish-only sites: MejorTorrent,
-            # Wolfmax4k, Cinecalidad…) keyed by IMDb id.
+            # Sources 1 & 2: Stremio addons keyed by IMDb id that aggregate
+            # Spanish-only sites (Peerflix: DonTorrent/MejorTorrent/Wolfmax4k,
+            # 100% Castilian; Torrentio: MejorTorrent/Cinecalidad + intl).
             try:
-                from actions import torrentio, movie_search as ms
+                from actions import movie_search as ms
                 imdb = ms.get_imdb_id(getattr(movie, "tmdb_id", 0), kind=kind)
-                if imdb:
-                    for s in torrentio.search(imdb, kind=kind, spanish=True, limit=15):
-                        found.append(ts.Torrent(
-                            title=s.title, magnet=s.magnet, seeders=s.seeders,
-                            leechers=0, size=s.size, spanish=s.spanish))
             except Exception:
-                pass
+                imdb = ""
 
-            # Source 2: title search across YTS/TPB/1337x (with castellano pass).
+            if imdb:
+                for mod_name in ("peerflix_addon", "torrentio"):
+                    try:
+                        mod = __import__(f"actions.{mod_name}", fromlist=[mod_name])
+                        for s in mod.search(imdb, kind=kind, spanish=True, limit=15):
+                            found.append(ts.Torrent(
+                                title=s.title, magnet=s.magnet, seeders=s.seeders,
+                                leechers=0, size=s.size, spanish=s.spanish))
+                    except Exception:
+                        pass
+
+            # Source 3: title search across YTS/TPB/1337x (with castellano pass).
             try:
                 found.extend(ts.search(movie.title, kind=kind, limit=10, spanish=True))
             except Exception:

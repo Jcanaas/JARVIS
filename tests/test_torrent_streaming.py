@@ -389,5 +389,63 @@ class TorrentioTests(unittest.TestCase):
             tio.search("tt0000000")
 
 
+# --------------------------------------------------------------------------- #
+# Peerflix addon (Spanish-focused Stremio source)                           #
+# --------------------------------------------------------------------------- #
+from actions import peerflix_addon as pfa  # noqa: E402
+
+
+class PeerflixAddonTests(unittest.TestCase):
+    RESPONSE = {
+        "streams": [
+            {
+                "name": "Peerflix \U0001f1ea\U0001f1f8 1080p",
+                "description": "Matrix [BDremux][Castellano]\nMatrix.mkv\n\U0001f464 11 \U0001f4be 18 GB",
+                "infoHash": "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+                "seed": 11,
+                "sizebytes": 19327352832,
+                "language": "Spanish",
+                "quality": "1080p",
+            },
+            {
+                "name": "Peerflix \U0001f1ea\U0001f1f8 4K",
+                "description": "Matrix [4K UHDremux][Castellano]\n\U0001f464 14",
+                "infoHash": "1111aaaa2222bbbb3333cccc4444dddd5555eeee",
+                "seed": 14,
+                "sizebytes": 60000000000,
+                "language": "Spanish",
+                "quality": "4K",
+            },
+        ]
+    }
+
+    def test_parse_uses_structured_fields(self):
+        s = pfa._parse_stream(self.RESPONSE["streams"][0])
+        self.assertEqual(s.seeders, 11)
+        self.assertIn("GB", s.size)
+        self.assertTrue(s.spanish)
+        self.assertIn("btih:aaaa1111", s.magnet)
+
+    def test_no_imdb_raises(self):
+        with self.assertRaises(pfa.PeerflixAddonError):
+            pfa.search("")
+
+    @patch("actions.peerflix_addon.requests.get")
+    def test_search_ranks_by_seeders(self, mock_get):
+        mock_get.return_value = MagicMock(
+            status_code=200, json=lambda: self.RESPONSE, raise_for_status=lambda: None)
+        streams = pfa.search("tt0133093", spanish=True)
+        self.assertEqual(len(streams), 2)
+        # Both Spanish → higher seeders (4K, 14) first.
+        self.assertEqual(streams[0].seeders, 14)
+
+    @patch("actions.peerflix_addon.requests.get")
+    def test_search_no_streams_raises(self, mock_get):
+        mock_get.return_value = MagicMock(
+            status_code=200, json=lambda: {"streams": []}, raise_for_status=lambda: None)
+        with self.assertRaises(pfa.PeerflixAddonError):
+            pfa.search("tt0000000")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
