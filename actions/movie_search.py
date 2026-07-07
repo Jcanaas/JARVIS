@@ -174,6 +174,23 @@ def get_details(tmdb_id: int, kind: str = "movie") -> Optional[Movie]:
     return _parse_movie(data, kind)
 
 
+def get_imdb_id(tmdb_id: int, kind: str = "movie") -> str:
+    """Fetch the IMDb id (tt…) for a TMDB movie/TV id.
+
+    Torrentio and similar indexers key on IMDb ids, so this bridges a TMDB
+    result to them. Returns "" if unavailable.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        return ""
+    try:
+        url = f"{TMDB_API_BASE}/{kind}/{tmdb_id}/external_ids"
+        data = _http_get(url, {"api_key": api_key})
+        return data.get("imdb_id") or ""
+    except MovieSearchError:
+        return ""
+
+
 def search_action(parameters: dict) -> str:
     """Voice/agent entry point for movie search.
 

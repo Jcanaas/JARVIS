@@ -9163,18 +9163,47 @@ class MoviesModePanel(QWidget):
         self._set_status(f"Buscando torrents de «{movie.title}»…")
 
         def work():
+            import re
+            from actions import torrent_search as ts
+
+            kind = getattr(movie, "media_type", "movie")
+            found: list = []
+
+            # Source 1: Torrentio (aggregates Spanish-only sites: MejorTorrent,
+            # Wolfmax4k, Cinecalidad…) keyed by IMDb id.
             try:
-                from actions import torrent_search as ts
+                from actions import torrentio, movie_search as ms
+                imdb = ms.get_imdb_id(getattr(movie, "tmdb_id", 0), kind=kind)
+                if imdb:
+                    for s in torrentio.search(imdb, kind=kind, spanish=True, limit=15):
+                        found.append(ts.Torrent(
+                            title=s.title, magnet=s.magnet, seeders=s.seeders,
+                            leechers=0, size=s.size, spanish=s.spanish))
+            except Exception:
+                pass
 
-                torrents = ts.search(movie.title, limit=10)
-                if not torrents:
-                    self._status_sig.emit("No encontré torrents para esta película")
-                    return
+            # Source 2: title search across YTS/TPB/1337x (with castellano pass).
+            try:
+                found.extend(ts.search(movie.title, kind=kind, limit=10, spanish=True))
+            except Exception:
+                pass
 
-                # Hand off to the main thread to show the selection dialog.
-                self._torrents_found.emit(torrents, movie)
-            except Exception as e:
-                self._status_sig.emit(f"Error buscando torrents: {e}")
+            if not found:
+                self._status_sig.emit("No encontré torrents para esta película")
+                return
+
+            # De-duplicate by infohash, then Castilian first, then seeders.
+            seen, unique = set(), []
+            for t in found:
+                m = re.search(r"btih:([a-zA-Z0-9]+)", t.magnet or "")
+                key = m.group(1).lower() if m else (t.magnet or t.title)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(t)
+            unique.sort(key=lambda t: (getattr(t, "spanish", False), t.seeders), reverse=True)
+
+            self._torrents_found.emit(unique, movie)
 
         self._run_async(work)
 

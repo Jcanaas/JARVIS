@@ -24,8 +24,8 @@ from typing import Optional
 from urllib.parse import quote
 
 import requests
-import urllib3.util.connection as _urllib3_conn
 
+from actions.doh import enable_for
 from actions.paths import memory_path
 
 API_BASE = "https://rest.opensubtitles.org/search"
@@ -35,57 +35,8 @@ _USER_AGENT = "TemporaryUserAgent"
 _TIMEOUT = 12
 _CACHE_DIR = memory_path("subtitles")
 
-# --- DNS-over-HTTPS to bypass ISP DNS blocks ------------------------------- #
-# Cloudflare's resolver, reached by IP so it doesn't depend on the (possibly
-# poisoned) system DNS. Its TLS cert covers these IPs, so validation still works.
-_DOH_ENDPOINTS = ["https://1.1.1.1/dns-query", "https://1.0.0.1/dns-query"]
-_dns_cache: dict[str, str] = {}
-
-
-def _resolve_doh(hostname: str) -> Optional[str]:
-    """Resolve a hostname's A record via DNS-over-HTTPS, cached."""
-    if hostname in _dns_cache:
-        return _dns_cache[hostname]
-    for endpoint in _DOH_ENDPOINTS:
-        try:
-            r = requests.get(
-                endpoint,
-                params={"name": hostname, "type": "A"},
-                headers={"Accept": "application/dns-json"},
-                timeout=8,
-            )
-            r.raise_for_status()
-            for ans in r.json().get("Answer", []):
-                if ans.get("type") == 1 and ans.get("data"):  # A record
-                    _dns_cache[hostname] = ans["data"]
-                    return ans["data"]
-        except Exception:
-            continue
-    return None
-
-
-_orig_create_connection = _urllib3_conn.create_connection
-
-
-def _create_connection_with_doh(address, *args, **kwargs):
-    """Force *.opensubtitles.org connections to a DoH-resolved IP.
-
-    urllib3 still uses the original hostname for SNI and cert validation, so only
-    the socket's target IP changes — enough to sidestep a DNS-level block.
-    """
-    host, port = address
-    if isinstance(host, str) and host.endswith("opensubtitles.org"):
-        ip = _resolve_doh(host)
-        if ip:
-            address = (ip, port)
-    return _orig_create_connection(address, *args, **kwargs)
-
-
-# Install once on import. Scoped to opensubtitles.org hosts, so other traffic is
-# untouched.
-if getattr(_urllib3_conn.create_connection, "_jarvis_doh", False) is False:
-    _create_connection_with_doh._jarvis_doh = True
-    _urllib3_conn.create_connection = _create_connection_with_doh
+# Route OpenSubtitles through DNS-over-HTTPS to bypass ISP DNS blocks.
+enable_for("opensubtitles.org")
 
 # The public endpoint occasionally rate-limits (429/5xx) or returns an empty
 # list under load even when subtitles exist; retry a few times with backoff.

@@ -336,5 +336,58 @@ class OpenSubtitlesTests(unittest.TestCase):
             osub.download("")
 
 
+# --------------------------------------------------------------------------- #
+# Torrentio (Spanish-source aggregator)                                      #
+# --------------------------------------------------------------------------- #
+from actions import torrentio as tio  # noqa: E402
+
+
+class TorrentioTests(unittest.TestCase):
+    RESPONSE = {
+        "streams": [
+            {
+                "name": "Torrentio\n1080p",
+                "title": "Matrix [BDremux][Castellano]\n\U0001f464 16 \U0001f4be 8 GB ⚙️ MejorTorrent\n\U0001f1ea\U0001f1f8",
+                "infoHash": "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+                "fileIdx": 0,
+            },
+            {
+                "name": "Torrentio\n2160p",
+                "title": "The.Matrix.1999.2160p.BluRay.x265\n\U0001f464 200 \U0001f4be 50 GB ⚙️ YTS",
+                "infoHash": "1111aaaa2222bbbb3333cccc4444dddd5555eeee",
+                "fileIdx": 0,
+            },
+        ]
+    }
+
+    def test_parse_stream_extracts_fields(self):
+        s = tio._parse_stream(self.RESPONSE["streams"][0])
+        self.assertEqual(s.seeders, 16)
+        self.assertEqual(s.size, "8 GB")
+        self.assertEqual(s.provider, "MejorTorrent")
+        self.assertTrue(s.spanish)
+        self.assertIn("btih:aaaa1111", s.magnet)
+
+    def test_no_imdb_raises(self):
+        with self.assertRaises(tio.TorrentioError):
+            tio.search("")
+
+    @patch("actions.torrentio.requests.get")
+    def test_search_ranks_spanish_first(self, mock_get):
+        mock_get.return_value = MagicMock(
+            status_code=200, json=lambda: self.RESPONSE, raise_for_status=lambda: None)
+        streams = tio.search("tt0133093", spanish=True)
+        # The Castilian MejorTorrent release ranks above the higher-seeded YTS one.
+        self.assertTrue(streams[0].spanish)
+        self.assertEqual(streams[0].provider, "MejorTorrent")
+
+    @patch("actions.torrentio.requests.get")
+    def test_search_no_streams_raises(self, mock_get):
+        mock_get.return_value = MagicMock(
+            status_code=200, json=lambda: {"streams": []}, raise_for_status=lambda: None)
+        with self.assertRaises(tio.TorrentioError):
+            tio.search("tt0000000")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
