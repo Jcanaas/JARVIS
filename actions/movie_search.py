@@ -174,6 +174,21 @@ def get_details(tmdb_id: int, kind: str = "movie") -> Optional[Movie]:
     return _parse_movie(data, kind)
 
 
+def get_imdb_id_by_title(title: str, kind: str = "tv") -> str:
+    """Resolve an IMDb id by searching TMDB for the title.
+
+    Used when we have an anime title from Jikan (no TMDB id) and need an IMDb
+    id for Torrentio. Returns "" if no match or API key missing.
+    """
+    try:
+        results = search(title, kind=kind, limit=1)
+        if results:
+            return get_imdb_id(results[0].tmdb_id, kind=kind)
+    except Exception:
+        pass
+    return ""
+
+
 def get_imdb_id(tmdb_id: int, kind: str = "movie") -> str:
     """Fetch the IMDb id (tt…) for a TMDB movie/TV id.
 

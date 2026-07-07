@@ -10908,8 +10908,8 @@ class AnimeModePanel(MoviesModePanel):
 
         def work():
             try:
-                from actions import movie_search as ms
-                items = ms.search_anime(query, limit=12)
+                from actions import anime_search
+                items = anime_search.search_anime(query, limit=12)
                 self._results_ready.emit(items, f"Anime: «{query}»", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -10921,8 +10921,8 @@ class AnimeModePanel(MoviesModePanel):
 
         def work():
             try:
-                from actions import movie_search as ms
-                items = ms.get_trending_anime(limit=12)
+                from actions import anime_search
+                items = anime_search.get_trending_anime(limit=12)
                 self._results_ready.emit(items, "Anime en tendencia", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -10934,8 +10934,8 @@ class AnimeModePanel(MoviesModePanel):
 
         def work():
             try:
-                from actions import movie_search as ms
-                items = ms.get_airing_anime(limit=12)
+                from actions import anime_search
+                items = anime_search.get_airing_anime(limit=12)
                 self._results_ready.emit(items, "Anime en emisión", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -10943,7 +10943,11 @@ class AnimeModePanel(MoviesModePanel):
         self._run_async(work)
 
     def _search_and_play(self, anime):
-        """Like MoviesModePanel but uses Nyaa via Torrentio + torlink --kind anime."""
+        """Like MoviesModePanel but uses Nyaa via Torrentio + torlink --kind anime.
+
+        Jikan results have tmdb_id=0; in that case we do a title-based TMDB lookup
+        to resolve the IMDb id needed by Torrentio.
+        """
         self._set_status(f"Buscando torrents de «{anime.title}»…")
 
         def work():
@@ -10954,10 +10958,15 @@ class AnimeModePanel(MoviesModePanel):
             found: list = []
             errors: list[str] = []
 
-            # Source 1: Torrentio with Nyaa provider (needs IMDb id).
+            # Resolve IMDb id — Jikan results have tmdb_id=0 so fall back to
+            # a TMDB title search to bridge Jikan → Torrentio.
             try:
                 from actions import movie_search as ms
-                imdb = ms.get_imdb_id(getattr(anime, "tmdb_id", 0), kind=kind)
+                tmdb_id = getattr(anime, "tmdb_id", 0)
+                if tmdb_id:
+                    imdb = ms.get_imdb_id(tmdb_id, kind=kind)
+                else:
+                    imdb = ms.get_imdb_id_by_title(anime.title, kind="tv")
             except Exception as exc:
                 imdb = ""
                 errors.append(f"imdb_id: {exc}")
