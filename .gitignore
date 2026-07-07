@@ -27,6 +27,8 @@ whatsapp_pending.json
 # === Vendored Node deps (installed via npm install, not tracked) ===
 actions/vendor/webtorrent-stream/node_modules/
 actions/vendor/webtorrent-stream/package-lock.json
+actions/vendor/torlink/node_modules/
+actions/vendor/torlink/package-lock.json
 
 # === Large Windows binaries (bundled via installer, not tracked in git) ===
 mpv.exe

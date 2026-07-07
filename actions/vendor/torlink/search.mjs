@@ -5,6 +5,58 @@
 //   node search.mjs "<query>" --kind movie|tv --limit N
 // and prints a JSON array to stdout.
 
+import net from "node:net";
+import dns from "node:dns";
+import { Agent, setGlobalDispatcher } from "undici";
+
+// --- DNS-over-HTTPS to bypass ISP DNS blocks ------------------------------ //
+// Many ISPs (e.g. in Spain) block torrent trackers (YTS, TPB, 1337x) at the DNS
+// level, so the hosts fail to resolve without a VPN. Resolve every hostname via
+// Cloudflare DoH (reached by IP, so it doesn't depend on the poisoned system
+// DNS) and connect straight to that IP; undici keeps the real hostname for SNI
+// and cert validation, which defeats DNS-based blocks. IP-level blocks would
+// still need a VPN.
+const DOH_IPS = ["1.1.1.1", "1.0.0.1"];
+const dnsCache = new Map();
+
+async function resolveDoH(hostname) {
+  if (net.isIP(hostname)) return hostname;
+  if (dnsCache.has(hostname)) return dnsCache.get(hostname);
+  for (const ip of DOH_IPS) {
+    try {
+      const res = await fetch(
+        `https://${ip}/dns-query?name=${encodeURIComponent(hostname)}&type=A`,
+        { headers: { accept: "application/dns-json" } },
+      );
+      if (!res.ok) continue;
+      const json = await res.json();
+      const ans = (json.Answer || []).find((a) => a.type === 1 && a.data);
+      if (ans) {
+        dnsCache.set(hostname, ans.data);
+        return ans.data;
+      }
+    } catch {
+      // try next resolver
+    }
+  }
+  return null;
+}
+
+setGlobalDispatcher(
+  new Agent({
+    connect: {
+      lookup: (hostname, options, callback) => {
+        resolveDoH(hostname)
+          .then((ip) => {
+            if (ip) callback(null, ip, net.isIPv6(ip) ? 6 : 4);
+            else dns.lookup(hostname, options, callback);
+          })
+          .catch(() => dns.lookup(hostname, options, callback));
+      },
+    },
+  }),
+);
+
 const USER_AGENT = "Mark-XXXIX (+https://github.com/baairon/torlink)";
 
 const TRACKERS = [
@@ -76,7 +128,8 @@ async function fetchWithRetries(url, opts = {}, retries = 2) {
 }
 
 // --- YTS (movies) ---------------------------------------------------------
-const YTS_HOSTS = ["yts.mx", "yts.am", "yts.rs"];
+// yts.rs / yts.am resolve; yts.mx currently NXDOMAINs globally — kept last.
+const YTS_HOSTS = ["yts.rs", "yts.am", "yts.mx"];
 
 async function searchYts(query) {
   const params = new URLSearchParams({ limit: "50", query_term: query });
