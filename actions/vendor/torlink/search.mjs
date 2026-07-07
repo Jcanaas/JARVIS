@@ -195,6 +195,43 @@ async function searchPirateBay(query, kind) {
   return out;
 }
 
+// --- Nyaa.si (anime) --------------------------------------------------------
+// Nyaa is the dominant anime tracker. The RSS endpoint returns structured data
+// with infoHash, seeders, leechers and size — no HTML scraping needed.
+// Category 1_0 = all anime; also query 1_3 (non-English-translated) for
+// Spanish-subtitled releases.
+async function searchNyaa(query, extraCat = null) {
+  const cat = extraCat || "1_0";
+  const url = `https://nyaa.si/?page=rss&q=${encodeURIComponent(query)}&c=${cat}&f=0&s=seeders&o=desc`;
+  const res = await fetchWithRetries(url, {}, 1);
+  const text = await res.text();
+  const out = [];
+  for (const block of text.split("<item>").slice(1)) {
+    const title = (
+      block.match(/<title><!\[CDATA\[([^\]]+)\]\]><\/title>/)?.[1] ||
+      block.match(/<title>([^<]+)<\/title>/)?.[1] || ""
+    ).trim();
+    const infoHash = block
+      .match(/<nyaa:infoHash>([a-fA-F0-9]+)<\/nyaa:infoHash>/i)?.[1]?.toLowerCase();
+    if (!infoHash || !title) continue;
+    const seeders = parseInt(
+      block.match(/<nyaa:seeders>(\d+)<\/nyaa:seeders>/i)?.[1] || "0", 10);
+    const leechers = parseInt(
+      block.match(/<nyaa:leechers>(\d+)<\/nyaa:leechers>/i)?.[1] || "0", 10);
+    const rawSize = block.match(/<nyaa:size>([^<]+)<\/nyaa:size>/i)?.[1] || "";
+    out.push({
+      name: title,
+      infoHash,
+      source: "nyaa",
+      sizeBytes: parseSize(rawSize),
+      seeders,
+      leechers,
+      magnet: buildMagnet(infoHash, title),
+    });
+  }
+  return out;
+}
+
 // --- 1337x (movies + tv) ---------------------------------------------------
 const X1337_HOSTS = ["1337x.to", "1337x.st", "x1337x.ws", "1337xx.to"];
 const STOP = new Set(["the", "a", "an", "of", "and", "or", "to"]);
@@ -231,7 +268,7 @@ async function detailMagnet(base, path) {
 }
 
 async function searchX1337(query, kind) {
-  const cat = kind === "tv" ? "TV" : "Movies";
+  const cat = kind === "tv" ? "TV" : kind === "anime" ? "Anime" : "Movies";
   const path = `/category-search/${encodeURIComponent(query).replace(/%20/g, "+")}/${cat}/1/`;
 
   let base = "", html = "", lastError;
@@ -315,14 +352,26 @@ async function main() {
     process.exit(1);
   }
 
-  const sources = kind === "tv"
-    ? [searchPirateBay(query, "tv"), searchX1337(query, "tv")]
-    : [searchYts(query), searchPirateBay(query, "movie"), searchX1337(query, "movie")];
+  let sources;
+  if (kind === "anime") {
+    // Nyaa is the dominant anime tracker; 1337x Anime category as fallback.
+    // Also query Nyaa with non-English-translated category to surface
+    // Spanish/European subtitle releases.
+    sources = [
+      searchNyaa(query),
+      searchNyaa(query, "1_3"),    // non-English-translated (includes Spanish subs)
+      searchX1337(query, "anime"),
+    ];
+  } else if (kind === "tv") {
+    sources = [searchPirateBay(query, "tv"), searchX1337(query, "tv")];
+  } else {
+    sources = [searchYts(query), searchPirateBay(query, "movie"), searchX1337(query, "movie")];
+  }
 
-  // When Spanish is requested, add extra passes that query the trackers with a
-  // "castellano" hint — Castilian releases tag the title and don't surface on a
-  // plain (English) query.
-  if (spanish) {
+  // When Spanish is requested (non-anime), add extra passes with a
+  // "castellano" hint — Castilian releases tag the title and don't surface on
+  // a plain (English) query.
+  if (spanish && kind !== "anime") {
     const esQuery = `${query} castellano`;
     sources.push(searchX1337(esQuery, kind === "tv" ? "tv" : "movie"));
     sources.push(searchPirateBay(esQuery, kind === "tv" ? "tv" : "movie"));

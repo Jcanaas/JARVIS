@@ -29,6 +29,7 @@ _TIMEOUT = 12
 # Spanish-focused providers (the whole point of adding Torrentio here) plus the
 # big international ones so we still get high-seed English releases.
 _PROVIDERS = "mejortorrent,wolfmax4k,cinecalidad,elitetorrent,yts,eztv,thepiratebay,1337x"
+_ANIME_PROVIDERS = "nyaa,eztv,1337x"
 
 _TRACKERS = [
     "udp://tracker.opentrackr.org:1337/announce",
@@ -159,4 +160,38 @@ def search(imdb_id: str, kind: str = "movie", season: int = 0, episode: int = 0,
     else:
         streams.sort(key=lambda s: s.seeders, reverse=True)
 
+    return streams[:limit]
+
+
+def search_anime(imdb_id: str, kind: str = "tv", season: int = 0, episode: int = 0,
+                 limit: int = 15) -> list[Stream]:
+    """Fetch anime torrent streams via Torrentio using Nyaa as primary source.
+
+    Nyaa is the dominant anime tracker; EZTV and 1337x cover stragglers.
+    """
+    if not imdb_id:
+        raise TorrentioError("No IMDb id provided.")
+
+    stream_type = "series" if kind == "tv" else "movie"
+    video_id = imdb_id
+    if stream_type == "series" and season and episode:
+        video_id = f"{imdb_id}:{season}:{episode}"
+
+    url = f"{_BASE}/providers={_ANIME_PROVIDERS}/stream/{stream_type}/{video_id}.json"
+
+    try:
+        r = requests.get(url, timeout=_TIMEOUT,
+                         headers={"User-Agent": "Mozilla/5.0 (Jarvis)"})
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as exc:
+        raise TorrentioError(f"Torrentio anime request failed: {exc}") from exc
+    except ValueError as exc:
+        raise TorrentioError(f"Invalid Torrentio response: {exc}") from exc
+
+    streams = [s for item in data.get("streams", []) if (s := _parse_stream(item))]
+    if not streams:
+        raise TorrentioError(f"No anime streams for '{imdb_id}'.")
+
+    streams.sort(key=lambda s: s.seeders, reverse=True)
     return streams[:limit]

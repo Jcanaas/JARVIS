@@ -80,7 +80,7 @@ def search(query: str, kind: str = "movie", limit: int = 10,
         raise TorrentSearchError("Empty search query.")
 
     node = _locate_node()
-    kind = "tv" if kind == "tv" else "movie"
+    kind = "tv" if kind == "tv" else "anime" if kind == "anime" else "movie"
 
     cmd = [node, str(_SEARCH_SCRIPT), "search", query,
            "--kind", kind, "--limit", str(limit), "--json"]

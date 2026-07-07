@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import html as html_lib
 import base64
+import calendar as _calendar_mod
 import hashlib
 import math
 import mimetypes
@@ -15,6 +16,7 @@ import tempfile
 import threading
 import time
 import re
+from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -22,25 +24,27 @@ import psutil
 import requests
 
 from PyQt6.QtCore import (
-    QBuffer, QByteArray, QEasingCurve, QEvent, QIODevice, QItemSelectionModel, QMimeData,
+    QAbstractAnimation, QBuffer, QByteArray, QDate, QEasingCurve, QEvent, QIODevice, QItemSelectionModel, QMimeData,
     QObject, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTime, QTimer, QUrl,
     QVariantAnimation, pyqtProperty, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QCursor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
-    QFontDatabase, QIcon, QImageReader, QKeySequence, QLinearGradient, QPainter,
-    QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut,
+    QBrush, QColor, QConicalGradient, QCursor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
+    QFontDatabase, QFontMetrics, QIcon, QImageReader, QKeySequence, QLinearGradient, QPainter,
+    QPainterPath, QPen, QPalette, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
+    QApplication, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
+    QGraphicsPixmapItem, QGraphicsScene,
     QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextBrowser, QTextEdit,
     QVBoxLayout, QWidget, QProgressBar, QSlider, QStackedWidget,
     QAbstractItemView, QButtonGroup, QComboBox, QHeaderView, QListWidget, QListWidgetItem,
     QInputDialog, QListView, QMenu, QMessageBox, QSpinBox, QCheckBox,
     QTableWidget, QTableWidgetItem, QDialog, QDialogButtonBox, QTimeEdit, QSpacerItem,
+    QDateEdit,
 )
 
 try:
@@ -65,7 +69,7 @@ API_FILE   = config_path("api_keys.json")
 
 _DEFAULT_W, _DEFAULT_H = 1180, 760
 _MIN_W,     _MIN_H     = 900, 620
-_LEFT_W  = 196
+_LEFT_W  = 88
 _RIGHT_W = 320
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
@@ -289,6 +293,16 @@ def _line_icon(name: str, color: str = C.TEXT_DIM, size: int = 20) -> QIcon:
         line(9, 5, 16, 12); line(16, 12, 9, 19)
     elif name == "search":
         p.drawEllipse(QRectF(4, 4, 11, 11)); line(14, 14, 20, 20)
+    elif name == "filter":
+        path = QPainterPath()
+        path.moveTo(4, 6)
+        path.lineTo(20, 6)
+        path.lineTo(14, 12)
+        path.lineTo(14, 18)
+        path.lineTo(10, 20)
+        path.lineTo(10, 12)
+        path.closeSubpath()
+        p.drawPath(path)
     elif name == "more":
         p.setBrush(QBrush(qcol(color)))
         for x in (6, 12, 18):
@@ -359,6 +373,14 @@ def _line_icon(name: str, color: str = C.TEXT_DIM, size: int = 20) -> QIcon:
         tri = QPainterPath()
         tri.moveTo(10, 9); tri.lineTo(15, 12); tri.lineTo(10, 15)
         tri.closeSubpath(); p.drawPath(tri)
+    elif name == "plus":
+        line(12, 5, 12, 19); line(5, 12, 19, 12)
+    elif name == "calendar":
+        p.drawRoundedRect(QRectF(3, 5, 18, 16), 3, 3)
+        line(3, 10, 21, 10); line(8, 3, 8, 7); line(16, 3, 16, 7)
+        p.setBrush(qcol(color))
+        for _dx, _dy in ((7, 14), (12, 14), (17, 14), (7, 18), (12, 18)):
+            p.drawEllipse(QRectF(_dx - 1, _dy - 1, 2, 2))
     elif name == "settings":
         p.drawEllipse(QRectF(9, 9, 6, 6))
         import math as _m
@@ -419,6 +441,17 @@ def _line_icon(name: str, color: str = C.TEXT_DIM, size: int = 20) -> QIcon:
         line(4, 17, 7, 17); line(7, 17, 11, 13)
         line(13, 11, 17, 7); line(17, 7, 20, 7)
         line(16, 4, 20, 7); line(20, 7, 16, 10)
+    elif name == "film":
+        p.drawRoundedRect(QRectF(4, 5, 16, 14), 2, 2)
+        line(8, 5, 8, 19); line(16, 5, 16, 19); line(4, 10, 20, 10); line(4, 14, 20, 14)
+        for x in (5.8, 17.2):
+            for y in (7, 12, 17):
+                p.drawEllipse(QRectF(x - 0.8, y - 0.8, 1.6, 1.6))
+    elif name == "tv":
+        p.drawRoundedRect(QRectF(3, 5, 18, 13), 2, 2)
+        line(8, 18, 16, 18); line(12, 18, 12, 21)
+        line(7, 9, 10, 12); line(10, 12, 7, 15)
+        p.drawEllipse(QRectF(13, 10, 3, 3)); p.drawEllipse(QRectF(13, 14, 1.5, 1.5))
     elif name in {"file", "image", "video", "audio", "code", "archive", "chart"}:
         path = QPainterPath()
         path.moveTo(6, 3); path.lineTo(15, 3); path.lineTo(19, 7)
@@ -538,6 +571,316 @@ def pulse_glow(w: QWidget, color: str | None = None, radius: int = 78):
     anim.setKeyValueAt(1.0, 0.0)
     anim.setEasingCurve(QEasingCurve.Type.OutCubic)
     anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+class _ModeShortcutTooltip(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("ModeShortcutTooltip")
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("""
+            QFrame#ModeShortcutTooltip {
+                background: rgba(8, 11, 23, 0.96);
+                border: 1px solid rgba(182, 196, 255, 0.26);
+                border-radius: 8px;
+            }
+            QLabel#ModeTipLabel {
+                color: #F2F3FA;
+                background: transparent;
+                border: none;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel#ModeTipHint {
+                color: #8FA8FF;
+                background: transparent;
+                border: none;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QLabel#ModeTipKey {
+                color: #07101E;
+                background: #B6C4FF;
+                border: none;
+                border-radius: 5px;
+                padding: 2px 7px;
+                font-size: 10px;
+                font-weight: 900;
+            }
+        """)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 7, 8, 7)
+        lay.setSpacing(8)
+        self._label = QLabel()
+        self._label.setObjectName("ModeTipLabel")
+        self._hint = QLabel("Atajo")
+        self._hint.setObjectName("ModeTipHint")
+        self._key = QLabel()
+        self._key.setObjectName("ModeTipKey")
+        self._key.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._label)
+        lay.addSpacing(2)
+        lay.addWidget(self._hint)
+        lay.addWidget(self._key)
+
+        glow = QGraphicsDropShadowEffect(self)
+        glow.setOffset(0, 10)
+        glow.setBlurRadius(22)
+        glow.setColor(qcol("#000000", 130))
+        self.setGraphicsEffect(glow)
+
+    def show_for(self, anchor: QWidget, label: str, shortcut: str):
+        self._label.setText(label)
+        self._key.setText(shortcut.upper())
+        self.adjustSize()
+        pos = anchor.mapToGlobal(QPoint(anchor.width() + 10, (anchor.height() - self.height()) // 2))
+        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            if pos.x() + self.width() > geo.right() - 6:
+                pos.setX(anchor.mapToGlobal(QPoint(-self.width() - 10, 0)).x())
+            pos.setY(max(geo.top() + 6, min(pos.y(), geo.bottom() - self.height() - 6)))
+        self.move(pos)
+        self.show()
+        self.raise_()
+
+
+class TooltipVerticalNavbar(QWidget):
+    mode_selected = pyqtSignal(str)
+
+    def __init__(self, items: list[dict], parent=None):
+        super().__init__(parent)
+        self.setObjectName("TooltipVerticalNavbar")
+        self._buttons: dict[str, QPushButton] = {}
+        self._badges: dict[str, QLabel] = {}
+        self._tooltip = _ModeShortcutTooltip(self)
+        self.setStyleSheet("""
+            QWidget#TooltipVerticalNavbar {
+                background: rgba(255, 255, 255, 0.035);
+                border: 1px solid rgba(182, 196, 255, 0.11);
+                border-radius: 12px;
+            }
+            QPushButton#TooltipVerticalNavButton {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 11px;
+                padding: 0;
+            }
+            QPushButton#TooltipVerticalNavButton:hover {
+                background: rgba(255,255,255,0.06);
+                border-color: rgba(182,196,255,0.18);
+            }
+            QPushButton#TooltipVerticalNavButton:checked {
+                background: rgba(94,130,255,0.16);
+                border-color: rgba(182,196,255,0.42);
+            }
+            QPushButton#TooltipVerticalNavButton:focus {
+                border: 2px solid rgba(182,196,255,0.58);
+            }
+        """)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(7)
+
+        for item in items:
+            mode = item["mode"]
+            label = item["label"]
+            shortcut = str((item.get("labelHasKeyword") or [""])[0]).upper()
+            icon_name = item["icon"]
+            button = QPushButton()
+            button.setObjectName("TooltipVerticalNavButton")
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setFixedSize(50, 50)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setIcon(self._nav_icon(icon_name))
+            button.setIconSize(QSize(22, 22))
+            button.setAccessibleName(f"Abrir {label}")
+            button.setProperty("navLabel", label)
+            button.setProperty("navShortcut", shortcut)
+            button.installEventFilter(self)
+            button.clicked.connect(lambda _checked=False, m=mode: self.mode_selected.emit(m))
+            HoverGlow(button, color=C.PRI_DIM, radius=28)
+            lay.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+            self._buttons[mode] = button
+
+            if item.get("hasBadge"):
+                badge = QLabel("", button)
+                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                badge.setToolTip("Chats con mensajes sin leer")
+                badge.setFixedSize(22, 22)
+                badge.move(27, 3)
+                badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                badge.setStyleSheet("""
+                    QLabel {
+                        color: #03111B;
+                        background: #7C9AFF;
+                        border: 1px solid rgba(255, 255, 255, 0.45);
+                        border-radius: 10px;
+                        font-size: 9px;
+                        font-weight: 800;
+                    }
+                """)
+                badge.hide()
+                self._badges[mode] = badge
+
+    def buttons(self) -> dict[str, QPushButton]:
+        return self._buttons
+
+    def badge(self, mode: str) -> QLabel | None:
+        return self._badges.get(mode)
+
+    def _nav_icon(self, icon_name: str) -> QIcon:
+        return _line_icon(icon_name, C.TEXT_DIM, 20)
+
+    def eventFilter(self, obj, event):
+        if isinstance(obj, QPushButton):
+            if event.type() == QEvent.Type.Enter:
+                obj.setFixedSize(52, 52)
+                obj.setIconSize(QSize(23, 23))
+                label = str(obj.property("navLabel") or "")
+                shortcut = str(obj.property("navShortcut") or "")
+                if label and shortcut:
+                    self._tooltip.show_for(obj, label, shortcut)
+            elif event.type() in (QEvent.Type.Leave, QEvent.Type.MouseButtonPress):
+                obj.setFixedSize(50, 50)
+                obj.setIconSize(QSize(22, 22))
+                self._tooltip.hide()
+        return super().eventFilter(obj, event)
+
+
+class _PaginationPageButton(QPushButton):
+    """Botón numerado de paginación con halo de hover y resalte del activo."""
+
+    def __init__(self, page: int, parent=None):
+        super().__init__(str(page), parent)
+        self.page = page
+        self.setObjectName("PagePageButton")
+        self.setCheckable(True)
+        self.setFixedSize(30, 30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(f"Ir a la página {page}")
+        HoverGlow(self, color=C.PRI_DIM, radius=22)
+        self.set_active(False)
+
+    def set_active(self, active: bool):
+        self.setChecked(active)
+        if active:
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background: {C.PRI};
+                    color: #0a0e26;
+                    border: 1px solid {C.PRI_DIM};
+                    border-radius: 8px;
+                    font-size: 12px;
+                    font-weight: 800;
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgba(255,255,255,0.045);
+                    color: {C.TEXT_DIM};
+                    border: 1px solid rgba(255,255,255,0.09);
+                    border-radius: 8px;
+                    font-size: 12px;
+                    font-weight: 700;
+                }}
+                QPushButton:hover {{
+                    color: {C.TEXT};
+                    background: rgba(255,255,255,0.08);
+                    border-color: rgba(182,196,255,0.35);
+                }}
+                QPushButton:pressed {{ background: rgba(255,255,255,0.03); }}
+            """)
+
+
+class PaginationBar(QWidget):
+    """Barra de paginación numerada (anterior / páginas / siguiente) con el
+    mismo lenguaje visual que el resto de la app: chip activo en azul
+    primario con halo de hover en cada botón en vez de los físicos
+    "lift"/shimmer de la referencia web, que no tienen equivalente nativo
+    en widgets de Qt."""
+
+    page_changed = pyqtSignal(int)
+
+    def __init__(self, total_pages: int = 1, current_page: int = 1,
+                 max_visible: int = 5, parent=None):
+        super().__init__(parent)
+        self._total = max(1, int(total_pages))
+        self._current = max(1, min(int(current_page), self._total))
+        self._max_visible = max(3, int(max_visible))
+
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(4)
+
+        self.prev_btn = _icon_button("chevron_left", "Página anterior", size=30, icon_size=15)
+        self.prev_btn.clicked.connect(lambda: self.go_to(self._current - 1))
+        self._layout.addWidget(self.prev_btn)
+
+        self._pages_host = QHBoxLayout()
+        self._pages_host.setSpacing(4)
+        self._layout.addLayout(self._pages_host)
+
+        self.next_btn = _icon_button("chevron_right", "Página siguiente", size=30, icon_size=15)
+        self.next_btn.clicked.connect(lambda: self.go_to(self._current + 1))
+        self._layout.addWidget(self.next_btn)
+
+        self._rebuild()
+
+    def current_page(self) -> int:
+        return self._current
+
+    def set_pages(self, total_pages: int, current_page: int | None = None):
+        self._total = max(1, int(total_pages))
+        if current_page is not None:
+            self._current = max(1, min(int(current_page), self._total))
+        else:
+            self._current = max(1, min(self._current, self._total))
+        self._rebuild()
+
+    def go_to(self, page: int):
+        page = max(1, min(int(page), self._total))
+        if page == self._current:
+            return
+        self._current = page
+        self._rebuild()
+        self.page_changed.emit(page)
+
+    def _window(self) -> list[int]:
+        radius = max(1, (self._max_visible - 2) // 2)
+        pages = {1, self._total}
+        for p in range(self._current - radius, self._current + radius + 1):
+            if 1 <= p <= self._total:
+                pages.add(p)
+        return sorted(pages)
+
+    def _rebuild(self):
+        while self._pages_host.count():
+            item = self._pages_host.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        prev_page = None
+        for page in self._window():
+            if prev_page is not None and page - prev_page > 1:
+                gap = QLabel("…")
+                gap.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; font-size: 12px;")
+                gap.setFixedWidth(16)
+                gap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._pages_host.addWidget(gap)
+            btn = _PaginationPageButton(page)
+            btn.set_active(page == self._current)
+            btn.clicked.connect(lambda _c=False, p=page: self.go_to(p))
+            self._pages_host.addWidget(btn)
+            prev_page = page
+
+        self.prev_btn.setEnabled(self._current > 1)
+        self.next_btn.setEnabled(self._current < self._total)
 
 
 class _SnapshotVeil(QWidget):
@@ -2202,9 +2545,7 @@ class GmailModePanel(QWidget):
         heading_row.addWidget(self.compose_btn)
         inbox_lay.addLayout(heading_row)
 
-        self.search_input = QLineEdit()
-        self.search_input.setObjectName("GmailSearch")
-        self.search_input.setPlaceholderText("Buscar correo")
+        self.search_input = SearchGlowInput("Buscar correo")
         self.search_input.returnPressed.connect(self.search_emails)
         inbox_lay.addWidget(self.search_input)
 
@@ -2234,28 +2575,12 @@ class GmailModePanel(QWidget):
         self.email_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inbox_lay.addWidget(self.email_list, stretch=1)
 
+        self.pagination = PaginationBar(total_pages=1, current_page=1, max_visible=5, parent=self)
+        self.pagination.page_changed.connect(self._load_page)
         pagination = QHBoxLayout()
-        pagination.setSpacing(6)
-        self.prev_page_btn = QPushButton()
-        self.prev_page_btn.setObjectName("GmailPageButton")
-        self.prev_page_btn.setIcon(_line_icon("chevron_left", C.TEXT_DIM, 17))
-        self.prev_page_btn.setIconSize(QSize(17, 17))
-        self.prev_page_btn.setToolTip("Página anterior")
-        self.prev_page_btn.setFixedSize(30, 28)
-        self.prev_page_btn.clicked.connect(lambda: self._load_page(self._page - 1))
-        self.page_label = QLabel("1 / 1")
-        self.page_label.setObjectName("GmailPageLabel")
-        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.next_page_btn = QPushButton()
-        self.next_page_btn.setObjectName("GmailPageButton")
-        self.next_page_btn.setIcon(_line_icon("chevron_right", C.TEXT_DIM, 17))
-        self.next_page_btn.setIconSize(QSize(17, 17))
-        self.next_page_btn.setToolTip("Página siguiente")
-        self.next_page_btn.setFixedSize(30, 28)
-        self.next_page_btn.clicked.connect(lambda: self._load_page(self._page + 1))
-        pagination.addWidget(self.prev_page_btn)
-        pagination.addWidget(self.page_label, stretch=1)
-        pagination.addWidget(self.next_page_btn)
+        pagination.addStretch()
+        pagination.addWidget(self.pagination)
+        pagination.addStretch()
         inbox_lay.addLayout(pagination)
 
         root.addWidget(self.reader_page, stretch=7)
@@ -2379,28 +2704,6 @@ class GmailModePanel(QWidget):
                 background: rgba(94, 130, 255, 0.14);
                 border-color: rgba(182, 196, 255, 0.32);
             }}
-            QPushButton#GmailPageButton {{
-                background: rgba(255, 255, 255, 0.045);
-                color: #dce1ff;
-                border: 1px solid rgba(255, 255, 255, 0.08);
-                border-radius: 5px;
-                font-size: 18px;
-                padding: 0;
-            }}
-            QPushButton#GmailPageButton:hover {{
-                background: rgba(94, 130, 255, 0.14);
-                border-color: rgba(182, 196, 255, 0.32);
-            }}
-            QPushButton#GmailPageButton:disabled {{
-                color: rgba(188, 198, 238, 0.20);
-                background: rgba(255, 255, 255, 0.018);
-                border-color: rgba(255, 255, 255, 0.035);
-            }}
-            QLabel#GmailPageLabel {{
-                color: rgba(220, 237, 250, 0.65);
-                font-size: 11px;
-                font-weight: 700;
-            }}
             QListWidget#GmailList {{
                 background: transparent;
                 border: none;
@@ -2432,8 +2735,7 @@ class GmailModePanel(QWidget):
     def _run(self, op: str, fn):
         if op == "list":
             self.status.setText("Cargando…")
-            self.prev_page_btn.setEnabled(False)
-            self.next_page_btn.setEnabled(False)
+            self.pagination.setEnabled(False)
 
         def worker():
             try:
@@ -2674,8 +2976,7 @@ class GmailModePanel(QWidget):
         if isinstance(result, Exception):
             if op == "list":
                 self.status.setText("Error")
-                self.prev_page_btn.setEnabled(self._page > 1)
-                self.next_page_btn.setEnabled(self._page < self._pages)
+                self.pagination.setEnabled(True)
             elif op == "read":
                 self.preview.setPlainText(str(result))
             return
@@ -2693,9 +2994,8 @@ class GmailModePanel(QWidget):
                 self.email_list.addItem(item)
                 self.email_list.setItemWidget(item, self._email_row_widget(email))
             self.status.setText(f"{self._total_emails} correos")
-            self.page_label.setText(f"{self._page} / {self._pages}")
-            self.prev_page_btn.setEnabled(self._page > 1)
-            self.next_page_btn.setEnabled(self._page < self._pages)
+            self.pagination.setEnabled(True)
+            self.pagination.set_pages(self._pages, self._page)
             if not self._items:
                 self.status.setText("No hay resultados.")
             return
@@ -3027,25 +3327,18 @@ class DriveModePanel(QWidget):
         self.folder_back.setEnabled(False)
         self.folder_back.clicked.connect(self.go_back_folder)
         search_row.addWidget(self.folder_back)
-        self.search_input = QLineEdit()
-        self.search_input.setObjectName("DriveSearch")
-        self.search_input.setPlaceholderText("Buscar archivos en Drive...")
+        self.search_input = SearchGlowInput("Buscar archivos en Drive...")
         self.search_input.returnPressed.connect(self.search_files)
         search_row.addWidget(self.search_input, stretch=1)
         recent = QPushButton("Mi unidad")
         recent.setObjectName("DriveToolButton")
         recent.setIcon(_line_icon("refresh", C.TEXT_DIM, 17))
         recent.clicked.connect(self.load_recent)
-        search = QPushButton("Buscar")
-        search.setObjectName("DriveToolButton")
-        search.setIcon(_line_icon("search", C.TEXT_DIM, 17))
-        search.clicked.connect(self.search_files)
         upload = QPushButton("Subir")
         upload.setObjectName("DrivePrimaryButton")
         upload.setIcon(_line_icon("upload", C.PRI, 17))
         upload.clicked.connect(self.upload_selected_file)
         search_row.addWidget(recent)
-        search_row.addWidget(search)
         search_row.addWidget(upload)
         root.addWidget(toolbar)
 
@@ -3731,17 +4024,9 @@ class MusicModePanelV2(QWidget):
 
         search_row = QHBoxLayout()
         search_row.setSpacing(10)
-        self.query_input = QLineEdit()
-        self.query_input.setObjectName("MusicSearch")
-        self.query_input.setPlaceholderText("Buscar playlists, canciones o artistas")
+        self.query_input = SearchGlowInput("Buscar playlists, canciones o artistas")
         self.query_input.returnPressed.connect(self.search)
         search_row.addWidget(self.query_input, stretch=1)
-        self.search_btn = QPushButton("Buscar")
-        self.search_btn.setObjectName("MusicSearchButton")
-        self.search_btn.setIcon(_line_icon("search", C.TEXT_DIM, 17))
-        self.search_btn.setIconSize(QSize(17, 17))
-        self.search_btn.clicked.connect(self.search)
-        search_row.addWidget(self.search_btn)
         root.addLayout(search_row)
 
         # Persistent section tabs (Recomendaciones / Playlists). Hidden while a
@@ -6897,14 +7182,9 @@ class YouTubeModePanel(QWidget):
         self.home_btn = _icon_button("home", "Inicio (recomendados)", size=44, icon_size=19)
         self.home_btn.clicked.connect(self._go_home)
         top.addWidget(self.home_btn)
-        self.search_input = QLineEdit()
-        self.search_input.setObjectName("YtSearch")
-        self.search_input.setPlaceholderText("Buscar en YouTube")
+        self.search_input = SearchGlowInput("Buscar en YouTube")
         self.search_input.returnPressed.connect(self._do_search)
         top.addWidget(self.search_input, stretch=1)
-        self.search_btn = _icon_button("search", "Buscar", size=44, icon_size=19, accent=True)
-        self.search_btn.clicked.connect(self._do_search)
-        top.addWidget(self.search_btn)
         root.addLayout(top)
 
         self.stack = QStackedWidget()
@@ -8186,6 +8466,563 @@ def _wa_settings_icon(name: str, color: str, size: int = 18) -> QIcon:
     p.end()
     return QIcon(pm)
 
+class FloatingLabelInput(QWidget):
+    textChanged = pyqtSignal(str)
+
+    def __init__(self, label: str, text: str = "", parent=None):
+        super().__init__(parent)
+        self._label_text = label
+        self._active = bool(text)
+        self._letter_anims: list[QPropertyAnimation] = []
+        self._letter_labels: list[QLabel] = []
+        self.setMinimumHeight(56)
+        super().setMinimumWidth(190)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self._line = QLineEdit(text)
+        self._line.setFrame(False)
+        self._line.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self._line.setStyleSheet(f"""
+            QLineEdit {{
+                background: transparent;
+                color: {C.TEXT};
+                border: none;
+                font-size: 15px;
+                font-weight: 600;
+                selection-background-color: rgba(182,196,255,0.30);
+            }}
+        """)
+        self._line.textChanged.connect(self._on_text_changed)
+        self._line.installEventFilter(self)
+
+        self._hint = QWidget(self)
+        self._hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._hint.setStyleSheet("background: transparent; border: none;")
+
+        hint_font = QFont(FONT_UI, 13, QFont.Weight.DemiBold)
+        metrics = QFontMetrics(hint_font)
+        x = 0
+        for ch in label:
+            letter = QLabel(ch, self._hint)
+            letter.setFont(hint_font)
+            letter.setStyleSheet(f"color: {C.TEXT}; background: transparent; border: none;")
+            letter.adjustSize()
+            letter.move(x, 14)
+            self._letter_labels.append(letter)
+            x += max(5, metrics.horizontalAdvance(ch))
+
+        self._relayout()
+        self._apply_state(animated=False)
+
+    def text(self) -> str:
+        return self._line.text()
+
+    def setText(self, text: str) -> None:
+        self._line.setText(text)
+
+    def setPlaceholderText(self, text: str) -> None:
+        self._label_text = text
+
+    def setMinimumWidth(self, width: int) -> None:
+        super().setMinimumWidth(width)
+        if hasattr(self, "_line"):
+            self._line.setMinimumWidth(max(0, width))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._relayout()
+
+    def eventFilter(self, obj, event):
+        if obj is self._line and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self._apply_state(animated=True)
+        return super().eventFilter(obj, event)
+
+    def _on_text_changed(self, text: str) -> None:
+        self.textChanged.emit(text)
+        self._apply_state(animated=True)
+
+    def _state_active(self) -> bool:
+        return bool(self._line.text().strip()) or self._line.hasFocus()
+
+    def _relayout(self) -> None:
+        self._hint.setGeometry(0, 0, self.width(), 28)
+        self._line.setGeometry(0, 24, self.width(), 28)
+        self._line.raise_()
+        self._hint.raise_()
+        self._apply_state(animated=False)
+
+    def _apply_state(self, animated: bool = True) -> None:
+        active = self._state_active()
+        self._active = active
+        border_color = C.PRI if active else "#7B818F"
+        self.setStyleSheet(f"""
+            QWidget {{
+                background: transparent;
+                border: none;
+                border-bottom: 2px solid {border_color};
+            }}
+        """)
+
+        target_y = -2 if active else 13
+        target_color = C.PRI if active else C.TEXT
+        if not animated:
+            for letter in self._letter_labels:
+                letter.move(letter.x(), target_y)
+                letter.setStyleSheet(f"color: {target_color}; background: transparent; border: none;")
+            return
+
+        self._letter_anims = []
+        for idx, letter in enumerate(self._letter_labels):
+            anim = QPropertyAnimation(letter, b"pos", self)
+            anim.setDuration(300)
+            anim.setEasingCurve(QEasingCurve.Type.OutBack)
+            anim.setStartValue(letter.pos())
+            anim.setEndValue(QPoint(letter.x(), target_y))
+            letter.setStyleSheet(f"color: {target_color}; background: transparent; border: none;")
+            self._letter_anims.append(anim)
+            QTimer.singleShot(idx * 45, anim.start)
+
+
+class _InputMask(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        g = QLinearGradient(0, 0, self.width(), 0)
+        g.setColorAt(0.0, QColor(0, 0, 0, 0))
+        g.setColorAt(1.0, QColor(0, 0, 0, 255))
+        p.fillRect(self.rect(), g)
+
+
+class _BlueMask(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._opacity = 0.8
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def setOpacity(self, value: float):
+        self._opacity = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        g = QRadialGradient(QPointF(45, 40), 42)
+        g.setColorAt(0.0, QColor(94, 130, 255, int(255 * self._opacity)))
+        g.setColorAt(0.45, QColor(94, 130, 255, int(130 * self._opacity)))
+        g.setColorAt(1.0, QColor(94, 130, 255, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(g)
+        p.drawEllipse(QRectF(0, 0, self.width(), self.height()))
+
+
+class _SearchSvgIcon(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(18, 18)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        g1 = QLinearGradient(2, 2, 16, 16)
+        g1.setColorAt(0.0, QColor(C.PRI))
+        g1.setColorAt(0.5, QColor(C.PRI_DIM))
+        pen = QPen()
+        pen.setBrush(QBrush(g1))
+        pen.setWidthF(2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(3, 3, 11, 11))
+        g2 = QLinearGradient(13.0, 13.0, 17, 17)
+        g2.setColorAt(0.0, QColor(C.PRI_DIM))
+        g2.setColorAt(0.5, QColor("#7d93ff"))
+        pen.setBrush(QBrush(g2))
+        p.setPen(pen)
+        p.drawLine(QPointF(17, 17), QPointF(13.0, 13.0))
+
+
+class _FilterIcon(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(38, 40)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        bg = QLinearGradient(0, 0, 0, self.height())
+        bg.setColorAt(0.0, QColor("#10142a"))
+        bg.setColorAt(0.52, QColor("#060915"))
+        bg.setColorAt(1.0, QColor("#16204b"))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bg)
+        p.drawRoundedRect(r, 10, 10)
+        path = QPainterPath()
+        path.moveTo(8.16, 6.65002)
+        path.lineTo(15.83, 6.65002)
+        path.cubicTo(16.47, 6.65002, 16.99, 7.17002, 16.99, 7.81002)
+        path.lineTo(16.99, 9.09002)
+        path.cubicTo(16.99, 9.56002, 16.70, 10.14, 16.41, 10.43)
+        path.lineTo(13.91, 12.64)
+        path.cubicTo(13.56, 12.93, 13.33, 13.51, 13.33, 13.98)
+        path.lineTo(13.33, 16.48)
+        path.cubicTo(13.33, 16.83, 13.10, 17.29, 12.81, 17.47)
+        path.lineTo(12.00, 17.98)
+        path.cubicTo(11.24, 18.45, 10.20, 17.92, 10.20, 16.99)
+        path.lineTo(10.20, 13.91)
+        path.cubicTo(10.20, 13.50, 9.97, 12.98, 9.73, 12.69)
+        path.lineTo(7.52, 10.36)
+        path.cubicTo(7.23, 10.08, 7.00, 9.55002, 7.00, 9.20002)
+        path.lineTo(7.00, 7.87002)
+        path.cubicTo(7.00, 7.17002, 7.52, 6.65002, 8.16, 6.65002)
+        path.closeSubpath()
+        p.save()
+        p.translate((self.width() - 27) / 2, (self.height() - 27) / 2)
+        p.scale(27 / 14.832, 27 / 15.408)
+        p.translate(-4.8, -4.56)
+        pen = QPen(QColor(C.PRI), 1.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        p.restore()
+
+
+class SearchGlowInput(QFrame):
+    textChanged = pyqtSignal(str)
+    returnPressed = pyqtSignal()
+
+    CANVAS_W = 280
+    CANVAS_H = 46
+
+    MAIN_W = 268
+    MAIN_H = 40
+
+    BASE_ANGLES = {"dark": 82.0, "glow": 60.0, "white": 83.0, "border": 70.0}
+    HOVER_ANGLES = {"dark": -98.0, "glow": -120.0, "white": -97.0, "border": -110.0}
+    FOCUS_ANGLES = {"dark": 442.0, "glow": 420.0, "white": 443.0, "border": 430.0}
+
+    def __init__(self, placeholder: str = "Search...", text: str = "", parent=None, show_filter: bool = False):
+        super().__init__(parent)
+        self.setObjectName("SearchGlowInput")
+        self.setMinimumHeight(self.CANVAS_H)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setMouseTracking(True)
+
+        self._show_filter = bool(show_filter)
+        self._hovered = False
+        self._glow_level = 0.55
+        self._pulse = 0.0
+        self._angles = dict(self.BASE_ANGLES)
+        self._angle_from = dict(self.BASE_ANGLES)
+        self._angle_to = dict(self.BASE_ANGLES)
+        self._layer_cache: dict = {}
+        self._filter_angle = 90.0
+
+        self._line = QLineEdit(text, self)
+        self._line.setPlaceholderText(placeholder)
+        self._line.setFrame(False)
+        self._line.setTextMargins(36, 0, 16 if not self._show_filter else 40, 0)
+        self._line.setStyleSheet(f"""
+            QLineEdit {{
+                background: transparent;
+                border: none;
+                color: {C.TEXT};
+                font-size: 14px;
+                padding: 0px;
+                selection-background-color: rgba(182, 196, 255, 0.30);
+            }}
+        """)
+        pal = self._line.palette()
+        pal.setColor(QPalette.ColorRole.Text, QColor(C.TEXT))
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor("#8EA0D9"))
+        self._line.setPalette(pal)
+        self._line.textChanged.connect(self._on_text_changed)
+        self._line.returnPressed.connect(self.returnPressed.emit)
+        self._line.installEventFilter(self)
+
+        self._input_mask = _InputMask(self)
+        self._blue_mask = _BlueMask(self)
+        self._search_icon = _SearchSvgIcon(self)
+        self._filter_icon = _FilterIcon(self) if self._show_filter else None
+
+        self._input_mask.hide()
+        self._blue_mask.hide()
+        self._line.raise_()
+        if self._filter_icon is not None:
+            self._filter_icon.raise_()
+        self._search_icon.raise_()
+
+        self._angle_anim = QVariantAnimation(self)
+        self._angle_anim.setStartValue(0.0)
+        self._angle_anim.setEndValue(1.0)
+        self._angle_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._angle_anim.valueChanged.connect(self._apply_angle_progress)
+
+        self._blue_anim = QVariantAnimation(self)
+        self._blue_anim.setDuration(2000)
+        self._blue_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._blue_anim.valueChanged.connect(self._set_blue_opacity)
+
+        self._pulse_anim = QVariantAnimation(self)
+        self._pulse_anim.setStartValue(0.0)
+        self._pulse_anim.setEndValue(1.0)
+        self._pulse_anim.setDuration(1200)
+        self._pulse_anim.setLoopCount(-1)
+        self._pulse_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._pulse_anim.valueChanged.connect(self._set_pulse)
+
+        self._spin_anim = QVariantAnimation(self)
+        self._spin_anim.setStartValue(0.0)
+        self._spin_anim.setEndValue(360.0)
+        self._spin_anim.setDuration(4000)
+        self._spin_anim.setLoopCount(-1)
+        self._spin_anim.setEasingCurve(QEasingCurve.Type.Linear)
+        self._spin_anim.valueChanged.connect(self._set_filter_angle)
+        self._spin_anim.start()
+
+        self._update_children_geometry()
+        self._update_state()
+
+    def sizeHint(self):
+        return QSize(self.CANVAS_W, self.CANVAS_H)
+
+    def minimumSizeHint(self):
+        return QSize(180, self.CANVAS_H)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_children_geometry()
+        self._layer_cache.clear()
+
+    def eventFilter(self, obj, event):
+        if obj is self._line and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self._update_state()
+        return super().eventFilter(obj, event)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._update_state()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._update_state()
+        super().leaveEvent(event)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self._line.setFocus()
+
+    def mousePressEvent(self, event):
+        self._line.setFocus()
+        super().mousePressEvent(event)
+
+    def _main_rect(self) -> QRectF:
+        return QRectF(1, 1, max(10, self.width() - 2), max(10, self.height() - 2))
+
+    def _main_rect_i(self):
+        return 1, 1, max(10, self.width() - 2), max(10, self.height() - 2)
+
+    def _center_rect(self, w: int, h: int) -> QRectF:
+        return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
+
+    def _update_children_geometry(self):
+        x, y, w, h = self._main_rect_i()
+        self._line.setGeometry(x, y, w, h)
+        self._input_mask.setGeometry(0, 0, 0, 0)
+        self._blue_mask.setGeometry(0, 0, 0, 0)
+        self._search_icon.setGeometry(x + 13, y + 11, 18, 18)
+        if self._filter_icon is not None:
+            self._filter_icon.setGeometry(x + w - 44, y + 3, 38, 40)
+            self._filter_icon.setVisible(True)
+
+    def _on_text_changed(self, text: str):
+        self.textChanged.emit(text)
+
+    def _update_state(self):
+        focused = self._line.hasFocus()
+        has_text = bool(self._line.text().strip())
+        self._input_mask.hide()
+        if focused:
+            target = self.FOCUS_ANGLES
+            duration = 4000
+        elif self._hovered:
+            target = self.HOVER_ANGLES
+            duration = 2000
+        else:
+            target = self.BASE_ANGLES
+            duration = 2000
+        self._animate_angles(target, duration)
+        if focused or has_text:
+            self._animate_blue(1.0)
+            if self._pulse_anim.state() != QAbstractAnimation.State.Running:
+                self._pulse_anim.start()
+        else:
+            self._animate_blue(0.78 if self._hovered else 0.55)
+            if self._pulse_anim.state() == QAbstractAnimation.State.Running:
+                self._pulse_anim.stop()
+            self._pulse = 0.0
+        self._search_icon.update()
+        if self._filter_icon is not None:
+            self._filter_icon.setVisible(True)
+            self._filter_icon.update()
+
+    def _animate_angles(self, target: dict[str, float], duration: int):
+        if self._angle_anim.state() == QAbstractAnimation.State.Running and self._angle_to == target:
+            return
+        if all(abs(self._angles[k] - target[k]) < 0.01 for k in target):
+            return
+        if self._angle_anim.state() == QAbstractAnimation.State.Running:
+            self._angle_anim.stop()
+        self._angle_from = dict(self._angles)
+        self._angle_to = dict(target)
+        self._angle_anim.setDuration(duration)
+        self._angle_anim.setStartValue(0.0)
+        self._angle_anim.setEndValue(1.0)
+        self._angle_anim.start()
+
+    def _apply_angle_progress(self, value):
+        t = float(value)
+        for key in self._angles:
+            a = self._angle_from[key]
+            b = self._angle_to[key]
+            self._angles[key] = a + (b - a) * t
+        self._layer_cache.clear()
+        self.update()
+
+    def _animate_blue(self, target: float):
+        if abs(self._glow_level - target) < 0.01:
+            return
+        if self._blue_anim.state() == QAbstractAnimation.State.Running:
+            self._blue_anim.stop()
+        self._blue_anim.setStartValue(self._glow_level)
+        self._blue_anim.setEndValue(target)
+        self._blue_anim.start()
+
+    def _set_blue_opacity(self, value):
+        self._glow_level = float(value)
+        self.update()
+
+    def _set_pulse(self, value):
+        t = float(value)
+        self._pulse = math.sin(t * math.pi)
+        self.update()
+
+    def _set_filter_angle(self, value):
+        self._filter_angle = 90.0 + float(value)
+        if self._filter_icon is not None:
+            self._filter_icon.update()
+
+    def _make_conic_layer(self, name: str, w: int, h: int, radius: float, blur: float, angle: float, stops: list[tuple[float, QColor]]):
+        cache_key = (name, w, h, round(angle, 2))
+        cached = self._layer_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        margin = max(2, int(math.ceil(blur * 2 + 2)))
+        img = QImage(w + margin * 2, h + margin * 2, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(QColor(0, 0, 0, 0))
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(margin, margin, w, h), radius, radius)
+        g = QConicalGradient(QPointF(margin + w / 2, margin + h / 2), angle)
+        for pos, color in stops:
+            g.setColorAt(pos, color)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(g))
+        p.drawPath(path)
+        p.end()
+        result = (img, margin)
+        self._layer_cache[cache_key] = result
+        return result
+
+    def _draw_conic_layer(self, painter: QPainter, name: str, rect: QRectF, radius: float, blur: float, angle: float, stops: list[tuple[float, QColor]], opacity: float = 1.0):
+        img, margin = self._make_conic_layer(name, int(rect.width()), int(rect.height()), radius, blur, angle, stops)
+        painter.save()
+        painter.setOpacity(opacity)
+        painter.drawImage(QPointF(rect.left() - margin, rect.top() - margin), img)
+        painter.restore()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        main = self._main_rect()
+        glow = min(1.0, self._glow_level + (0.16 * self._pulse))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#01040d"))
+        p.drawRoundedRect(main, 10, 10)
+
+        border = QLinearGradient(main.left(), main.top(), main.right(), main.bottom())
+        border.setColorAt(0.0, QColor(94, 130, 255, int(22 + 62 * glow)))
+        border.setColorAt(0.48, QColor(182, 196, 255, int(14 + 44 * glow)))
+        border.setColorAt(1.0, QColor(94, 130, 255, int(18 + 56 * glow)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(border, 1.0))
+        p.drawRoundedRect(main.adjusted(0, 0, -1, -1), 10, 10)
+
+        p.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(main), 10, 10)
+        p.setClipPath(clip)
+
+        left_glow = QRadialGradient(QPointF(main.left() + 22, main.center().y()), 38)
+        left_glow.setColorAt(0.0, QColor(94, 130, 255, int(78 + 50 * glow)))
+        left_glow.setColorAt(0.42, QColor(94, 130, 255, int(36 + 24 * glow)))
+        left_glow.setColorAt(0.72, QColor(94, 130, 255, int(12 + 12 * glow)))
+        left_glow.setColorAt(1.0, QColor(94, 130, 255, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(left_glow)
+        p.drawEllipse(QRectF(main.left() - 17, main.top() - 13, 86, main.height() + 28))
+
+        if self._filter_icon is not None:
+            right_glow = QRadialGradient(QPointF(main.right() - 34, main.center().y() - 2), 30)
+            right_glow.setColorAt(0.0, QColor(182, 196, 255, int(30 + 28 * glow)))
+            right_glow.setColorAt(0.7, QColor(182, 196, 255, int(10 + 8 * glow)))
+            right_glow.setColorAt(1.0, QColor(182, 196, 255, 0))
+            p.setBrush(right_glow)
+            p.drawEllipse(QRectF(main.right() - 68, main.top() - 10, 62, main.height() + 20))
+
+        p.restore()
+
+    def text(self) -> str:
+        return self._line.text()
+
+    def setText(self, text: str) -> None:
+        self._line.setText(text)
+
+    def clear(self) -> None:
+        self._line.clear()
+
+    def setPlaceholderText(self, text: str) -> None:
+        self._line.setPlaceholderText(text)
+
+    def setClearButtonEnabled(self, enabled: bool) -> None:
+        self._line.setClearButtonEnabled(enabled)
+
+    def setFocus(self, *args, **kwargs):
+        self._line.setFocus(*args, **kwargs)
+
+    def __getattr__(self, name):
+        line = self.__dict__.get("_line")
+        if line is not None:
+            return getattr(line, name)
+        raise AttributeError(name)
+
 
 def _wa_local_tz_name() -> str:
     """Best-effort IANA name for the system timezone; defaults to Europe/Madrid."""
@@ -8276,8 +9113,7 @@ class WhatsAppRuleDialog(QDialog):
 
         # Contacts
         _heading("CONTACTOS")
-        self._contact_search = QLineEdit()
-        self._contact_search.setPlaceholderText("Buscar contacto…")
+        self._contact_search = SearchGlowInput("Buscar contacto…")
         self._contact_search.textChanged.connect(self._filter_contacts)
         form.addWidget(self._contact_search)
         self._contact_list = QListWidget()
@@ -8847,22 +9683,9 @@ class MoviesModePanel(QWidget):
         # Search row
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Buscar una película o serie…")
-        self._search.setClearButtonEnabled(True)
-        self._search.setFixedHeight(38)
-        self._search.setStyleSheet(f"""
-            QLineEdit {{
-                background:{C.PANEL2}; color:{C.TEXT};
-                border:1px solid {C.BORDER}; border-radius:9px;
-                padding:0 12px; font-size:12px;
-            }}
-            QLineEdit:focus {{ border:1px solid {C.PRI_DIM}; }}
-        """)
+        self._search = SearchGlowInput("Buscar una película o serie…")
         self._search.returnPressed.connect(self._do_search)
         search_row.addWidget(self._search, stretch=1)
-        search_btn = self._chip("Buscar", self._do_search, primary=True)
-        search_row.addWidget(search_btn)
         root.addLayout(search_row)
 
         # Filter chips
@@ -9179,6 +10002,7 @@ class MoviesModePanel(QWidget):
 
             kind = getattr(movie, "media_type", "movie")
             found: list = []
+            errors: list[str] = []
 
             # Sources 1 & 2: Stremio addons keyed by IMDb id that aggregate
             # Spanish-only sites (Peerflix: DonTorrent/MejorTorrent/Wolfmax4k,
@@ -9186,29 +10010,41 @@ class MoviesModePanel(QWidget):
             try:
                 from actions import movie_search as ms
                 imdb = ms.get_imdb_id(getattr(movie, "tmdb_id", 0), kind=kind)
-            except Exception:
+            except Exception as exc:
                 imdb = ""
+                errors.append(f"imdb_id: {exc}")
 
             if imdb:
+                self._status_sig.emit(
+                    f"Buscando «{movie.title}» en Peerflix + Torrentio ({imdb})…"
+                )
                 for mod_name in ("peerflix_addon", "torrentio"):
                     try:
                         mod = __import__(f"actions.{mod_name}", fromlist=[mod_name])
-                        for s in mod.search(imdb, kind=kind, spanish=True, limit=15):
+                        results = mod.search(imdb, kind=kind, spanish=True, limit=15)
+                        for s in results:
                             found.append(ts.Torrent(
                                 title=s.title, magnet=s.magnet, seeders=s.seeders,
                                 leechers=0, size=s.size, spanish=s.spanish,
                                 provider=getattr(s, "provider", "") or mod_name))
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        errors.append(f"{mod_name}: {exc}")
+            else:
+                errors.append("sin IMDb id → Peerflix/Torrentio omitidos")
 
             # Source 3: title search across YTS/TPB/1337x (with castellano pass).
             try:
+                self._status_sig.emit(f"Buscando «{movie.title}» en YTS/1337x…")
                 found.extend(ts.search(movie.title, kind=kind, limit=10, spanish=True))
-            except Exception:
-                pass
+            except Exception as exc:
+                errors.append(f"torlink: {exc}")
 
             if not found:
-                self._status_sig.emit("No encontré torrents para esta película")
+                diag = "  |  ".join(errors) if errors else ""
+                self._status_sig.emit(
+                    f"No encontré torrents para «{movie.title}»"
+                    + (f"  [{diag}]" if diag else "")
+                )
                 return
 
             # De-duplicate by infohash, then Castilian first, then seeders.
@@ -9609,6 +10445,1179 @@ class MoviesModePanel(QWidget):
             self._show_movie_detail(self._detail_movie)
         else:
             self._show_grid_view()
+
+
+_MONTH_NAMES_ES = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+]
+_WEEKDAY_NAMES_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+
+class CalendarEventDialog(QDialog):
+    """Modal para crear, ver y editar un evento de Google Calendar, incluida
+    la gestión de invitados desde la libreta de contactos local
+    (actions.contacts) — Google Calendar no expone una API de contactos con
+    el scope que ya tenemos, así que usamos una libreta propia en su lugar."""
+
+    def __init__(self, parent=None, event: dict | None = None, default_date: _date | None = None):
+        super().__init__(parent)
+        self._event = event or {}
+        self._event_id = self._event.get("id")
+        self._attendees: list[dict] = [
+            {"name": a.get("displayName") or a.get("email"), "email": a.get("email")}
+            for a in (self._event.get("attendees") or [])
+            if a.get("email")
+        ]
+        self._delete_requested = False
+        is_edit = bool(self._event_id)
+
+        self.setWindowTitle("Editar evento" if is_edit else "Nuevo evento")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        self.setStyleSheet(self._style())
+        self._result_payload: dict | None = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(9)
+
+        title = QLabel("Editar evento" if is_edit else "Nuevo evento")
+        title.setObjectName("ComposeTitle")
+        lay.addWidget(title)
+
+        self.title_input = QLineEdit(str(self._event.get("summary") or ""))
+        self.title_input.setObjectName("ComposeField")
+        self.title_input.setPlaceholderText("Título del evento")
+        lay.addWidget(self.title_input)
+
+        start_dt, end_dt = self._resolve_times(default_date)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.date_input = QDateEdit()
+        self.date_input.setObjectName("ComposeField")
+        self.date_input.setCalendarPopup(True)
+        self.date_input.setDate(QDate(start_dt.year, start_dt.month, start_dt.day))
+        row.addWidget(self.date_input, stretch=1)
+        self.start_time = QTimeEdit(QTime(start_dt.hour, start_dt.minute))
+        self.start_time.setObjectName("ComposeField")
+        row.addWidget(self.start_time)
+        self.end_time = QTimeEdit(QTime(end_dt.hour, end_dt.minute))
+        self.end_time.setObjectName("ComposeField")
+        row.addWidget(self.end_time)
+        lay.addLayout(row)
+
+        self.location_input = QLineEdit(str(self._event.get("location") or ""))
+        self.location_input.setObjectName("ComposeField")
+        self.location_input.setPlaceholderText("Ubicación (opcional)")
+        lay.addWidget(self.location_input)
+
+        self.desc_input = QTextEdit(str(self._event.get("description") or ""))
+        self.desc_input.setObjectName("ComposeBody")
+        self.desc_input.setPlaceholderText("Descripción (opcional)")
+        self.desc_input.setFixedHeight(64)
+        lay.addWidget(self.desc_input)
+
+        # -- invitados ------------------------------------------------------
+        attendees_title = QLabel("Invitados")
+        attendees_title.setObjectName("ComposeSectionLabel")
+        lay.addWidget(attendees_title)
+
+        pick_row = QHBoxLayout()
+        pick_row.setSpacing(6)
+        self.contact_combo = QComboBox()
+        self.contact_combo.setObjectName("ComposeField")
+        pick_row.addWidget(self.contact_combo, stretch=1)
+        add_contact_btn = QPushButton("Añadir")
+        add_contact_btn.setObjectName("ComposeAttach")
+        add_contact_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_contact_btn.clicked.connect(self._add_selected_contact)
+        pick_row.addWidget(add_contact_btn)
+        lay.addLayout(pick_row)
+        self._reload_contacts()
+
+        new_row = QHBoxLayout()
+        new_row.setSpacing(6)
+        self.new_name_input = QLineEdit()
+        self.new_name_input.setObjectName("ComposeField")
+        self.new_name_input.setPlaceholderText("Nombre (nuevo invitado)")
+        new_row.addWidget(self.new_name_input, stretch=1)
+        self.new_email_input = QLineEdit()
+        self.new_email_input.setObjectName("ComposeField")
+        self.new_email_input.setPlaceholderText("email@ejemplo.com")
+        self.new_email_input.returnPressed.connect(self._add_new_attendee)
+        new_row.addWidget(self.new_email_input, stretch=1)
+        add_new_btn = QPushButton()
+        add_new_btn.setObjectName("ComposeAttach")
+        add_new_btn.setIcon(_line_icon("plus", C.PRI, 13))
+        add_new_btn.setIconSize(QSize(13, 13))
+        add_new_btn.setFixedSize(30, 30)
+        add_new_btn.setToolTip("Añadir invitado y guardarlo como contacto")
+        add_new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_new_btn.clicked.connect(self._add_new_attendee)
+        new_row.addWidget(add_new_btn)
+        lay.addLayout(new_row)
+
+        self.attendees_list = QListWidget()
+        self.attendees_list.setObjectName("ComposeAttendeesList")
+        self.attendees_list.setMaximumHeight(104)
+        self.attendees_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lay.addWidget(self.attendees_list)
+        self._refresh_attendees_list()
+
+        self.feedback = QLabel("")
+        self.feedback.setObjectName("ComposeFeedback")
+        self.feedback.setWordWrap(True)
+        lay.addWidget(self.feedback)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(6)
+        if is_edit:
+            delete_btn = QPushButton("Eliminar evento")
+            delete_btn.setObjectName("ComposeCancel")
+            delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            delete_btn.clicked.connect(self._request_delete)
+            buttons.addWidget(delete_btn)
+        buttons.addStretch()
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.setObjectName("ComposeCancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(cancel_btn)
+        self.save_btn = QPushButton("Guardar cambios" if is_edit else "Crear evento")
+        self.save_btn.setObjectName("ComposeSend")
+        self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_btn.setIcon(_line_icon("plus", "#0a0e26", 15))
+        self.save_btn.setIconSize(QSize(15, 15))
+        self.save_btn.clicked.connect(self._save)
+        buttons.addWidget(self.save_btn)
+        lay.addLayout(buttons)
+
+    # -- helpers de fecha/hora ----------------------------------------------
+    def _resolve_times(self, default_date: _date | None) -> tuple[_datetime, _datetime]:
+        default_date = default_date or _date.today()
+        fallback_start = _datetime(default_date.year, default_date.month, default_date.day, 9, 0)
+        fallback_end = fallback_start + _timedelta(hours=1)
+        if not self._event:
+            return fallback_start, fallback_end
+        try:
+            from dateutil import parser as dtparser
+            start_raw = str(self._event.get("start") or "")
+            end_raw = str(self._event.get("end") or "")
+            start_dt = dtparser.parse(start_raw).replace(tzinfo=None) if start_raw else fallback_start
+            end_dt = dtparser.parse(end_raw).replace(tzinfo=None) if end_raw else (start_dt + _timedelta(hours=1))
+            return start_dt, end_dt
+        except Exception:
+            return fallback_start, fallback_end
+
+    # -- invitados / contactos -----------------------------------------------
+    def _reload_contacts(self):
+        from actions import contacts as contacts_mod
+        self.contact_combo.clear()
+        self.contact_combo.addItem("Elegir contacto…", "")
+        for c in contacts_mod.list_contacts():
+            email = c.get("email") or ""
+            if any(a["email"].lower() == email.lower() for a in self._attendees):
+                continue
+            name = c.get("name") or email
+            label = f"{name} <{email}>" if name != email else email
+            self.contact_combo.addItem(label, email)
+
+    def _add_selected_contact(self):
+        email = self.contact_combo.currentData()
+        if not email:
+            return
+        from actions import contacts as contacts_mod
+        contact = contacts_mod.find_contact(email) or {"name": email, "email": email}
+        self._add_attendee(contact.get("name") or email, email)
+        self._reload_contacts()
+
+    def _add_new_attendee(self):
+        from actions import contacts as contacts_mod
+        name = self.new_name_input.text().strip()
+        email = self.new_email_input.text().strip()
+        if not contacts_mod.is_valid_email(email):
+            self.feedback.setText("Introduce un email válido para el invitado.")
+            self.feedback.setStyleSheet("color:#FF5E82; background: transparent;")
+            return
+        try:
+            contacts_mod.upsert_contact(name, email)
+        except Exception:
+            pass
+        self._add_attendee(name or email, email)
+        self.new_name_input.clear()
+        self.new_email_input.clear()
+        self.feedback.setText("")
+        self._reload_contacts()
+
+    def _add_attendee(self, name: str, email: str):
+        if any(a["email"].lower() == email.lower() for a in self._attendees):
+            return
+        self._attendees.append({"name": name or email, "email": email})
+        self._refresh_attendees_list()
+
+    def _remove_attendee(self, email: str):
+        self._attendees = [a for a in self._attendees if a["email"].lower() != email.lower()]
+        self._refresh_attendees_list()
+        self._reload_contacts()
+
+    def _refresh_attendees_list(self):
+        self.attendees_list.clear()
+        if not self._attendees:
+            item = QListWidgetItem("Sin invitados.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.attendees_list.addItem(item)
+            return
+        for a in self._attendees:
+            item = QListWidgetItem()
+            self.attendees_list.addItem(item)
+            row = QWidget()
+            row.setStyleSheet("background: rgba(255,255,255,0.04); border-radius: 6px;")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(8, 4, 6, 4)
+            rl.setSpacing(6)
+            text = a["email"] if a["name"] == a["email"] else f"{a['name']}  ·  {a['email']}"
+            label = QLabel(text)
+            label.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px; background: transparent;")
+            rl.addWidget(label, stretch=1)
+            rm_btn = QPushButton()
+            rm_btn.setIcon(_line_icon("close", C.TEXT_DIM, 11))
+            rm_btn.setIconSize(QSize(11, 11))
+            rm_btn.setFixedSize(20, 20)
+            rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            rm_btn.setToolTip("Quitar invitado")
+            rm_btn.setStyleSheet("""
+                QPushButton { background: transparent; border: none; }
+                QPushButton:hover { background: rgba(255,94,130,0.16); border-radius: 5px; }
+            """)
+            rm_btn.clicked.connect(lambda _c=False, em=a["email"]: self._remove_attendee(em))
+            rl.addWidget(rm_btn)
+            item.setSizeHint(row.sizeHint())
+            self.attendees_list.setItemWidget(item, row)
+
+    # -- resultado ------------------------------------------------------------
+    def payload(self) -> dict | None:
+        return self._result_payload
+
+    def delete_requested(self) -> bool:
+        return self._delete_requested
+
+    def event_id(self) -> str | None:
+        return self._event_id
+
+    def _request_delete(self):
+        self._delete_requested = True
+        self.accept()
+
+    def _save(self):
+        title = self.title_input.text().strip()
+        if not title:
+            self.feedback.setText("Escribe un título para el evento.")
+            self.feedback.setStyleSheet("color:#FF5E82; background: transparent;")
+            return
+        d = self.date_input.date()
+        start_t = self.start_time.time()
+        end_t = self.end_time.time()
+        start_dt = _datetime(d.year(), d.month(), d.day(), start_t.hour(), start_t.minute())
+        end_dt = _datetime(d.year(), d.month(), d.day(), end_t.hour(), end_t.minute())
+        if end_dt <= start_dt:
+            end_dt = start_dt + _timedelta(hours=1)
+        self._result_payload = {
+            "summary": title,
+            "start": start_dt.isoformat(),
+            "end": end_dt.isoformat(),
+            "location": self.location_input.text().strip(),
+            "description": self.desc_input.toPlainText().strip(),
+            "attendees": [a["email"] for a in self._attendees],
+        }
+        self.accept()
+
+    def _style(self) -> str:
+        return f"""
+            QDialog {{
+                background: #0a1422;
+                color: {C.TEXT};
+                font-family: "{FONT_UI}", "{FONT_UI_FALLBACK}";
+            }}
+            QLabel#ComposeTitle {{
+                color: #f8fafc; font-size: 18px; font-weight: 900;
+            }}
+            QLabel#ComposeSectionLabel {{
+                color: {C.TEXT_MED};
+                background: transparent;
+                font-size: 10px;
+                font-weight: 800;
+                letter-spacing: 0.5px;
+                margin-top: 4px;
+            }}
+            QLineEdit#ComposeField, QTextEdit#ComposeBody, QDateEdit#ComposeField,
+            QTimeEdit#ComposeField, QComboBox#ComposeField {{
+                background: rgba(3, 9, 17, 0.72);
+                color: #e8ebff;
+                border: 1px solid rgba(182, 196, 255, 0.16);
+                border-radius: 7px;
+                padding: 8px 11px;
+                font-size: 13px;
+                selection-background-color: #5e82ff;
+            }}
+            QLineEdit#ComposeField:focus, QTextEdit#ComposeBody:focus,
+            QDateEdit#ComposeField:focus, QTimeEdit#ComposeField:focus,
+            QComboBox#ComposeField:focus {{
+                border-color: rgba(182, 196, 255, 0.55);
+            }}
+            QListWidget#ComposeAttendeesList {{
+                background: rgba(3, 9, 17, 0.5);
+                border: 1px solid rgba(182, 196, 255, 0.12);
+                border-radius: 7px;
+                padding: 4px;
+            }}
+            QPushButton#ComposeAttach {{
+                background: rgba(255, 255, 255, 0.05);
+                color: #dce1ff;
+                border: 1px solid rgba(182, 196, 255, 0.25);
+                border-radius: 7px;
+                padding: 0 12px;
+                min-height: 30px;
+                font-size: 12px;
+                font-weight: 700;
+            }}
+            QPushButton#ComposeAttach:hover {{
+                background: rgba(94, 130, 255, 0.14);
+                border-color: rgba(182, 196, 255, 0.45);
+            }}
+            QLabel#ComposeFeedback {{
+                color: rgba(188, 198, 238, 0.62);
+                background: transparent;
+                font-size: 11px;
+            }}
+            QPushButton#ComposeSend {{
+                background: {C.PRI};
+                color: #0a0e26;
+                border: none;
+                border-radius: 7px;
+                padding: 0 20px 0 14px;
+                min-height: 34px;
+                font-size: 13px;
+                font-weight: 800;
+            }}
+            QPushButton#ComposeSend:hover {{ background: #a7afff; }}
+            QPushButton#ComposeCancel {{
+                background: rgba(255, 255, 255, 0.05);
+                color: #dce1ff;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 7px;
+                padding: 0 16px;
+                min-height: 34px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QPushButton#ComposeCancel:hover {{ background: rgba(255,255,255,0.09); }}
+        """ + _scrollbar_qss()
+
+
+class _EventRow(QFrame):
+    """Fila clicable de la lista de eventos: abre el modal de detalle/edición
+    al pulsar en cualquier punto salvo en el botón de borrar (que consume su
+    propio evento de clic antes de que llegue aquí)."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.clicked.emit()
+
+
+class _CalendarDayCell(QFrame):
+    """Celda de día del grid mensual: número + puntos de evento como widgets
+    reales (no texto multilínea embebido en un botón), para que la altura de
+    la celda sea estable sin depender de cuántos eventos tenga ese día."""
+
+    clicked = pyqtSignal(object)
+
+    def __init__(self, day: _date, parent=None):
+        super().__init__(parent)
+        self.day = day
+        self.setObjectName("CalDayCell")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(44)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 6, 4, 4)
+        lay.setSpacing(3)
+
+        self.number_label = QLabel(str(day.day))
+        self.number_label.setObjectName("CalDayNumber")
+        self.number_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(self.number_label)
+
+        self.dots_row = QHBoxLayout()
+        self.dots_row.setSpacing(3)
+        self.dots_row.setContentsMargins(0, 0, 0, 0)
+        dots_host = QWidget()
+        dots_host.setLayout(self.dots_row)
+        dots_host.setStyleSheet("background: transparent;")
+        lay.addWidget(dots_host, alignment=Qt.AlignmentFlag.AlignHCenter)
+        lay.addStretch(1)
+
+    def set_event_count(self, n: int):
+        while self.dots_row.count():
+            item = self.dots_row.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        shown = min(n, 3)
+        for _ in range(shown):
+            dot = QLabel()
+            dot.setFixedSize(5, 5)
+            dot.setStyleSheet(f"background: {C.PRI_DIM}; border-radius: 2px;")
+            self.dots_row.addWidget(dot)
+        if n > shown:
+            more = QLabel(f"+{n - shown}")
+            more.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 8px; font-weight: 700; background: transparent;")
+            self.dots_row.addWidget(more)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.clicked.emit(self.day)
+
+
+class AnimeModePanel(MoviesModePanel):
+    """Anime discovery and streaming — same UI as Movies but backed by Nyaa/Torrentio-nyaa."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Relabel after MoviesModePanel.__init__ built the widgets.
+        self._title.setText("Anime")
+        self._search.setPlaceholderText("Buscar anime…")
+
+    # ------------------------------------------------------------------
+    # Overridden data sources
+    # ------------------------------------------------------------------
+
+    def _do_search(self):
+        query = self._search.text().strip()
+        if not query:
+            return
+        self._set_status(f"Buscando anime «{query}»…")
+
+        def work():
+            try:
+                from actions import movie_search as ms
+                items = ms.search_anime(query, limit=12)
+                self._results_ready.emit(items, f"Anime: «{query}»", "")
+            except Exception as e:
+                self._results_ready.emit([], "", str(e))
+
+        self._run_async(work)
+
+    def _load_trending(self):
+        self._set_status("Cargando anime en tendencia…")
+
+        def work():
+            try:
+                from actions import movie_search as ms
+                items = ms.get_trending_anime(limit=12)
+                self._results_ready.emit(items, "Anime en tendencia", "")
+            except Exception as e:
+                self._results_ready.emit([], "", str(e))
+
+        self._run_async(work)
+
+    def _load_recent(self):
+        self._set_status("Buscando anime en emisión…")
+
+        def work():
+            try:
+                from actions import movie_search as ms
+                items = ms.get_airing_anime(limit=12)
+                self._results_ready.emit(items, "Anime en emisión", "")
+            except Exception as e:
+                self._results_ready.emit([], "", str(e))
+
+        self._run_async(work)
+
+    def _search_and_play(self, anime):
+        """Like MoviesModePanel but uses Nyaa via Torrentio + torlink --kind anime."""
+        self._set_status(f"Buscando torrents de «{anime.title}»…")
+
+        def work():
+            import re
+            from actions import torrent_search as ts
+
+            kind = getattr(anime, "media_type", "tv")
+            found: list = []
+            errors: list[str] = []
+
+            # Source 1: Torrentio with Nyaa provider (needs IMDb id).
+            try:
+                from actions import movie_search as ms
+                imdb = ms.get_imdb_id(getattr(anime, "tmdb_id", 0), kind=kind)
+            except Exception as exc:
+                imdb = ""
+                errors.append(f"imdb_id: {exc}")
+
+            if imdb:
+                self._status_sig.emit(
+                    f"Buscando «{anime.title}» en Nyaa via Torrentio ({imdb})…"
+                )
+                try:
+                    from actions import torrentio
+                    results = torrentio.search_anime(imdb, kind=kind, limit=15)
+                    for s in results:
+                        found.append(ts.Torrent(
+                            title=s.title, magnet=s.magnet, seeders=s.seeders,
+                            leechers=0, size=s.size, spanish=s.spanish,
+                            provider=s.provider or "Nyaa/Torrentio"))
+                except Exception as exc:
+                    errors.append(f"torrentio-nyaa: {exc}")
+            else:
+                errors.append("sin IMDb id → Torrentio-Nyaa omitido")
+
+            # Source 2: torlink --kind anime (Nyaa RSS + 1337x Anime category).
+            try:
+                self._status_sig.emit(f"Buscando «{anime.title}» en Nyaa/1337x…")
+                found.extend(ts.search(anime.title, kind="anime", limit=10))
+            except Exception as exc:
+                errors.append(f"torlink-anime: {exc}")
+
+            if not found:
+                diag = "  |  ".join(errors) if errors else ""
+                self._status_sig.emit(
+                    f"No encontré torrents para «{anime.title}»"
+                    + (f"  [{diag}]" if diag else "")
+                )
+                return
+
+            # De-duplicate by infohash, sort by seeders.
+            seen, unique = set(), []
+            for t in found:
+                m = re.search(r"btih:([a-zA-Z0-9]+)", t.magnet or "")
+                key = m.group(1).lower() if m else (t.magnet or t.title)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(t)
+            unique.sort(key=lambda t: t.seeders, reverse=True)
+
+            self._torrents_found.emit(unique, anime)
+
+        self._run_async(work)
+
+
+class CalendarModePanel(QWidget):
+    """Modo Calendario: vista mensual respaldada por Google Calendar."""
+
+    _month_sig = pyqtSignal(list, str)
+    _action_sig = pyqtSignal(bool, str)
+    _search_sig = pyqtSignal(list, str)
+
+    _WEEKDAYS = ["LUN", "MAR", "MIÉ", "JUE", "VIE", "SÁB", "DOM"]
+    _MAX_GRID_ROWS = 6
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(self._panel_style())
+        today = _date.today()
+        self._year = today.year
+        self._month = today.month
+        self._selected_date: _date = today
+        self._events_by_day: dict[str, list[dict]] = {}
+        self._day_cells: dict[str, _CalendarDayCell] = {}
+        self._loading = False
+        self._search_active = False
+        self._search_query = ""
+        self._search_results: list[dict] = []
+        self._searching = False
+
+        self._month_sig.connect(self._on_month_loaded)
+        self._action_sig.connect(self._on_action_done)
+        self._search_sig.connect(self._on_search_result)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        self.month_label = QLabel("")
+        self.month_label.setObjectName("CalMonthLabel")
+        header.addWidget(self.month_label)
+
+        self.today_btn = QPushButton("Hoy")
+        self.today_btn.setObjectName("CalTodayChip")
+        self.today_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.today_btn.clicked.connect(self._go_today)
+        header.addWidget(self.today_btn)
+
+        self.prev_btn = QPushButton()
+        self.prev_btn.setObjectName("CalNavButton")
+        self.prev_btn.setIcon(_line_icon("chevron_left", C.TEXT_DIM, 18))
+        self.prev_btn.setIconSize(QSize(18, 18))
+        self.prev_btn.setFixedSize(30, 30)
+        self.prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.prev_btn.setToolTip("Mes anterior")
+        self.prev_btn.clicked.connect(lambda: self._shift_month(-1))
+        header.addWidget(self.prev_btn)
+
+        self.next_btn = QPushButton()
+        self.next_btn.setObjectName("CalNavButton")
+        self.next_btn.setIcon(_line_icon("chevron_right", C.TEXT_DIM, 18))
+        self.next_btn.setIconSize(QSize(18, 18))
+        self.next_btn.setFixedSize(30, 30)
+        self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.next_btn.setToolTip("Mes siguiente")
+        self.next_btn.clicked.connect(lambda: self._shift_month(1))
+        header.addWidget(self.next_btn)
+
+        header.addStretch()
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("CalStatus")
+        header.addWidget(self.status_label)
+
+        self.refresh_btn = QPushButton()
+        self.refresh_btn.setObjectName("CalIconButton")
+        self.refresh_btn.setIcon(_line_icon("refresh", C.TEXT_DIM, 17))
+        self.refresh_btn.setIconSize(QSize(17, 17))
+        self.refresh_btn.setFixedSize(32, 32)
+        self.refresh_btn.setToolTip("Actualizar")
+        self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_btn.clicked.connect(self._load_month)
+        header.addWidget(self.refresh_btn)
+
+        self.add_btn = QPushButton()
+        self.add_btn.setObjectName("CalAddButton")
+        self.add_btn.setIcon(_line_icon("plus", "#0a0e26", 16))
+        self.add_btn.setIconSize(QSize(16, 16))
+        self.add_btn.setFixedSize(32, 32)
+        self.add_btn.setToolTip("Nuevo evento")
+        self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_btn.clicked.connect(self._open_add_dialog)
+        header.addWidget(self.add_btn)
+
+        root.addLayout(header)
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
+        search_icon = QLabel()
+        search_icon.setPixmap(_line_icon("search", C.TEXT_MED, 14).pixmap(14, 14))
+        search_row.addWidget(search_icon)
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("CalSearchInput")
+        self.search_input.setPlaceholderText("Buscar eventos (título, invitado, ubicación…)")
+        self.search_input.returnPressed.connect(self._do_search)
+        search_row.addWidget(self.search_input, stretch=1)
+        self.search_clear_btn = QPushButton()
+        self.search_clear_btn.setObjectName("CalIconButton")
+        self.search_clear_btn.setIcon(_line_icon("close", C.TEXT_DIM, 13))
+        self.search_clear_btn.setIconSize(QSize(13, 13))
+        self.search_clear_btn.setFixedSize(28, 28)
+        self.search_clear_btn.setToolTip("Cerrar búsqueda")
+        self.search_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.search_clear_btn.clicked.connect(self._clear_search)
+        self.search_clear_btn.setVisible(False)
+        search_row.addWidget(self.search_clear_btn)
+        root.addLayout(search_row)
+
+        grid_wrap = QFrame()
+        grid_wrap.setObjectName("CalGridWrap")
+        grid_lay = QVBoxLayout(grid_wrap)
+        grid_lay.setContentsMargins(14, 14, 14, 14)
+        grid_lay.setSpacing(8)
+
+        weekday_row = QGridLayout()
+        weekday_row.setSpacing(6)
+        for i, wd in enumerate(self._WEEKDAYS):
+            lbl = QLabel(wd)
+            lbl.setObjectName("CalWeekday")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            weekday_row.addWidget(lbl, 0, i)
+            weekday_row.setColumnStretch(i, 1)
+        grid_lay.addLayout(weekday_row)
+
+        self.days_grid = QGridLayout()
+        self.days_grid.setSpacing(6)
+        for i in range(7):
+            self.days_grid.setColumnStretch(i, 1)
+        grid_lay.addLayout(self.days_grid)
+
+        root.addWidget(grid_wrap, stretch=3)
+
+        events_wrap = QFrame()
+        events_wrap.setObjectName("CalEventsWrap")
+        events_lay = QVBoxLayout(events_wrap)
+        events_lay.setContentsMargins(14, 12, 14, 12)
+        events_lay.setSpacing(8)
+
+        events_header = QHBoxLayout()
+        self.selected_day_label = QLabel("")
+        self.selected_day_label.setObjectName("CalSelectedDayLabel")
+        events_header.addWidget(self.selected_day_label)
+        events_header.addStretch()
+        self.new_event_btn = QPushButton("  Nuevo evento")
+        self.new_event_btn.setObjectName("CalNewEventButton")
+        self.new_event_btn.setIcon(_line_icon("plus", "#0a0e26", 14))
+        self.new_event_btn.setIconSize(QSize(14, 14))
+        self.new_event_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_event_btn.clicked.connect(self._open_add_dialog)
+        events_header.addWidget(self.new_event_btn)
+        events_lay.addLayout(events_header)
+
+        self.events_list = QListWidget()
+        self.events_list.setObjectName("CalEventsList")
+        self.events_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        events_lay.addWidget(self.events_list, stretch=1)
+
+        root.addWidget(events_wrap, stretch=2)
+
+        self._rebuild_grid()
+        self._refresh_events_list()
+        QTimer.singleShot(150, self._load_month)
+
+    # -- estilos ------------------------------------------------------------
+    def _panel_style(self) -> str:
+        return f"""
+            QWidget {{
+                background: transparent;
+                color: {C.TEXT};
+                font-family: "{FONT_UI}", "{FONT_UI_FALLBACK}";
+            }}
+            QLabel#CalMonthLabel {{
+                color: #f8fafc; font-size: 17px; font-weight: 900;
+            }}
+            QPushButton#CalTodayChip {{
+                background: rgba(255,255,255,0.05);
+                color: {C.TEXT_MED};
+                border: 1px solid rgba(182,196,255,0.22);
+                border-radius: 12px;
+                padding: 4px 12px;
+                font-size: 10px; font-weight: 700;
+            }}
+            QPushButton#CalTodayChip:hover {{ color: {C.TEXT}; background: rgba(255,255,255,0.09); }}
+            QPushButton#CalNavButton, QPushButton#CalIconButton {{
+                background: rgba(255,255,255,0.045);
+                border: 1px solid rgba(255,255,255,0.09);
+                border-radius: 8px;
+            }}
+            QPushButton#CalNavButton:hover, QPushButton#CalIconButton:hover {{
+                background: rgba(255,255,255,0.09);
+                border-color: rgba(182,196,255,0.30);
+            }}
+            QPushButton#CalAddButton {{
+                background: {C.PRI};
+                border-radius: 16px;
+            }}
+            QPushButton#CalAddButton:hover {{ background: #a7afff; }}
+            QLabel#CalStatus {{ color: rgba(188,198,238,0.55); font-size: 11px; }}
+            QLineEdit#CalSearchInput {{
+                background: rgba(255,255,255,0.045);
+                color: {C.TEXT};
+                border: 1px solid rgba(255,255,255,0.09);
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-size: 12px;
+            }}
+            QLineEdit#CalSearchInput:focus {{ border-color: rgba(182,196,255,0.45); }}
+            QFrame#CalGridWrap, QFrame#CalEventsWrap {{
+                background: rgba(8, 14, 26, 0.82);
+                border: 1px solid rgba(182, 196, 255, 0.11);
+                border-radius: 12px;
+            }}
+            QLabel#CalWeekday {{
+                color: {C.TEXT_MED};
+                background: rgba(255,255,255,0.04);
+                border-radius: 10px;
+                padding: 5px 0;
+                font-size: 9px; font-weight: 800; letter-spacing: 0.6px;
+            }}
+            QLabel#CalSelectedDayLabel {{ color: {C.TEXT}; font-size: 13px; font-weight: 800; }}
+            QPushButton#CalNewEventButton {{
+                background: {C.PRI};
+                color: #0a0e26;
+                border: none;
+                border-radius: 7px;
+                padding: 0 12px;
+                min-height: 28px;
+                font-size: 11px; font-weight: 800;
+            }}
+            QPushButton#CalNewEventButton:hover {{ background: #a7afff; }}
+            QListWidget#CalEventsList {{
+                background: transparent;
+                border: none;
+            }}
+            QListWidget#CalEventsList::item {{
+                border-radius: 8px;
+                padding: 2px;
+                margin-bottom: 2px;
+            }}
+        """ + _scrollbar_qss()
+
+    def _style_day_cell(self, cell: "_CalendarDayCell", muted: bool, is_today: bool, is_selected: bool):
+        if is_selected:
+            bg, border, color = "rgba(94,130,255,0.18)", C.PRI_DIM, C.TEXT
+        elif is_today:
+            bg, border, color = "rgba(255,255,255,0.05)", "rgba(182,196,255,0.55)", C.TEXT
+        elif muted:
+            bg, border, color = "rgba(255,255,255,0.015)", "rgba(255,255,255,0.05)", "rgba(154,163,192,0.35)"
+        else:
+            bg, border, color = "rgba(255,255,255,0.03)", "rgba(255,255,255,0.07)", C.TEXT_DIM
+        cell.setStyleSheet(f"""
+            QFrame#CalDayCell {{
+                background: {bg};
+                border: 1.4px solid {border};
+                border-radius: 10px;
+            }}
+            QFrame#CalDayCell:hover {{ border-color: rgba(182,196,255,0.4); }}
+        """)
+        cell.number_label.setStyleSheet(
+            f"color: {color}; font-size: 11px; font-weight: 700; background: transparent;"
+        )
+
+    # -- carga de datos -------------------------------------------------
+    def _load_month(self):
+        if self._loading:
+            return
+        self._loading = True
+        self.status_label.setText("Cargando…")
+        cal = _calendar_mod.Calendar(firstweekday=0)
+        weeks = list(cal.monthdatescalendar(self._year, self._month))
+        grid_start = weeks[0][0]
+        grid_end = weeks[-1][-1]
+        time_min = _datetime.combine(grid_start, _datetime.min.time()).astimezone().isoformat()
+        time_max = _datetime.combine(grid_end + _timedelta(days=1), _datetime.min.time()).astimezone().isoformat()
+
+        def work():
+            try:
+                from actions import google_calendar as gcal
+                events = gcal.list_events_range(time_min, time_max)
+                self._month_sig.emit(events, "")
+            except Exception as e:
+                self._month_sig.emit([], str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _event_date(ev: dict) -> _date | None:
+        raw = str(ev.get("start") or "")
+        if not raw:
+            return None
+        try:
+            from dateutil import parser as dtparser
+            return dtparser.parse(raw).date()
+        except Exception:
+            return None
+
+    def _on_month_loaded(self, events: list, err: str):
+        self._loading = False
+        if err:
+            self.status_label.setText("Sin datos de Google Calendar")
+            self._events_by_day = {}
+        else:
+            by_day: dict[str, list[dict]] = {}
+            for ev in events:
+                d = self._event_date(ev)
+                if d:
+                    by_day.setdefault(d.isoformat(), []).append(ev)
+            self._events_by_day = by_day
+            total = len(events)
+            self.status_label.setText(f"{total} evento(s) este mes" if total else "Sin eventos este mes")
+        self._rebuild_grid()
+        self._refresh_events_list()
+
+    # -- grid -------------------------------------------------------------
+    def _rebuild_grid(self):
+        while self.days_grid.count():
+            item = self.days_grid.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self._day_cells = {}
+        # Reset every possible row's stretch first — otherwise a leftover
+        # stretch factor from a previous 6-week month keeps competing for
+        # space against a following 5-week month's rows, so day cells look
+        # like they change size when switching months.
+        for r in range(self._MAX_GRID_ROWS):
+            self.days_grid.setRowStretch(r, 0)
+
+        cal = _calendar_mod.Calendar(firstweekday=0)
+        weeks = list(cal.monthdatescalendar(self._year, self._month))
+        today = _date.today()
+
+        for row, week in enumerate(weeks):
+            self.days_grid.setRowStretch(row, 1)
+            for col, day in enumerate(week):
+                key = day.isoformat()
+                n_events = len(self._events_by_day.get(key, []))
+                cell = _CalendarDayCell(day)
+                cell.set_event_count(n_events)
+                muted = day.month != self._month
+                is_today = day == today
+                is_selected = day == self._selected_date
+                self._style_day_cell(cell, muted, is_today, is_selected)
+                cell.clicked.connect(self._select_date)
+                self.days_grid.addWidget(cell, row, col)
+                self._day_cells[key] = cell
+
+        self.month_label.setText(f"{_MONTH_NAMES_ES[self._month - 1]} {self._year}")
+
+    def _select_date(self, d: _date):
+        self._selected_date = d
+        if self._search_active:
+            self.search_input.clear()
+            self._search_active = False
+            self._search_query = ""
+            self._search_results = []
+            self.search_clear_btn.setVisible(False)
+        self._rebuild_grid()
+        self._refresh_events_list()
+
+    def _shift_month(self, delta: int):
+        m = self._month - 1 + delta
+        self._year += m // 12
+        self._month = m % 12 + 1
+        self._load_month()
+
+    def _go_today(self):
+        today = _date.today()
+        self._year, self._month = today.year, today.month
+        self._selected_date = today
+        self._load_month()
+
+    # -- panel de eventos del día ----------------------------------------
+    def _format_day_es(self, d: _date) -> str:
+        return f"{_WEEKDAY_NAMES_ES[d.weekday()]}, {d.day} de {_MONTH_NAMES_ES[d.month - 1]}"
+
+    def _format_event_time(self, ev: dict) -> str:
+        if ev.get("all_day"):
+            return "Todo el día"
+        try:
+            from dateutil import parser as dtparser
+            dt = dtparser.parse(str(ev.get("start") or ""))
+            end_raw = str(ev.get("end") or "")
+            if end_raw:
+                end_dt = dtparser.parse(end_raw)
+                return f"{dt.strftime('%H:%M')} – {end_dt.strftime('%H:%M')}"
+            return dt.strftime("%H:%M")
+        except Exception:
+            return str(ev.get("start") or "")
+
+    def _refresh_events_list(self):
+        self.events_list.clear()
+
+        if self._search_active:
+            self.selected_day_label.setText(
+                f"Resultados para «{self._search_query}»" if self._search_query else "Resultados"
+            )
+            if self._searching:
+                item = QListWidgetItem("Buscando…")
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.events_list.addItem(item)
+                return
+            if not self._search_results:
+                item = QListWidgetItem("Sin resultados.")
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.events_list.addItem(item)
+                return
+            for ev in self._search_results:
+                self._add_event_row(ev, show_date=True)
+            return
+
+        d = self._selected_date
+        self.selected_day_label.setText(self._format_day_es(d))
+        events = sorted(
+            self._events_by_day.get(d.isoformat(), []),
+            key=lambda e: str(e.get("start") or ""),
+        )
+        if not events:
+            item = QListWidgetItem("Sin eventos este día.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.events_list.addItem(item)
+            return
+        for ev in events:
+            self._add_event_row(ev)
+
+    def _add_event_row(self, ev: dict, show_date: bool = False):
+        item = QListWidgetItem()
+        self.events_list.addItem(item)
+        row = _EventRow()
+        row.setStyleSheet("background: rgba(255,255,255,0.03); border-radius: 8px;")
+        row.clicked.connect(lambda e=ev: self._open_event_dialog(e))
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(10, 8, 8, 8)
+        lay.setSpacing(8)
+
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color: {C.PRI_DIM}; font-size: 12px; background: transparent;")
+        lay.addWidget(dot)
+
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        title_lbl = QLabel(str(ev.get("summary") or "(sin título)"))
+        title_lbl.setStyleSheet(f"color: {C.TEXT}; font-size: 12px; font-weight: 700; background: transparent;")
+        title_lbl.setWordWrap(True)
+        meta_bits = [self._format_event_time(ev)]
+        if show_date:
+            d = self._event_date(ev)
+            if d:
+                meta_bits.insert(0, f"{d.day} {_MONTH_NAMES_ES[d.month - 1][:3]} {d.year}")
+        n_attendees = len(ev.get("attendees") or [])
+        if n_attendees:
+            meta_bits.append(f"{n_attendees} invitado(s)")
+        time_lbl = QLabel("  ·  ".join(meta_bits))
+        time_lbl.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 10px; background: transparent;")
+        text.addWidget(title_lbl)
+        text.addWidget(time_lbl)
+        lay.addLayout(text, stretch=1)
+
+        del_btn = QPushButton()
+        del_btn.setIcon(_line_icon("trash", C.TEXT_DIM, 15))
+        del_btn.setIconSize(QSize(15, 15))
+        del_btn.setFixedSize(26, 26)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setToolTip("Eliminar evento")
+        del_btn.setStyleSheet("""
+            QPushButton { background: transparent; border: none; }
+            QPushButton:hover { background: rgba(255,94,130,0.14); border-radius: 6px; }
+        """)
+        del_btn.clicked.connect(lambda _=False, eid=ev.get("id"): self._delete_event(eid))
+        lay.addWidget(del_btn)
+
+        item.setSizeHint(row.sizeHint())
+        self.events_list.setItemWidget(item, row)
+
+    # -- búsqueda ------------------------------------------------------------
+    def _do_search(self):
+        query = self.search_input.text().strip()
+        if not query:
+            self._clear_search()
+            return
+        self._search_active = True
+        self._search_query = query
+        self._searching = True
+        self.search_clear_btn.setVisible(True)
+        self._refresh_events_list()
+
+        def work():
+            try:
+                from actions import google_calendar as gcal
+                results = gcal.search_events(query, max_results=30)
+                self._search_sig.emit(results, "")
+            except Exception as e:
+                self._search_sig.emit([], str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_search_result(self, results: list, err: str):
+        self._searching = False
+        if err:
+            self.status_label.setText("Error buscando eventos")
+            self._search_results = []
+        else:
+            self._search_results = results
+            self.status_label.setText(f"{len(results)} resultado(s)" if results else "Sin resultados")
+        self._refresh_events_list()
+
+    def _clear_search(self):
+        self.search_input.clear()
+        self._search_active = False
+        self._search_query = ""
+        self._search_results = []
+        self._searching = False
+        self.search_clear_btn.setVisible(False)
+        total = sum(len(v) for v in self._events_by_day.values())
+        self.status_label.setText(f"{total} evento(s) este mes" if total else "Sin eventos este mes")
+        self._refresh_events_list()
+
+    # -- acciones ----------------------------------------------------------
+    def _open_add_dialog(self):
+        dialog = CalendarEventDialog(self, default_date=self._selected_date)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        payload = dialog.payload()
+        if not payload:
+            return
+        self.status_label.setText("Creando evento…")
+
+        def work():
+            try:
+                from actions import google_calendar as gcal
+                gcal.create_event(
+                    summary=payload["summary"],
+                    start=payload["start"],
+                    end=payload["end"],
+                    description=payload.get("description", ""),
+                    location=payload.get("location", ""),
+                    attendees=payload.get("attendees") or None,
+                )
+                self._action_sig.emit(True, "Evento creado.")
+            except Exception as e:
+                self._action_sig.emit(False, str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _open_event_dialog(self, ev: dict):
+        dialog = CalendarEventDialog(self, event=ev)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.delete_requested():
+            self._delete_event(dialog.event_id())
+            return
+        payload = dialog.payload()
+        event_id = dialog.event_id()
+        if not payload or not event_id:
+            return
+        self._update_event(event_id, payload)
+
+    def _update_event(self, event_id: str, payload: dict):
+        self.status_label.setText("Guardando cambios…")
+
+        def work():
+            try:
+                from actions import google_calendar as gcal
+                gcal.update_event(
+                    event_id,
+                    summary=payload["summary"],
+                    start=payload["start"],
+                    end=payload["end"],
+                    description=payload.get("description", ""),
+                    location=payload.get("location", ""),
+                    attendees=payload.get("attendees") or [],
+                )
+                self._action_sig.emit(True, "Evento actualizado.")
+            except Exception as e:
+                self._action_sig.emit(False, str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _delete_event(self, event_id: str | None):
+        if not event_id:
+            return
+        self.status_label.setText("Eliminando evento…")
+
+        def work():
+            try:
+                from actions import google_calendar as gcal
+                gcal.delete_event(event_id)
+                self._action_sig.emit(True, "Evento eliminado.")
+            except Exception as e:
+                self._action_sig.emit(False, str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_action_done(self, success: bool, message: str):
+        self.status_label.setText(message)
+        if not success:
+            return
+        if self._search_active and self._search_query:
+            self._do_search()
+        else:
+            self._load_month()
 
 
 class SettingsModePanel(QWidget):
@@ -10580,19 +12589,8 @@ class SettingsModePanel(QWidget):
         name0, about0 = self._load_profile_from_memory()
 
         # Name row
-        self._name_edit = QLineEdit()
-        self._name_edit.setText(name0)
-        self._name_edit.setPlaceholderText("¿Cómo quieres que te llame?")
-        self._name_edit.setFixedHeight(32)
+        self._name_edit = FloatingLabelInput("Nombre", name0)
         self._name_edit.setMinimumWidth(220)
-        self._name_edit.setStyleSheet(f"""
-            QLineEdit {{
-                background: rgba(10,12,26,0.85); color: {C.TEXT};
-                border: 1px solid rgba(182,196,255,0.22); border-radius: 9px;
-                padding: 2px 10px; font-size: 13px;
-            }}
-            QLineEdit:focus {{ border-color: rgba(182,196,255,0.55); }}
-        """)
         self._name_edit.textChanged.connect(self._on_profile_changed)
         self._add_row(
             body, "Tu nombre",
@@ -10841,6 +12839,7 @@ class SettingsModePanel(QWidget):
             ("Drive", "Drive"),
             ("Música", "Music"),
             ("YouTube", "YouTube"),
+            ("Calendario", "Calendar"),
         ):
             self._space_combo.addItem(label, val)
         si = self._space_combo.findData(str(app_settings.get("startup_space", "last")))
@@ -11256,10 +13255,12 @@ class MainWindow(QMainWindow):
         self._wa_avatar_cache: dict[str, bytes] = {}
         self._wa_unread_count = 0
         self._wa_unread_fetching = False
-        self._right_collapsed = False
+        self._right_collapsed = True
         self._current_file: str | None = None
         self._mode_combo: QComboBox | None = None
         self._mode_buttons: dict[str, QPushButton] = {}
+        self._mode_icon_names: dict[str, str] = {}
+        self._mode_shortcuts: dict[str, str] = {}
         self._whatsapp_unread_badge: QLabel | None = None
         self._active_mode = "Normal"
         self._whatsapp_panel: WhatsAppWindow | None = None
@@ -11269,6 +13270,8 @@ class MainWindow(QMainWindow):
         self._music_panel: QWidget | None = None
         self._youtube_panel: QWidget | None = None
         self._movies_panel: QWidget | None = None
+        self._anime_panel: QWidget | None = None
+        self._calendar_panel: QWidget | None = None
         self._settings_panel: QWidget | None = None
 
         central = QWidget()
@@ -11312,6 +13315,7 @@ class MainWindow(QMainWindow):
 
         self._right_panel = self._build_right_panel()
         body.addWidget(self._right_panel, stretch=0)
+        self._apply_right_panel_visibility()
 
         root.addLayout(body, stretch=1)
         # Playback bar sits above footer
@@ -11322,12 +13326,6 @@ class MainWindow(QMainWindow):
         self._clock_tmr.timeout.connect(self._tick_clock)
         self._clock_tmr.start(1000)
         self._tick_clock()
-
-        # Timer de actualización de métricas
-        self._metric_tmr = QTimer(self)
-        self._metric_tmr.timeout.connect(self._update_metrics)
-        self._metric_tmr.start(2000)
-        self._update_metrics()
 
         self._whatsapp_badge_timer = QTimer(self)
         self._whatsapp_badge_timer.timeout.connect(self._update_whatsapp_unread_badge)
@@ -11356,6 +13354,9 @@ class MainWindow(QMainWindow):
         sc_mute.activated.connect(self._toggle_mute)
         sc_full = QShortcut(QKeySequence("F11"), self)
         sc_full.activated.connect(self._toggle_fullscreen)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         
         # Playback state and external callback
         self._play_title = ""
@@ -11413,10 +13414,47 @@ class MainWindow(QMainWindow):
         try:
             app = QApplication.instance()
             if app is not None:
+                app.removeEventFilter(self)
                 app.quit()
         except Exception:
             pass
         super().closeEvent(event)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress and self._handle_mode_shortcut_event(obj, event):
+            return True
+        return super().eventFilter(obj, event)
+
+    def _handle_mode_shortcut_event(self, obj, event) -> bool:
+        if not self.isActiveWindow() or self._shortcut_focus_is_editing():
+            return False
+        if event.modifiers() & (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        ):
+            return False
+        if isinstance(obj, QWidget) and obj.window() is not self:
+            return False
+        key = str(event.text() or "").upper()
+        if len(key) != 1:
+            return False
+        mode = self._mode_shortcuts.get(key)
+        if not mode:
+            return False
+        self._on_mode_change(mode)
+        return True
+
+    def _shortcut_focus_is_editing(self) -> bool:
+        widget = QApplication.focusWidget()
+        while widget is not None:
+            if isinstance(widget, (QLineEdit, QTextEdit, QComboBox, QSpinBox, QTimeEdit, QDateEdit)):
+                return True
+            class_name = widget.metaObject().className()
+            if any(token in class_name for token in ("LineEdit", "TextEdit", "PlainTextEdit", "SpinBox", "DateEdit", "TimeEdit")):
+                return True
+            widget = widget.parentWidget()
+        return False
 
     def _apply_startup_settings(self):
         """Apply persisted appearance/startup preferences when the window builds."""
@@ -11557,7 +13595,7 @@ class MainWindow(QMainWindow):
     def _set_mode_combo(self, mode: str):
         self._active_mode = mode
         # Remember the last space so "Espacio inicial → Último usado" works.
-        if mode in ("Normal", "WhatsApp", "Gmail", "Drive", "Music", "YouTube", "Movies"):
+        if mode in ("Normal", "WhatsApp", "Gmail", "Drive", "Music", "YouTube", "Movies", "Anime", "Calendar"):
             try:
                 app_settings.set("last_space", mode)
             except Exception:
@@ -11569,7 +13607,11 @@ class MainWindow(QMainWindow):
                 self._mode_combo.setCurrentIndex(idx)
             self._mode_combo.blockSignals(False)
         for key, button in self._mode_buttons.items():
-            button.setChecked(key == mode)
+            active = key == mode
+            button.setChecked(active)
+            icon_name = self._mode_icon_names.get(key)
+            if icon_name:
+                button.setIcon(_line_icon(icon_name, C.PRI if active else C.TEXT_DIM, 20))
         mode_copy = {
             "Normal": ("Inicio", "Núcleo de voz"),
             "WhatsApp": ("WhatsApp", "Conversaciones"),
@@ -11578,6 +13620,8 @@ class MainWindow(QMainWindow):
             "Music": ("Música", "Biblioteca y reproducción"),
             "YouTube": ("YouTube", "Vídeos y reproducción"),
             "Movies": ("Películas", "Streaming via torrents"),
+            "Anime": ("Anime", "Manga y series japonesas"),
+            "Calendar": ("Calendario", "Google Calendar"),
             "Ajustes": ("Ajustes", "Configuración de la app"),
         }
         title, context = mode_copy.get(mode, (mode, "Espacio de trabajo"))
@@ -11640,6 +13684,24 @@ class MainWindow(QMainWindow):
         self._center_stack.setCurrentWidget(self._movies_panel)
         self._center_stack.setVisible(True)
 
+    def _show_anime_mode(self):
+        self._set_mode_combo("Anime")
+        self._apply_right_panel_visibility()
+        if self._anime_panel is None:
+            self._anime_panel = AnimeModePanel(parent=self)
+            self._center_stack.addWidget(self._anime_panel)
+        self._center_stack.setCurrentWidget(self._anime_panel)
+        self._center_stack.setVisible(True)
+
+    def _show_calendar_mode(self):
+        self._set_mode_combo("Calendar")
+        self._apply_right_panel_visibility()
+        if self._calendar_panel is None:
+            self._calendar_panel = CalendarModePanel(parent=self)
+            self._center_stack.addWidget(self._calendar_panel)
+        self._center_stack.setCurrentWidget(self._calendar_panel)
+        self._center_stack.setVisible(True)
+
     def _show_settings_mode(self):
         self._set_mode_combo("Ajustes")
         self._apply_right_panel_visibility()
@@ -11668,6 +13730,10 @@ class MainWindow(QMainWindow):
             self._show_youtube_mode()
         elif mode == "Movies":
             self._show_movies_mode()
+        elif mode == "Anime":
+            self._show_anime_mode()
+        elif mode == "Calendar":
+            self._show_calendar_mode()
         elif mode == "Ajustes":
             self._show_settings_mode()
         else:
@@ -11683,57 +13749,6 @@ class MainWindow(QMainWindow):
                 (cw.height() - oh) // 2,
                 ow, oh,
             )
-
-    def _update_metrics(self):
-        snap = _metrics.snapshot()
-
-        # CPU
-        cpu = snap["cpu"]
-        self._bar_cpu.set_value(cpu, f"{cpu:.0f}%")
-
-        # MEM
-        mem = snap["mem"]
-        self._bar_mem.set_value(mem, f"{mem:.0f}%")
-
-        # NET
-        net = snap["net"]
-        if net < 1.0:
-            net_str = f"{net*1024:.0f}KB/s"
-        else:
-            net_str = f"{net:.1f}MB/s"
-        net_pct = min(100, net * 10)  # 10 MB/s = %100
-        self._bar_net.set_value(net_pct, net_str)
-
-        # GPU
-        gpu = snap["gpu"]
-        if gpu >= 0:
-            self._bar_gpu.set_value(gpu, f"{gpu:.0f}%")
-        else:
-            self._bar_gpu.set_value(0, "N/A")
-
-        # TMP
-        tmp = snap["tmp"]
-        if tmp >= 0:
-            tmp_pct = min(100, (tmp / 100) * 100)
-            self._bar_tmp.set_value(tmp_pct, f"{tmp:.0f}°C")
-        else:
-            self._bar_tmp.set_value(0, "N/A")
-
-        try:
-            boot_t  = psutil.boot_time()
-            elapsed = time.time() - boot_t
-            h = int(elapsed // 3600)
-            m = int((elapsed % 3600) // 60)
-            self._uptime_lbl.setText(f"UP  {h:02d}:{m:02d}")
-        except Exception:
-            self._uptime_lbl.setText("UP  --:--")
-
-        try:
-            proc_count = len(psutil.pids())
-            self._proc_lbl.setText(f"PROC  {proc_count}")
-        except Exception:
-            self._proc_lbl.setText("PROC  --")
-
 
     def _build_header(self) -> QWidget:
         w = QWidget()
@@ -11821,7 +13836,10 @@ class MainWindow(QMainWindow):
         self._date_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._date_lbl)
         lay.addLayout(right_col)
-        self._right_toggle_btn = _icon_button("panel_close", "Ocultar panel lateral", size=34, icon_size=17)
+        if self._right_collapsed:
+            self._right_toggle_btn = _icon_button("panel_open", "Mostrar panel lateral", size=34, icon_size=17)
+        else:
+            self._right_toggle_btn = _icon_button("panel_close", "Ocultar panel lateral", size=34, icon_size=17)
         self._right_toggle_btn.clicked.connect(self._toggle_right_panel)
         lay.addWidget(self._right_toggle_btn)
         return w
@@ -11868,122 +13886,32 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(12, 16, 12, 14)
         lay.setSpacing(6)
 
-        hdr = QLabel("ESPACIOS")
-        hdr.setFont(QFont(FONT_UI, 8, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; padding: 0 8px 6px 8px;")
-        lay.addWidget(hdr)
-
         nav_items = [
-            ("Normal", "home", "Inicio"),
-            ("WhatsApp", "chat", "WhatsApp"),
-            ("Gmail", "mail", "Correo"),
-            ("Drive", "drive", "Drive"),
-            ("Music", "music", "Música"),
-            ("YouTube", "youtube", "YouTube"),
-            ("Movies", "film", "Películas"),
-            ("Ajustes", "settings", "Ajustes"),
+            {"mode": "Normal", "icon": "home", "label": "Inicio", "labelHasKeyword": ["I"], "hasBadge": False},
+            {"mode": "WhatsApp", "icon": "chat", "label": "WhatsApp", "labelHasKeyword": ["W"], "hasBadge": True},
+            {"mode": "Gmail", "icon": "mail", "label": "Correo", "labelHasKeyword": ["C"], "hasBadge": False},
+            {"mode": "Drive", "icon": "drive", "label": "Drive", "labelHasKeyword": ["D"], "hasBadge": False},
+            {"mode": "Music", "icon": "music", "label": "Música", "labelHasKeyword": ["M"], "hasBadge": False},
+            {"mode": "YouTube", "icon": "youtube", "label": "YouTube", "labelHasKeyword": ["Y"], "hasBadge": False},
+            {"mode": "Movies", "icon": "film", "label": "Películas", "labelHasKeyword": ["P"], "hasBadge": False},
+            {"mode": "Anime", "icon": "tv", "label": "Anime", "labelHasKeyword": ["N"], "hasBadge": False},
+            {"mode": "Calendar", "icon": "calendar", "label": "Calendario", "labelHasKeyword": ["A"], "hasBadge": False},
+            {"mode": "Ajustes", "icon": "settings", "label": "Ajustes", "labelHasKeyword": ["J"], "hasBadge": False},
         ]
-        for mode, icon_name, label in nav_items:
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setAutoExclusive(True)
-            button.setIcon(_line_icon(icon_name, C.TEXT_DIM, 19))
-            button.setIconSize(QSize(19, 19))
-            button.setFixedHeight(42)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setAccessibleName(f"Abrir {label}")
-            button.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent;
-                    color: {C.TEXT_MED};
-                    border: 1px solid transparent;
-                    border-radius: 9px;
-                    padding: 0 12px;
-                    text-align: left;
-                    font-size: 10px;
-                    font-weight: 600;
-                }}
-                QPushButton:hover {{
-                    color: {C.TEXT};
-                    background: rgba(255,255,255,0.045);
-                }}
-                QPushButton:checked {{
-                    color: #E8EBFF;
-                    background: rgba(94,130,255,0.13);
-                    border-color: rgba(182,196,255,0.22);
-                }}
-                QPushButton:focus {{ border: 2px solid rgba(182,196,255,0.52); }}
-            """)
-            button.clicked.connect(lambda _checked=False, m=mode: self._on_mode_change(m))
-            HoverGlow(button, radius=34)
-            self._mode_buttons[mode] = button
-            lay.addWidget(button)
-            if mode == "WhatsApp":
-                badge = QLabel("", button)
-                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                badge.setToolTip("Chats con mensajes sin leer")
-                badge.setFixedSize(20, 20)
-                badge.move(142, 11)
-                badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-                badge.setStyleSheet("""
-                    QLabel {
-                        color: #03111B;
-                        background: #7C9AFF;
-                        border: 1px solid rgba(255, 255, 255, 0.45);
-                        border-radius: 10px;
-                        font-size: 9px;
-                        font-weight: 800;
-                    }
-                """)
-                badge.hide()
-                self._whatsapp_unread_badge = badge
+        self._mode_icon_names = {item["mode"]: item["icon"] for item in nav_items}
+        self._mode_shortcuts = {
+            str((item.get("labelHasKeyword") or [""])[0]).upper(): item["mode"]
+            for item in nav_items
+            if item.get("labelHasKeyword")
+        }
+        mode_nav = TooltipVerticalNavbar(nav_items, parent=w)
+        mode_nav.mode_selected.connect(self._on_mode_change)
+        self._mode_buttons = mode_nav.buttons()
+        self._whatsapp_unread_badge = mode_nav.badge("WhatsApp")
+        lay.addStretch(1)
+        lay.addWidget(mode_nav, 0, Qt.AlignmentFlag.AlignHCenter)
+        lay.addStretch(1)
         self._mode_buttons["Normal"].setChecked(True)
-        lay.addSpacing(12)
-
-        metrics_title = QLabel("SISTEMA")
-        metrics_title.setFont(QFont(FONT_UI, 8, QFont.Weight.Bold))
-        metrics_title.setStyleSheet(f"color:{C.TEXT_MED}; padding:0 8px 4px 8px;")
-        lay.addWidget(metrics_title)
-
-        self._bar_cpu = MetricBar("CPU", C.PRI)
-        self._bar_mem = MetricBar("MEM", C.ACC2)
-        self._bar_net = MetricBar("NET", C.ACC)
-        self._bar_gpu = MetricBar("GPU", C.ACC)
-        self._bar_tmp = MetricBar("TMP", "#e57373") # Keep a distinct color for temp, it's a "warning" metric
-
-        for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
-                    self._bar_gpu, self._bar_tmp]:
-            lay.addWidget(bar)
-
-        lay.addSpacing(4)
-
-        info_panel = QWidget()
-        info_panel.setStyleSheet(
-            "background: rgba(255,255,255,0.025); "
-            "border: 1px solid rgba(255,255,255,0.06); border-radius: 9px;"
-        )
-        ip_lay = QVBoxLayout(info_panel)
-        ip_lay.setContentsMargins(10, 8, 10, 8)
-        ip_lay.setSpacing(5)
-
-        self._uptime_lbl = QLabel("UP  --:--")
-        self._uptime_lbl.setFont(QFont(FONT_UI, 9, QFont.Weight.DemiBold))
-        self._uptime_lbl.setStyleSheet(f"color: {C.ACC}; background: transparent; border: none;")
-        ip_lay.addWidget(self._uptime_lbl)
-
-        self._proc_lbl = QLabel("PROC  --")
-        self._proc_lbl.setFont(QFont(FONT_UI, 9))
-        self._proc_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
-        ip_lay.addWidget(self._proc_lbl)
-
-        os_name = {"Windows": "WIN", "Darwin": "macOS", "Linux": "LINUX"}.get(_OS, _OS.upper())
-        os_lbl = QLabel(f"OS  {os_name}")
-        os_lbl.setFont(QFont(FONT_UI, 9))
-        os_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent; border: none;")
-        ip_lay.addWidget(os_lbl)
-
-        lay.addWidget(info_panel)
-        lay.addStretch()
 
         return w
 
@@ -12029,6 +13957,8 @@ class MainWindow(QMainWindow):
             badge.hide()
             return
         badge.setText("99+" if count > 99 else str(count))
+        badge.setFixedWidth(26 if count > 99 else 20)
+        badge.move(23 if count > 99 else 29, 4)
         badge.show()
         badge.raise_()
 
