@@ -32,6 +32,7 @@ class Torrent:
     upload_date: str = ""
     size: str = ""
     spanish: bool = False  # Castilian/Spanish audio detected in the title
+    provider: str = ""     # source label (YTS, 1337x, Peerflix, MejorTorrent…)
 
     def to_dict(self) -> dict:
         return {
@@ -42,6 +43,7 @@ class Torrent:
             "upload_date": self.upload_date,
             "size": self.size,
             "spanish": self.spanish,
+            "provider": self.provider,
         }
 
 
@@ -111,6 +113,7 @@ def search(query: str, kind: str = "movie", limit: int = 10,
             leechers=int(item.get("leechers") or 0),
             size=item.get("size", ""),
             spanish=bool(item.get("spanish", False)),
+            provider=item.get("source", ""),
         )
         for item in data
         if item.get("magnet")

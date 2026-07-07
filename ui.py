@@ -8503,8 +8503,13 @@ class _TorrentSelectDialog(QDialog):
 
         lay = QVBoxLayout(self)
 
-        # Info label
-        info = QLabel("Selecciona un torrent para reproducir (ordenados por seeders):")
+        # Info label with a summary of how many are in Spanish.
+        n_es = sum(1 for t in torrents if getattr(t, "spanish", False))
+        info = QLabel(
+            f"Selecciona un torrent  ·  {len(torrents)} resultados, "
+            f"{n_es} en español (marcados en verde arriba):"
+        )
+        info.setStyleSheet(f"color:{C.TEXT_MED};")
         lay.addWidget(info)
 
         # Torrent list
@@ -8524,10 +8529,16 @@ class _TorrentSelectDialog(QDialog):
         # Keep the incoming order (Castilian first, then seeders); don't re-sort.
         for t in torrents:
             size_str = t.size if t.size else ""
-            flag = "🇪🇸 CASTELLANO  " if getattr(t, "spanish", False) else ""
-            item_text = f"{flag}{t.title}\n📤 {t.seeders} seeders  📥 {t.leechers} leechers  {size_str}"
-            item = QListWidgetItem(item_text)
+            provider = getattr(t, "provider", "") or "torrent"
+            is_es = getattr(t, "spanish", False)
+            # Text label (not just a flag emoji, which Qt may not render on
+            # Windows) so Spanish vs. original is unmistakable.
+            lang = "[ESPAÑOL]" if is_es else "[ORIGINAL/VO]"
+            meta = f"📤 {t.seeders} seeders   {size_str}   ·  {provider}"
+            item = QListWidgetItem(f"{lang}  {t.title}\n{meta}")
             item.setData(Qt.ItemDataRole.UserRole, t)
+            # Colour Spanish results green, others dimmer, so the list scans fast.
+            item.setForeground(QColor("#4ADE80") if is_es else QColor(C.TEXT_DIM))
             self._list.addItem(item)
 
         # Buttons
@@ -9185,7 +9196,8 @@ class MoviesModePanel(QWidget):
                         for s in mod.search(imdb, kind=kind, spanish=True, limit=15):
                             found.append(ts.Torrent(
                                 title=s.title, magnet=s.magnet, seeders=s.seeders,
-                                leechers=0, size=s.size, spanish=s.spanish))
+                                leechers=0, size=s.size, spanish=s.spanish,
+                                provider=getattr(s, "provider", "") or mod_name))
                     except Exception:
                         pass
 
