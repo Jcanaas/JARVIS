@@ -200,7 +200,8 @@ def search_anime(query: str, limit: int = 12) -> list[Movie]:
     if not query:
         raise MovieSearchError("Empty search query.")
     url = f"{TMDB_API_BASE}/search/tv"
-    data = _http_get(url, {"api_key": api_key, "query": query, "language": "es-ES", "page": 1})
+    data = _http_get(url, {"api_key": api_key, "query": query, "language": "es-ES",
+                           "include_adult": "false", "page": 1})
     results: list[Movie] = []
     for item in data.get("results", [])[:limit]:
         movie = _parse_movie(item, "tv")
@@ -220,6 +221,9 @@ def get_trending_anime(limit: int = 12) -> list[Movie]:
     data = _http_get(url, {
         "api_key": api_key, "language": "es-ES",
         "with_genres": "16", "with_original_language": "ja",
+        "with_keywords": "210024",   # keyword 210024 = "anime" tag on TMDB
+        "include_adult": "false",
+        "vote_count.gte": "200",     # hentai has <100 votes; real anime has thousands
         "sort_by": "popularity.desc", "page": 1,
     })
     results: list[Movie] = []
@@ -239,6 +243,9 @@ def get_airing_anime(limit: int = 12) -> list[Movie]:
     data = _http_get(url, {
         "api_key": api_key, "language": "es-ES",
         "with_genres": "16", "with_original_language": "ja",
+        "with_keywords": "210024",   # keyword 210024 = "anime"
+        "include_adult": "false",
+        "vote_count.gte": "50",      # lower threshold for currently airing (fewer votes yet)
         "with_status": "0",  # 0 = returning / currently airing
         "sort_by": "popularity.desc", "page": 1,
     })
