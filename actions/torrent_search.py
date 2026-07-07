@@ -31,6 +31,7 @@ class Torrent:
     leechers: int = 0
     upload_date: str = ""
     size: str = ""
+    spanish: bool = False  # Castilian/Spanish audio detected in the title
 
     def to_dict(self) -> dict:
         return {
@@ -40,6 +41,7 @@ class Torrent:
             "leechers": self.leechers,
             "upload_date": self.upload_date,
             "size": self.size,
+            "spanish": self.spanish,
         }
 
 
@@ -53,16 +55,19 @@ def _locate_node() -> str:
     )
 
 
-def search(query: str, kind: str = "movie", limit: int = 10) -> list[Torrent]:
+def search(query: str, kind: str = "movie", limit: int = 10,
+           spanish: bool = True) -> list[Torrent]:
     """Search for torrents via the vendored torlink script.
 
     Args:
         query: Movie/TV title
         kind: "movie" | "tv"
         limit: Max results
+        spanish: Prioritise Castilian/Spanish releases (extra tracker passes
+            with a "castellano" hint, Spanish results ranked first)
 
     Returns:
-        List of Torrent objects with magnet links, sorted by seeders.
+        List of Torrent objects with magnet links.
 
     Raises:
         TorrentSearchError: If Node.js is missing, the search fails, or no
@@ -75,13 +80,13 @@ def search(query: str, kind: str = "movie", limit: int = 10) -> list[Torrent]:
     node = _locate_node()
     kind = "tv" if kind == "tv" else "movie"
 
+    cmd = [node, str(_SEARCH_SCRIPT), "search", query,
+           "--kind", kind, "--limit", str(limit), "--json"]
+    if spanish:
+        cmd.append("--spanish")
+
     try:
-        result = subprocess.run(
-            [node, str(_SEARCH_SCRIPT), "search", query, "--kind", kind, "--limit", str(limit), "--json"],
-            capture_output=True,
-            text=True,
-            timeout=_TIMEOUT,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise TorrentSearchError("Torrent search timed out.") from None
 
@@ -105,6 +110,7 @@ def search(query: str, kind: str = "movie", limit: int = 10) -> list[Torrent]:
             seeders=int(item.get("seeders") or 0),
             leechers=int(item.get("leechers") or 0),
             size=item.get("size", ""),
+            spanish=bool(item.get("spanish", False)),
         )
         for item in data
         if item.get("magnet")
@@ -113,7 +119,8 @@ def search(query: str, kind: str = "movie", limit: int = 10) -> list[Torrent]:
     if not torrents:
         raise TorrentSearchError(f"No valid torrents found for '{query}'.")
 
-    torrents.sort(key=lambda t: t.seeders, reverse=True)
+    # The script already ranks (Spanish first when requested, then seeders); keep
+    # that order rather than re-sorting purely by seeders.
     return torrents[:limit]
 
 

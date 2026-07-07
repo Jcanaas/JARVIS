@@ -8521,10 +8521,11 @@ class _TorrentSelectDialog(QDialog):
         self._list.itemDoubleClicked.connect(self._on_select)
         lay.addWidget(self._list)
 
-        # Populate with torrents sorted by seeders
-        for t in sorted(torrents, key=lambda x: x.seeders, reverse=True):
+        # Keep the incoming order (Castilian first, then seeders); don't re-sort.
+        for t in torrents:
             size_str = t.size if t.size else ""
-            item_text = f"{t.title}\n📤 {t.seeders} seeders  📥 {t.leechers} leechers  {size_str}"
+            flag = "🇪🇸 CASTELLANO  " if getattr(t, "spanish", False) else ""
+            item_text = f"{flag}{t.title}\n📤 {t.seeders} seeders  📥 {t.leechers} leechers  {size_str}"
             item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, t)
             self._list.addItem(item)

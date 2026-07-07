@@ -144,6 +144,29 @@ class TorrentSearchTests(unittest.TestCase):
 
     @patch("actions.torrent_search._locate_node", return_value="node")
     @patch("actions.torrent_search.subprocess.run")
+    def test_search_passes_spanish_flag_and_parses_field(self, mock_run, mock_locate):
+        payload = [{
+            "name": "Fight Club Castellano", "magnet": "magnet:?xt=urn:btih:esp",
+            "seeders": 120, "leechers": 5, "size": "2GB", "spanish": True,
+        }]
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(payload), stderr="")
+        torrents = ts.search("fight club", spanish=True)
+        self.assertTrue(torrents[0].spanish)
+        # The --spanish flag must reach the node script.
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--spanish", cmd)
+
+    @patch("actions.torrent_search._locate_node", return_value="node")
+    @patch("actions.torrent_search.subprocess.run")
+    def test_search_omits_spanish_flag_when_disabled(self, mock_run, mock_locate):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=json.dumps(self.SEARCH_JSON), stderr="")
+        ts.search("fight club", spanish=False)
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--spanish", cmd)
+
+    @patch("actions.torrent_search._locate_node", return_value="node")
+    @patch("actions.torrent_search.subprocess.run")
     def test_search_nonzero_exit_raises(self, mock_run, mock_locate):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="No results from any source")
         with self.assertRaises(ts.TorrentSearchError):

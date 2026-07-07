@@ -281,12 +281,13 @@ async function searchX1337(query, kind) {
 // --- CLI entry point --------------------------------------------------------
 
 function parseArgs(argv) {
-  const args = { query: "", kind: "movie", limit: 10 };
+  const args = { query: "", kind: "movie", limit: 10, spanish: false };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--kind") args.kind = argv[++i];
     else if (a === "--limit") args.limit = parseInt(argv[++i], 10) || 10;
+    else if (a === "--spanish") args.spanish = true;
     else if (a === "--json") continue;
     else rest.push(a);
   }
@@ -294,13 +295,21 @@ function parseArgs(argv) {
   return args;
 }
 
+// Marks a release title as Castilian/Spanish audio. LAT (Latino) is treated as
+// Spanish too but ranked below Castilian by the caller if needed.
+const SPANISH_RE = /\b(castellano|español|espanol|spanish|espa\b|cast\b|dual)\b/i;
+
+function isSpanish(name) {
+  return SPANISH_RE.test(name || "");
+}
+
 // Overall budget for the whole search. Sources that haven't answered by then are
 // abandoned and we return whatever already arrived, so one slow tracker can't
 // stall the result.
-const OVERALL_TIMEOUT_MS = 8000;
+const OVERALL_TIMEOUT_MS = 9000;
 
 async function main() {
-  const { query, kind, limit } = parseArgs(process.argv.slice(3)); // skip "node search.mjs search"
+  const { query, kind, limit, spanish } = parseArgs(process.argv.slice(3)); // skip "node search.mjs search"
   if (!query) {
     console.error("Empty query");
     process.exit(1);
@@ -309,6 +318,15 @@ async function main() {
   const sources = kind === "tv"
     ? [searchPirateBay(query, "tv"), searchX1337(query, "tv")]
     : [searchYts(query), searchPirateBay(query, "movie"), searchX1337(query, "movie")];
+
+  // When Spanish is requested, add extra passes that query the trackers with a
+  // "castellano" hint — Castilian releases tag the title and don't surface on a
+  // plain (English) query.
+  if (spanish) {
+    const esQuery = `${query} castellano`;
+    sources.push(searchX1337(esQuery, kind === "tv" ? "tv" : "movie"));
+    sources.push(searchPirateBay(esQuery, kind === "tv" ? "tv" : "movie"));
+  }
 
   // Each source resolves to its own results, or [] on failure — never rejects —
   // so Promise.all settles as soon as every source has either answered or timed
@@ -327,14 +345,30 @@ async function main() {
     process.exit(1);
   }
 
-  merged.sort((a, b) => b.seeders - a.seeders);
-  const top = merged.slice(0, limit).map((r) => ({
+  // De-duplicate by infohash (same release can appear across sources/passes).
+  const seen = new Set();
+  const unique = [];
+  for (const r of merged) {
+    if (seen.has(r.infoHash)) continue;
+    seen.add(r.infoHash);
+    r.spanish = isSpanish(r.name);
+    unique.push(r);
+  }
+
+  // Rank: when Spanish is requested, Castilian releases first, then by seeders.
+  unique.sort((a, b) => {
+    if (spanish && a.spanish !== b.spanish) return a.spanish ? -1 : 1;
+    return b.seeders - a.seeders;
+  });
+
+  const top = unique.slice(0, limit).map((r) => ({
     name: r.name,
     magnet: r.magnet,
     seeders: r.seeders,
     leechers: r.leechers,
     size: formatBytes(r.sizeBytes),
     source: r.source,
+    spanish: !!r.spanish,
   }));
 
   process.stdout.write(JSON.stringify(top));
