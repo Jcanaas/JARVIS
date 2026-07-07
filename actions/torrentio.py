@@ -165,9 +165,10 @@ def search(imdb_id: str, kind: str = "movie", season: int = 0, episode: int = 0,
 
 def search_anime(imdb_id: str, kind: str = "tv", season: int = 0, episode: int = 0,
                  limit: int = 15) -> list[Stream]:
-    """Fetch anime torrent streams via Torrentio using Nyaa as primary source.
+    """Fetch anime torrent streams via Torrentio (default config, NyaaSi source).
 
-    Nyaa is the dominant anime tracker; EZTV and 1337x cover stragglers.
+    Torrentio's NyaaSi provider is only active when NO provider filter is set.
+    Filtering by providers=nyaa returns 0 results — the internal name differs.
     """
     if not imdb_id:
         raise TorrentioError("No IMDb id provided.")
@@ -177,7 +178,9 @@ def search_anime(imdb_id: str, kind: str = "tv", season: int = 0, episode: int =
     if stream_type == "series" and season and episode:
         video_id = f"{imdb_id}:{season}:{episode}"
 
-    url = f"{_BASE}/providers={_ANIME_PROVIDERS}/stream/{stream_type}/{video_id}.json"
+    # No providers= filter: Torrentio's default config includes NyaaSi which is
+    # the dominant anime source. Adding a providers= param kills NyaaSi results.
+    url = f"{_BASE}/stream/{stream_type}/{video_id}.json"
 
     try:
         r = requests.get(url, timeout=_TIMEOUT,
