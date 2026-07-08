@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from PyQt6.QtCore import *
@@ -9,6 +10,259 @@ from PyQt6.QtWidgets import *
 from ..theme import *
 from ..icons import *
 from ..widgets import *
+
+class _AspectVideo(QWidget):
+    """Keeps a child surface at a fixed aspect ratio, centered (no double black bars)."""
+
+    def __init__(self, surface: QWidget, ratio: float = 16 / 9, parent=None):
+        super().__init__(parent)
+        self._surface = surface
+        self._ratio = ratio
+        surface.setParent(self)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        outer_w, outer_h = self.width(), self.height()
+        w = outer_w
+        h = int(round(w / self._ratio))
+        if h > outer_h:
+            h = outer_h
+            w = int(round(h * self._ratio))
+        self._surface.setGeometry((outer_w - w) // 2, (outer_h - h) // 2, w, h)
+
+
+
+
+class _VideoCard(QWidget):
+    activated = pyqtSignal(str)
+
+    def __init__(self, video: dict, parent=None):
+        super().__init__(parent)
+        self._vid = str(video.get("id") or "")
+        self.setObjectName("YtCard")
+        self.setFixedWidth(248)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(7)
+
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(248, 140)
+        self.thumb.setObjectName("YtCardThumb")
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.thumb)
+
+        title = QLabel(video.get("title", ""))
+        title.setWordWrap(True)
+        title.setFixedHeight(38)
+        title.setStyleSheet(f"color: {C.TEXT}; font-size: 12px; font-weight: 700;")
+        title.setToolTip(video.get("title", ""))
+        lay.addWidget(title)
+
+        meta = QLabel(self._meta(video))
+        meta.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 10px;")
+        lay.addWidget(meta)
+
+    @staticmethod
+    def _meta(video: dict) -> str:
+        parts = []
+        if video.get("channel"):
+            parts.append(str(video["channel"]))
+        try:
+            total = int(video.get("duration") or 0)
+        except Exception:
+            total = 0
+        if total > 0:
+            h, rem = divmod(total, 3600)
+            m, s = divmod(rem, 60)
+            parts.append(f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}")
+        return "  ·  ".join(parts)
+
+    def thumb_label(self) -> QLabel:
+        return self.thumb
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit(self._vid)
+
+
+
+
+class _PanelControls(QWidget):
+    """Translucent control bar overlaid on the in-panel video (YouTube style).
+
+    A frameless tool window that tracks the video area's screen rect and shows a
+    bottom control bar on hover. Controls are exposed as attributes so the panel
+    keeps its existing wiring.
+    """
+
+    def __init__(self, panel, video_box, is_active=None):
+        super().__init__(panel)
+        self._panel = panel
+        self._box = video_box
+        # Optional predicate deciding when the bar may show. Defaults to the
+        # YouTube panel's own layout check; other panels pass their own.
+        self._is_active = is_active
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setMouseTracking(True)
+
+        self._bar = QWidget(self)
+        self._bar.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            " stop:0 rgba(0,0,0,0), stop:1 rgba(0,0,0,0.74));"
+        )
+        bar_l = QHBoxLayout(self._bar)
+        bar_l.setContentsMargins(14, 24, 14, 12)
+        bar_l.setSpacing(10)
+
+        self.play_btn = _MediaBtn(_MediaBtn.PLAY)
+        self.time_lbl = QLabel("0:00 / 0:00")
+        self.time_lbl.setStyleSheet("color: #FFFFFF; font-size: 11px; background: transparent;")
+        self.seek = _SeekSlider(Qt.Orientation.Horizontal)
+        self.seek.setRange(0, 1000)
+        self.seek.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.seek.setStyleSheet(
+            "QSlider::groove:horizontal { height:4px; background:rgba(255,255,255,0.25); border-radius:2px; }"
+            "QSlider::sub-page:horizontal { background:#5E82FF; border-radius:3px; }"
+            "QSlider::handle:horizontal { background:#DCE1FF; width:13px; height:13px; margin:-5px 0; border-radius:6px; }"
+        )
+        self.vol_icon = QLabel()
+        self.vol_icon.setPixmap(_line_icon("volume", "#FFFFFF", 17).pixmap(17, 17))
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setRange(0, 100)
+        self.volume.setValue(90)
+        self.volume.setFixedWidth(88)
+        self.volume.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.volume.setStyleSheet(
+            "QSlider::groove:horizontal { height:4px; background:rgba(255,255,255,0.25); border-radius:2px; }"
+            "QSlider::sub-page:horizontal { background:#B6C4FF; border-radius:3px; }"
+            "QSlider::handle:horizontal { background:#DCE1FF; width:12px; height:12px; margin:-4px 0; border-radius:6px; }"
+        )
+        self.like_btn = _LikeBtn()
+        self.download_btn = _icon_button("download", "Descargar vídeo", size=36, icon_size=18)
+        # Audio-track + subtitle buttons: hidden by default (YouTube doesn't use
+        # them); the Movies panel reveals and wires them up.
+        self.audio_btn = _icon_button("audio", "Pista de audio", size=36, icon_size=18)
+        self.subs_btn = QPushButton("CC")
+        self.subs_btn.setToolTip("Subtítulos")
+        self.subs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.subs_btn.setFixedSize(36, 36)
+        self.subs_btn.setStyleSheet(
+            "QPushButton { color:#FFFFFF; background:transparent; border:none;"
+            " font-size:12px; font-weight:800; }"
+            "QPushButton:hover { color:#B6C4FF; }"
+        )
+        self.audio_btn.hide()
+        self.subs_btn.hide()
+        self.float_btn = _icon_button("pip", "Vídeo flotante", size=36, icon_size=18)
+        self.fullscreen_btn = _icon_button("fullscreen", "Pantalla completa", size=36, icon_size=18)
+
+        bar_l.addWidget(self.play_btn)
+        bar_l.addWidget(self.time_lbl)
+        bar_l.addWidget(self.seek, stretch=1)
+        bar_l.addWidget(self.vol_icon)
+        bar_l.addWidget(self.volume)
+        bar_l.addSpacing(8)
+        bar_l.addWidget(self.like_btn)
+        bar_l.addWidget(self.download_btn)
+        bar_l.addWidget(self.audio_btn)
+        bar_l.addWidget(self.subs_btn)
+        bar_l.addWidget(self.float_btn)
+        bar_l.addWidget(self.fullscreen_btn)
+
+        self._bar.hide()
+        self._timer = QTimer(self)
+        self._timer.setInterval(150)
+        self._timer.timeout.connect(self._sync)
+        self._timer.start()
+
+    def resizeEvent(self, event):
+        self._bar.setGeometry(0, self.height() - 62, self.width(), 62)
+
+    def _sync(self):
+        panel = self._panel
+        try:
+            if self._is_active is not None:
+                active = self._is_active()
+            else:
+                active = (panel.stack.currentIndex() == 1
+                          and panel._detached_mode is None)
+            show = (
+                active
+                and panel.isVisible()
+                and self._box.isVisible()
+                and not panel.window().isMinimized()
+            )
+        except Exception:
+            show = False
+        if not show:
+            if self.isVisible():
+                self.hide()
+            return
+        top_left = self._box.mapToGlobal(QPoint(0, 0))
+        rect = QRect(top_left.x(), top_left.y(), self._box.width(), self._box.height())
+        if self.geometry() != rect:
+            self.setGeometry(rect)
+        if not self.isVisible():
+            self.show()
+            self.raise_()
+        inside = rect.contains(QCursor.pos())
+        if inside != self._bar.isVisible():
+            self._bar.setVisible(inside)
+            if inside:
+                self._bar.raise_()
+
+
+
+
+
+class _SeekSlider(QSlider):
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self.setTracking(True)
+
+    def _value_from_pos(self, pos):
+        span = max(1, self.width() - 1) if self.orientation() == Qt.Orientation.Horizontal else max(1, self.height() - 1)
+        coord = max(0, min(pos.x() if self.orientation() == Qt.Orientation.Horizontal else pos.y(), span))
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        inverted = self.invertedAppearance() ^ rtl
+        if inverted:
+            coord = span - coord
+        value = self.minimum() + (self.maximum() - self.minimum()) * (coord / span)
+        return int(round(value))
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(True)
+            self.setValue(self._value_from_pos(e.position().toPoint()))
+            self.sliderPressed.emit()
+            self.sliderMoved.emit(self.value())
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self.isSliderDown() and (e.buttons() & Qt.MouseButton.LeftButton):
+            self.setValue(self._value_from_pos(e.position().toPoint()))
+            self.sliderMoved.emit(self.value())
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.isSliderDown():
+            self.setValue(self._value_from_pos(e.position().toPoint()))
+            self.setSliderDown(False)
+            self.sliderReleased.emit()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+
+
+
 
 class YouTubeModePanel(QWidget):
     """YouTube-like mode: search on top, responsive grid of recommended videos,
@@ -1032,5 +1286,7 @@ class YouTubeModePanel(QWidget):
         if self._player is not None:
             self._player.shutdown()
             self._player = None
+
+
 
 

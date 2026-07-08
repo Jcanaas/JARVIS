@@ -5,6 +5,7 @@ from .buttons import *
 from .log import *
 from .glyphs import *
 from .inputs import *
+from .layouts import FlowLayout
 
 __all__ = [
     'HoverGlow', 'pulse_glow', '_SnapshotVeil', '_ANIM_DUR', '_HOVER_DUR',
@@ -14,4 +15,5 @@ __all__ = [
     'LogWidget', 'DownloadWidget',
     '_SearchSvgIcon', '_FilterIcon',
     'SearchGlowInput', '_InputMask', '_BlueMask',
+    'FlowLayout',
 ]

@@ -4,6 +4,9 @@ from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 
+from actions import app_settings
+from actions.paths import config_path
+
 from ..theme import *
 from ..icons import *
 from ..widgets import *
@@ -291,7 +294,7 @@ class SettingsModePanel(QWidget):
         l.addWidget(rules_title)
 
         add_btn = QPushButton("  Añadir regla")
-        add_btn.setIcon(_wa_settings_icon("plus", C.PRI, 16))
+        add_btn.setIcon(_line_icon("plus", C.PRI, 16))
         add_btn.setIconSize(QSize(15, 15))
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.setFixedHeight(36)
@@ -385,7 +388,7 @@ class SettingsModePanel(QWidget):
             b.setToolTip(tip)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFixedSize(30, 30)
-            b.setIcon(_wa_settings_icon(icon_name, color))
+            b.setIcon(_line_icon(icon_name, color))
             b.setIconSize(QSize(16, 16))
             hover_border = "rgba(251,113,133,0.5)" if danger else "rgba(182,196,255,0.4)"
             hover_bg = "rgba(251,113,133,0.10)" if danger else "rgba(182,196,255,0.10)"
@@ -977,7 +980,9 @@ class SettingsModePanel(QWidget):
         name0, about0 = self._load_profile_from_memory()
 
         # Name row
-        self._name_edit = FloatingLabelInput("Nombre", name0)
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("Nombre")
+        self._name_edit.setText(name0 or "")
         self._name_edit.setMinimumWidth(220)
         self._name_edit.textChanged.connect(self._on_profile_changed)
         self._add_row(
@@ -1606,5 +1611,8 @@ class WhatsAppToast(QWidget):
         except Exception:
             pass
         super().leaveEvent(event)
+
+
+
 
 

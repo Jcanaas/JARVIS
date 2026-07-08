@@ -8,6 +8,163 @@ from ..theme import *
 from ..icons import *
 from ..widgets import *
 
+class _AspectVideo(QWidget):
+    """Keeps a child surface at a fixed aspect ratio, centered (no double black bars)."""
+
+    def __init__(self, surface: QWidget, ratio: float = 16 / 9, parent=None):
+        super().__init__(parent)
+        self._surface = surface
+        self._ratio = ratio
+        surface.setParent(self)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        outer_w, outer_h = self.width(), self.height()
+        w = outer_w
+        h = int(round(w / self._ratio))
+        if h > outer_h:
+            h = outer_h
+            w = int(round(h * self._ratio))
+        self._surface.setGeometry((outer_w - w) // 2, (outer_h - h) // 2, w, h)
+
+
+
+
+class _VLCBackend:
+    """Thin wrapper around a VLC media player with an mpv-like interface.
+
+    Renders into an existing native Qt surface (via set_hwnd), so the same
+    _AspectVideo / _PanelControls / _FloatOverlay machinery the YouTube player
+    uses can drive it unchanged.
+    """
+
+    def __init__(self):
+        self.instance = None
+        self.player = None
+        if HAS_VLC:
+            try:
+                self.instance = vlc.Instance()
+                self.player = self.instance.media_player_new()
+            except Exception:
+                self.instance = None
+                self.player = None
+
+    def available(self) -> bool:
+        return self.player is not None
+
+    def play_url(self, url: str, hwnd: int, volume: int = 90):
+        if not self.player:
+            return
+        media = self.instance.media_new(url)
+        self.player.set_media(media)
+        self.set_hwnd(hwnd)
+        self.player.audio_set_volume(int(volume))
+        self.player.play()
+
+    def set_hwnd(self, hwnd: int):
+        if self.player and hwnd:
+            self.player.set_hwnd(int(hwnd))
+
+    # -- transport (names mirror the mpv wrapper used by YouTube) -----------
+    def toggle(self):
+        if self.player:
+            self.player.pause()  # VLC's pause() toggles
+
+    def pause(self):
+        if self.player:
+            self.player.set_pause(1)
+
+    def set_volume(self, v: int):
+        if self.player:
+            self.player.audio_set_volume(int(v))
+
+    def seek_abs(self, seconds: float):
+        if self.player:
+            self.player.set_time(int(max(0.0, seconds) * 1000))
+
+    def seek_rel(self, delta: float):
+        if self.player:
+            t = self.player.get_time()
+            if t is not None and t >= 0:
+                self.player.set_time(max(0, int(t + delta * 1000)))
+
+    def position(self):
+        if self.player:
+            t = self.player.get_time()
+            return t / 1000.0 if t and t > 0 else 0.0
+        return 0.0
+
+    def duration(self):
+        if self.player:
+            length = self.player.get_length()
+            return length / 1000.0 if length and length > 0 else 0.0
+        return 0.0
+
+    def paused(self):
+        return not self.is_playing()
+
+    def is_playing(self):
+        return bool(self.player and self.player.is_playing())
+
+    def is_running(self):
+        return bool(self.player and self.player.get_media() is not None)
+
+    def stop(self):
+        if self.player:
+            try:
+                self.player.stop()
+            except Exception:
+                pass
+
+    # -- track selection ----------------------------------------------------
+    def audio_tracks(self):
+        return self.player.audio_get_track_description() if self.player else []
+
+    def current_audio(self):
+        return self.player.audio_get_track() if self.player else -1
+
+    def set_audio_track(self, tid):
+        if self.player:
+            self.player.audio_set_track(tid)
+
+    def subtitle_tracks(self):
+        return self.player.video_get_spu_description() if self.player else []
+
+    def current_subtitle(self):
+        return self.player.video_get_spu() if self.player else -1
+
+    def set_subtitle(self, tid):
+        if self.player:
+            self.player.video_set_spu(tid)
+
+    def get_subtitle_delay(self):
+        # microseconds
+        return self.player.video_get_spu_delay() if self.player else 0
+
+    def set_subtitle_delay(self, microseconds):
+        if self.player:
+            self.player.video_set_spu_delay(int(microseconds))
+
+    def add_subtitle_file(self, path: str) -> bool:
+        """Load an external subtitle file and select it."""
+        if not self.player:
+            return False
+        try:
+            uri = Path(path).as_uri()
+            # add_slave(type, uri, select_now)
+            self.player.add_slave(vlc.MediaSlaveType.Subtitle, uri, True)
+            return True
+        except Exception:
+            try:  # older python-vlc fallback
+                self.player.video_set_subtitle_file(path)
+                return True
+            except Exception:
+                return False
+
+
+
+
+
 class MoviesModePanel(QWidget):
     """Movie/TV discovery with poster grid and detail view."""
 
@@ -1406,5 +1563,6 @@ class AnimeModePanel(MoviesModePanel):
             self._torrents_found.emit(unique, anime)
 
         self._run_async(work)
+
 
 

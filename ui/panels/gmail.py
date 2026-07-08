@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import html as html_lib
+import re
+import threading
+from pathlib import Path
+
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
@@ -7,6 +12,57 @@ from PyQt6.QtWidgets import *
 from ..theme import *
 from ..icons import *
 from ..widgets import *
+
+
+def _sanitize_email_html_for_qt(html_body: str) -> str:
+    """Normalize email CSS so Qt's HTML renderer doesn't emit warnings."""
+    if not html_body:
+        return html_body
+
+    def _hex_to_rgba(match: re.Match[str]) -> str:
+        value = match.group(0)
+        digits = value[1:]
+        if len(digits) == 3:
+            r, g, b = [int(d * 2, 16) for d in digits]
+            return f"#{r:02x}{g:02x}{b:02x}"
+        if len(digits) == 4:
+            r, g, b, _ = [int(d * 2, 16) for d in digits]
+            return f"#{r:02x}{g:02x}{b:02x}"
+        return value
+
+    def _rgba_to_hex(match: re.Match[str]) -> str:
+        values = [part.strip() for part in match.group(1).split(",")]
+        if len(values) < 3:
+            return match.group(0)
+        try:
+            r = max(0, min(255, int(float(values[0]))))
+            g = max(0, min(255, int(float(values[1]))))
+            b = max(0, min(255, int(float(values[2]))))
+        except ValueError:
+            return match.group(0)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    sanitized = re.sub(r"#[0-9a-fA-F]{3,4}\b", _hex_to_rgba, html_body)
+    sanitized = re.sub(
+        r"rgba\s*\(\s*([^\)]+)\s*\)",
+        _rgba_to_hex,
+        sanitized,
+        flags=re.I,
+    )
+    sanitized = re.sub(
+        r"rgb\s*\(\s*([^\)]+)\s*\)",
+        _rgba_to_hex,
+        sanitized,
+        flags=re.I,
+    )
+    sanitized = re.sub(
+        r"font-size\s*:\s*0(?:px|pt|em|rem|%)?\b",
+        "font-size: 1px",
+        sanitized,
+        flags=re.I,
+    )
+    return sanitized
+
 
 class GmailComposeDialog(QDialog):
     """Compositor de correo con redacción asistida por IA y envío en segundo plano."""
@@ -958,6 +1014,7 @@ class GmailModePanel(QWidget):
         html_body = (result.get("_prepared_html") or result.get("html") or "").strip()
         plain_body = (result.get("body") or "").strip()
         if html_body:
+            safe_html = _sanitize_email_html_for_qt(html_body)
             self.preview.setHtml(
                 f"""
                 <html>
@@ -988,7 +1045,7 @@ class GmailModePanel(QWidget):
                       }}
                     </style>
                   </head>
-                  <body><div class="mail-content">{html_body}</div></body>
+                  <body><div class="mail-content">{safe_html}</div></body>
                 </html>
                 """
             )

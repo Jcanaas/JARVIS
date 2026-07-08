@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import calendar as _calendar_mod
+from datetime import date as _date
+
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
@@ -7,6 +10,68 @@ from PyQt6.QtWidgets import *
 from ..theme import *
 from ..icons import *
 from ..widgets import *
+
+_MONTH_NAMES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+_WEEKDAY_NAMES_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+class _CalendarDayCell(QFrame):
+    """Celda de día del grid mensual: número + puntos de evento como widgets
+    reales (no texto multilínea embebido en un botón), para que la altura de
+    la celda sea estable sin depender de cuántos eventos tenga ese día."""
+
+    clicked = pyqtSignal(object)
+
+    def __init__(self, day: _date, parent=None):
+        super().__init__(parent)
+        self.day = day
+        self.setObjectName("CalDayCell")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(44)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 6, 4, 4)
+        lay.setSpacing(3)
+
+        self.number_label = QLabel(str(day.day))
+        self.number_label.setObjectName("CalDayNumber")
+        self.number_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        lay.addWidget(self.number_label)
+
+        self.dots_row = QHBoxLayout()
+        self.dots_row.setSpacing(3)
+        self.dots_row.setContentsMargins(0, 0, 0, 0)
+        dots_host = QWidget()
+        dots_host.setLayout(self.dots_row)
+        dots_host.setStyleSheet("background: transparent;")
+        lay.addWidget(dots_host, alignment=Qt.AlignmentFlag.AlignHCenter)
+        lay.addStretch(1)
+
+    def set_event_count(self, n: int):
+        while self.dots_row.count():
+            item = self.dots_row.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        shown = min(n, 3)
+        for _ in range(shown):
+            dot = QLabel()
+            dot.setFixedSize(5, 5)
+            dot.setStyleSheet(f"background: {C.PRI_DIM}; border-radius: 2px;")
+            self.dots_row.addWidget(dot)
+        if n > shown:
+            more = QLabel(f"+{n - shown}")
+            more.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 8px; font-weight: 700; background: transparent;")
+            self.dots_row.addWidget(more)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.clicked.emit(self.day)
+
+
+
+
 
 class CalendarModePanel(QWidget):
     """Modo Calendario: vista mensual respaldada por Google Calendar."""
@@ -616,5 +681,6 @@ class CalendarModePanel(QWidget):
             self._do_search()
         else:
             self._load_month()
+
 
 

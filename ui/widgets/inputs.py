@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
@@ -232,6 +234,31 @@ class SearchGlowInput(QFrame):
         super().resizeEvent(event)
         self._update_children_geometry()
         self._layer_cache.clear()
+
+    def clear(self):
+        self._line.clear()
+
+    def text(self) -> str:
+        return self._line.text()
+
+    def setText(self, text: str):
+        self._line.setText(text)
+
+    def setPlaceholderText(self, placeholder: str):
+        self._line.setPlaceholderText(placeholder)
+
+    def selectAll(self):
+        self._line.selectAll()
+
+    def setFocus(self):
+        self._line.setFocus()
+
+    def setReadOnly(self, read_only: bool):
+        self._line.setReadOnly(read_only)
+
+    def setEnabled(self, enabled: bool):
+        super().setEnabled(enabled)
+        self._line.setEnabled(enabled)
 
     def eventFilter(self, obj, event):
         if obj is self._line and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
