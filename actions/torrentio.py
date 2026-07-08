@@ -163,19 +163,22 @@ def search(imdb_id: str, kind: str = "movie", season: int = 0, episode: int = 0,
     return streams[:limit]
 
 
-def search_by_id(video_id: str, limit: int = 15) -> list[Stream]:
+def search_by_id(video_id: str, stream_type: str = "series",
+                 limit: int = 15) -> list[Stream]:
     """Fetch anime streams for a ready-made Stremio video id.
 
-    `video_id` is passed straight into the series stream path, so it accepts
-    Kitsu ids with absolute episode numbering ("kitsu:12:1044") — the format
-    Anime Kitsu produces and Torrentio indexes natively. No providers= filter,
-    so Torrentio's default config (which includes NyaaSi, the dominant anime
-    tracker) is used.
+    `video_id` is passed straight into the stream path, so it accepts Kitsu ids
+    with absolute episode numbering ("kitsu:12:1044") — the format Anime Kitsu
+    produces and Torrentio indexes natively. Use stream_type="series" for
+    episodes ("kitsu:<id>:<ep>") and "movie" for anime films ("kitsu:<id>").
+    No providers= filter, so Torrentio's default config (which includes NyaaSi,
+    the dominant anime tracker) is used.
     """
     if not video_id:
         raise TorrentioError("No video id provided.")
 
-    url = f"{_BASE}/stream/series/{video_id}.json"
+    stream_type = "movie" if stream_type == "movie" else "series"
+    url = f"{_BASE}/stream/{stream_type}/{video_id}.json"
 
     try:
         r = requests.get(url, timeout=_TIMEOUT,

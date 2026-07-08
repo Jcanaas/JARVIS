@@ -2489,8 +2489,9 @@ class AnimeModePanel(MoviesModePanel):
 
         def work():
             try:
-                from actions import anime_search
-                items = anime_search.get_anime_by_genre(genre_id, limit=15)
+                from actions import kitsu
+                # kitsu maps the Spanish label ("Acción") to its genre string.
+                items = kitsu.get_anime_by_genre(label, limit=15)
                 self._results_ready.emit(items, f"Anime — {label}", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -2689,8 +2690,8 @@ class AnimeModePanel(MoviesModePanel):
 
         def work():
             try:
-                from actions import anime_search
-                items = anime_search.search_anime(query, limit=15)
+                from actions import kitsu
+                items = kitsu.search_anime(query, limit=15)
                 self._results_ready.emit(items, f"Anime: «{query}»", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -2702,8 +2703,8 @@ class AnimeModePanel(MoviesModePanel):
 
         def work():
             try:
-                from actions import anime_search
-                items = anime_search.get_trending_anime(limit=15)
+                from actions import kitsu
+                items = kitsu.get_trending_anime(limit=15)
                 self._results_ready.emit(items, "Anime en tendencia", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -2715,58 +2716,13 @@ class AnimeModePanel(MoviesModePanel):
 
         def work():
             try:
-                from actions import anime_search
-                items = anime_search.get_airing_anime(limit=15)
+                from actions import kitsu
+                items = kitsu.get_airing_anime(limit=15)
                 self._results_ready.emit(items, "Anime en emisión", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
 
         self._run_async(work)
-
-    @staticmethod
-    def _simplify_anime_title(title: str) -> str:
-        """Strip part/season suffixes so 'JoJo Part 7: Steel Ball Run' → 'JoJo'."""
-        import re
-        t = re.sub(
-            r'\s*:?\s*(?:Part|Season|Parte|Temporada|Cour)\s+\S+.*$',
-            '', title, flags=re.IGNORECASE
-        )
-        t = re.sub(r'\s*\(\d{4}\)\s*$', '', t).strip()
-        return t or title
-
-    @staticmethod
-    def _title_match_score(query: str, release_title: str) -> float:
-        """Score how closely a torrent release title matches the searched title.
-
-        Release titles are noisy ("[Group] Monster - 01 [1080p].mkv"), so the
-        anime name is extracted (group tags, episode numbers and tech tags
-        stripped) and compared to the query with a fuzzy ratio, boosted when the
-        name starts with the query as a whole word. This keeps an exact-name
-        match ("Monster") above near-collisions ("Monster Hunter", "Re:Monster").
-        """
-        import re
-        import difflib
-
-        q = (query or "").lower().strip()
-        if not q:
-            return 0.0
-        n = (release_title or "").lower()
-        n = re.sub(r'\[[^\]]*\]', ' ', n)          # [Group], [1080p]
-        n = re.sub(r'\([^)]*\)', ' ', n)           # (2004), (Batch)
-        n = re.sub(r'\.(mkv|mp4|avi)$', ' ', n)
-        n = re.sub(r'[-_.:]', ' ', n)
-        n = re.sub(r'\b\d{3,4}p\b', ' ', n)        # 1080p
-        n = re.sub(r'\bs\d+\b', ' ', n)            # season markers (S3)
-        n = re.sub(
-            r'\b(ova|bd|batch|complete|collection|dual|audio|eng|sub|multiple|'
-            r'subtitle|hevc|x265|x264|aac|web|dl|remux|bluray)\b', ' ', n)
-        n = re.sub(r'\b\d+\b', ' ', n)             # loose episode numbers
-        n = re.sub(r'\s+', ' ', n).strip()
-
-        ratio = difflib.SequenceMatcher(None, q, n).ratio()
-        if re.match(r'^' + re.escape(q) + r'\b', n):
-            ratio += 0.4
-        return ratio
 
     # ------------------------------------------------------------------
     # Detail view with episode picker + MAL status section
@@ -2846,19 +2802,18 @@ class AnimeModePanel(MoviesModePanel):
         self._detail_layout.addStretch()
         self._stack.setCurrentIndex(1)
 
-        if mal_id:
-            self._load_episodes(anime, mal_id)
+        kitsu_id = getattr(anime, "kitsu_id", "")
+        if kitsu_id:
+            self._load_episodes(anime, kitsu_id)
         else:
             self._ep_loading_lbl.setText("No se encontraron episodios.")
 
-    def _load_episodes(self, anime, mal_id: int):
+    def _load_episodes(self, anime, kitsu_id: str):
         try:
             self._episodes_ready.disconnect()
         except Exception:
             pass
         self._episodes_ready.connect(self._on_episodes_ready)
-
-        poster_pixmap = None
 
         def work():
             px = None
@@ -2871,10 +2826,10 @@ class AnimeModePanel(MoviesModePanel):
                 except Exception:
                     px = None
             try:
-                from actions import anime_search
-                episodes = anime_search.get_episodes(mal_id)
+                from actions import kitsu
+                episodes = kitsu.get_episodes(kitsu_id)
                 self._episodes_ready.emit(episodes, anime, px)
-            except Exception as exc:
+            except Exception:
                 self._episodes_ready.emit([], anime, px)
 
         self._run_async(work)
@@ -3018,69 +2973,63 @@ class AnimeModePanel(MoviesModePanel):
         self._set_status(message)
 
     def _search_and_play(self, anime, episode: int = 0):
-        """Anime torrents via torlink only (Nyaa RSS + SubsPlease JSON API).
+        """Anime torrents via the Stremio addon flow: Kitsu id → Torrentio.
 
-        Mirrors torlink's own Anime source group — no IMDb/TMDB/Torrentio
-        detour. torlink queries the anime trackers directly by title (plus the
-        episode number when one is requested) and returns the release names as
-        the sources publish them.
+        Torrentio indexes anime by Kitsu id with absolute episode numbering, so
+        we hand it "kitsu:<id>:<episode>" straight — no title matching, no
+        "Monster Hunter" collisions. See actions/kitsu.py + actions/torrentio.py.
         """
         ep_txt = f" ep {episode}" if episode else ""
         self._set_status(f"Buscando torrents de «{anime.title}»{ep_txt}…")
-        # Use the full anime title (Jikan's English title) — Nyaa full-text search
-        # works best without simplification. Only simplify multi-season anime to
-        # avoid matching the wrong season's episodes.
-        title = anime.title
-        if any(x in title.lower() for x in ["part", "season", "cour", "parte", "temporada"]):
-            title = self._simplify_anime_title(title)
+        kitsu_id = getattr(anime, "kitsu_id", "")
 
         def work():
-            import re
+            from actions import torrentio
             from actions import torrent_search as ts
 
-            found: list = []
-            errors: list[str] = []
-
-            # torlink --kind anime: Nyaa (full-text RSS) + SubsPlease (JSON API,
-            # keyed by show + episode). Pass "title episode" so Nyaa narrows to
-            # the requested episode; SubsPlease matches the show name.
-            # spanish=False: anime is wanted in Japanese/original, so don't rank
-            # or tag Castilian releases first the way movies do.
-            try:
-                query = f"{title} {episode}" if episode else title
-                self._status_sig.emit(f"Buscando «{query}» en Nyaa/SubsPlease…")
-                found.extend(ts.search(query, kind="anime", limit=15,
-                                       spanish=False))
-            except Exception as exc:
-                errors.append(f"torlink-anime: {exc}")
-
-            if not found:
-                diag = "  |  ".join(errors) if errors else ""
+            kid = kitsu_id
+            # Watchlist/MAL items may lack a kitsu_id; resolve it by title.
+            if not kid:
+                try:
+                    from actions import kitsu
+                    hits = kitsu.search_anime(anime.title, limit=1)
+                    kid = hits[0].kitsu_id if hits else ""
+                except Exception:
+                    kid = ""
+            if not kid:
                 self._status_sig.emit(
-                    f"No encontré torrents para «{anime.title}»"
-                    + (f"  [{diag}]" if diag else "")
-                )
+                    f"No encontré «{anime.title}» en Kitsu.")
                 return
 
-            # De-duplicate by infohash.
-            seen, unique = set(), []
-            for t in found:
-                m = re.search(r"btih:([a-zA-Z0-9]+)", t.magnet or "")
-                key = m.group(1).lower() if m else (t.magnet or t.title)
-                if key in seen:
-                    continue
-                seen.add(key)
-                unique.append(t)
+            # Build the Stremio id: series episode, or movie when the title has
+            # no episode list.
+            if episode:
+                video_id, stype = f"kitsu:{kid}:{episode}", "series"
+            elif int(getattr(anime, "total_episodes", 0) or 0) > 1:
+                video_id, stype = f"kitsu:{kid}:1", "series"
+            else:
+                video_id, stype = f"kitsu:{kid}", "movie"
 
-            # Rank by how closely each release title matches the searched anime
-            # title, then by seeders. Keeps "Monster" above "Monster Hunter" /
-            # "Re:Monster" instead of drowning it under higher-seeded neighbours.
-            unique.sort(
-                key=lambda t: (self._title_match_score(title, t.title), t.seeders),
-                reverse=True,
-            )
+            self._status_sig.emit(
+                f"Buscando «{anime.title}»{ep_txt} en Torrentio ({video_id})…")
+            try:
+                streams = torrentio.search_by_id(video_id, stream_type=stype,
+                                                 limit=25)
+            except Exception as exc:
+                self._status_sig.emit(
+                    f"No encontré torrents para «{anime.title}»  [{exc}]")
+                return
 
-            self._torrents_found.emit(unique, anime)
+            # Torrentio already returns only streams for this exact id, ranked by
+            # seeders. Adapt Stream → torrent_search.Torrent for the dialog.
+            torrents = [
+                ts.Torrent(
+                    title=s.title, magnet=s.magnet, seeders=s.seeders,
+                    leechers=0, size=s.size, spanish=s.spanish,
+                    provider=s.provider or "Torrentio")
+                for s in streams
+            ]
+            self._torrents_found.emit(torrents, anime)
 
         self._run_async(work)
 
