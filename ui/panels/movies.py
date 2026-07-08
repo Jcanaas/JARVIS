@@ -537,7 +537,7 @@ class _TorrentSelectDialog(QDialog):
         self._list.itemDoubleClicked.connect(self._on_select)
         lay.addWidget(self._list)
 
-        # Keep the incoming order (Castilian first, then seeders); don't re-sort.
+        # Keep the incoming order (already sorted by seeders); don't re-sort.
         for t in torrents:
             size_str = t.size if t.size else ""
             provider = getattr(t, "provider", "") or "torrent"
@@ -2993,7 +2993,12 @@ class AnimeModePanel(MoviesModePanel):
         """
         ep_txt = f" ep {episode}" if episode else ""
         self._set_status(f"Buscando torrents de «{anime.title}»{ep_txt}…")
-        title = self._simplify_anime_title(anime.title)
+        # Use the full anime title (Jikan's English title) — Nyaa full-text search
+        # works best without simplification. Only simplify multi-season anime to
+        # avoid matching the wrong season's episodes.
+        title = anime.title
+        if any(x in title.lower() for x in ["part", "season", "cour", "parte", "temporada"]):
+            title = self._simplify_anime_title(title)
 
         def work():
             import re
