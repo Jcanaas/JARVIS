@@ -309,7 +309,7 @@ def _icon_button(
 	icon_size: int = 19,
 	accent: bool = False,
 ) -> QPushButton:
-	from . import HoverGlow
+	from .widgets import HoverGlow
 	button = QPushButton()
 	button.setFixedSize(size, size)
 	button.setIcon(_line_icon(name, C.PRI if accent else C.TEXT_DIM, icon_size))
