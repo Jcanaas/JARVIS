@@ -445,6 +445,9 @@ class _MovieCard(QWidget):
         self.movie = movie
         self.setStyleSheet("background:transparent;")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Fixed size so cards line up in a clean grid regardless of how long the
+        # title is (1- vs 2-line titles were breaking row alignment).
+        self.setFixedWidth(self._W)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 7)
@@ -481,6 +484,10 @@ class _MovieCard(QWidget):
         title_label.setFont(QFont("Inter", 9, QFont.Weight.DemiBold))
         title_label.setStyleSheet("color:#f4f4f2; background:transparent;")
         title_label.setWordWrap(True)
+        # Fixed 2-line height keeps every card the same total height.
+        title_label.setFixedHeight(34)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        title_label.setToolTip(movie.title)
         lay.addWidget(title_label)
 
         meta_row = QHBoxLayout()
@@ -1177,7 +1184,7 @@ class MoviesModePanel(QWidget):
 
         # Hero banner (featured carousel) — large, scrolls with the page.
         self._hero = _HeroBanner()
-        self._hero.setFixedHeight(520)
+        self._hero.setFixedHeight(600)
         self._hero.play_clicked.connect(self._search_and_play)
         self._hero.info_clicked.connect(lambda m: self._show_detail.emit(m))
         self._hero.setVisible(False)
@@ -1372,6 +1379,21 @@ class MoviesModePanel(QWidget):
     def _run_async(self, fn):
         threading.Thread(target=fn, daemon=True).start()
 
+    @staticmethod
+    def _clear_layout(layout):
+        """Recursively remove every item from a layout: widgets are deleted and
+        nested layouts are cleared too. A plain `takeAt` loop that only deletes
+        `item.widget()` leaves nested layouts (and their widgets) alive."""
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+            else:
+                sub = item.layout()
+                if sub is not None:
+                    MoviesModePanel._clear_layout(sub)
+
     def _do_search(self):
         query = self._search.text().strip()
         if not query:
@@ -1443,7 +1465,8 @@ class MoviesModePanel(QWidget):
             card.clicked.connect(lambda m: self._show_detail.emit(m))
             col = i % COLS
             row = i // COLS
-            self._grid.addWidget(card, row, col)
+            self._grid.addWidget(card, row, col,
+                                 Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         # Scroll back to the top when new results arrive.
         if hasattr(self, "_page_scroll"):
@@ -2767,14 +2790,14 @@ class AnimeModePanel(MoviesModePanel):
         self._back_btn.setVisible(True)
         self._title.setText(anime.title)
 
-        while self._detail_layout.count():
-            item = self._detail_layout.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
+        # Clear the previous detail view. Delete widgets AND any nested layouts
+        # (the episode list used to be a bare layout that survived this loop, so
+        # a prior anime's episodes bled into the new one).
+        self._clear_layout(self._detail_layout)
 
-        # -- Hero banner at the top of the detail view --
+        # -- Hero banner at the top of the detail view (same large hero) --
         hero = _HeroBanner()
-        hero.setFixedHeight(240)
+        hero.setFixedHeight(480)
         hero.play_clicked.connect(lambda m: self._search_and_play(m))
         hero.info_clicked.connect(lambda _: None)
         hero.set_movie(anime)   # fetches the backdrop by itself
@@ -2826,9 +2849,12 @@ class AnimeModePanel(MoviesModePanel):
         self._ep_loading_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; padding:4px;")
         self._detail_layout.addWidget(self._ep_loading_lbl)
 
-        self._episodes_list_container = QVBoxLayout()
+        eps_widget = QWidget()
+        eps_widget.setStyleSheet("background:transparent;")
+        self._episodes_list_container = QVBoxLayout(eps_widget)
         self._episodes_list_container.setSpacing(6)
-        self._detail_layout.addLayout(self._episodes_list_container)
+        self._episodes_list_container.setContentsMargins(0, 0, 0, 0)
+        self._detail_layout.addWidget(eps_widget)
 
         self._detail_layout.addStretch()
         self._stack.setCurrentIndex(1)
