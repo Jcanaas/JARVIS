@@ -1548,7 +1548,12 @@ class MoviesModePanel(QWidget):
             # 100% Castilian; Torrentio: MejorTorrent/Cinecalidad + intl).
             try:
                 from actions import movie_search as ms
-                imdb = ms.get_imdb_id(getattr(movie, "tmdb_id", 0), kind=kind)
+                tmdb_id = getattr(movie, "tmdb_id", 0)
+                if tmdb_id:
+                    imdb = ms.get_imdb_id(tmdb_id, kind=kind)
+                else:
+                    # Fallback for anime/items without tmdb_id: title-based lookup
+                    imdb = ms.get_imdb_id_by_title(movie.title, kind=kind)
             except Exception as exc:
                 imdb = ""
                 errors.append(f"imdb_id: {exc}")
