@@ -1535,7 +1535,11 @@ class MoviesModePanel(QWidget):
             import re
             from actions import torrent_search as ts
 
-            kind = getattr(movie, "media_type", "movie")
+            # Use "anime" kind if mal_id present, else defer to media_type
+            if getattr(movie, "mal_id", 0):
+                kind = "anime"
+            else:
+                kind = getattr(movie, "media_type", "movie")
             found: list = []
             errors: list[str] = []
 
