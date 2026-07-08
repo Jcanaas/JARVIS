@@ -1836,13 +1836,27 @@ class _CalendarDayCell(QFrame):
 
 
 class AnimeModePanel(MoviesModePanel):
-    """Anime discovery and streaming — same UI as Movies but backed by Nyaa/Torrentio-nyaa."""
+    """Anime discovery — Jikan (MyAnimeList) backed by Nyaa/Torrentio with anime aesthetic."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         # Relabel after MoviesModePanel.__init__ built the widgets.
         self._title.setText("Anime")
+        self._title.setStyleSheet(
+            f"color: #FF6B9D; background: transparent; font-weight: 900; font-size: 28px; "
+            f"text-shadow: 0 2px 8px rgba(255, 107, 157, 0.3);"
+        )
         self._search.setPlaceholderText("Buscar anime…")
+        # Anime-specific color scheme: hot pink glow
+        self._back_btn.setStyleSheet(
+            f"background:{C.PANEL2}; border:1px solid #FF6B9D; border-radius:6px; "
+            f"color:#FF6B9D; font-weight:700;"
+        )
+        self._back_btn.setIcon(_line_icon("chevron_left", "#FF6B9D", 20))
+        self.setStyleSheet(
+            f"{self.styleSheet()}\n"
+            f"QLabel#AnimeSection {{ color: #FF6B9D; }}\n"
+        )
 
     # ------------------------------------------------------------------
     # Overridden data sources
