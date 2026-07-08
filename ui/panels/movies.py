@@ -2984,10 +2984,12 @@ class AnimeModePanel(MoviesModePanel):
         self._set_status(message)
 
     def _search_and_play(self, anime, episode: int = 0):
-        """Like MoviesModePanel but uses Nyaa via Torrentio + torlink --kind anime.
+        """Anime torrents via torlink only (Nyaa RSS + SubsPlease JSON API).
 
-        Jikan results have tmdb_id=0; in that case we do a title-based TMDB lookup
-        to resolve the IMDb id needed by Torrentio.
+        Mirrors torlink's own Anime source group — no IMDb/TMDB/Torrentio
+        detour. torlink queries the anime trackers directly by title (plus the
+        episode number when one is requested) and returns the release names as
+        the sources publish them.
         """
         ep_txt = f" ep {episode}" if episode else ""
         self._set_status(f"Buscando torrents de «{anime.title}»{ep_txt}…")
@@ -2997,47 +2999,16 @@ class AnimeModePanel(MoviesModePanel):
             import re
             from actions import torrent_search as ts
 
-            kind = getattr(anime, "media_type", "tv")
             found: list = []
             errors: list[str] = []
 
-            # Resolve IMDb id — Jikan results have tmdb_id=0 so fall back to
-            # a TMDB title search to bridge Jikan → Torrentio.
-            try:
-                from actions import movie_search as ms
-                tmdb_id = getattr(anime, "tmdb_id", 0)
-                if tmdb_id:
-                    imdb = ms.get_imdb_id(tmdb_id, kind=kind)
-                else:
-                    imdb = ms.get_imdb_id_by_title(title, kind="tv")
-            except Exception as exc:
-                imdb = ""
-                errors.append(f"imdb_id: {exc}")
-
-            if imdb:
-                self._status_sig.emit(
-                    f"Buscando «{anime.title}»{ep_txt} en Nyaa via Torrentio ({imdb})…"
-                )
-                try:
-                    from actions import torrentio
-                    results = torrentio.search_anime(
-                        imdb, kind=kind, episode=episode, limit=15
-                    )
-                    for s in results:
-                        found.append(ts.Torrent(
-                            title=s.title, magnet=s.magnet, seeders=s.seeders,
-                            leechers=0, size=s.size, spanish=s.spanish,
-                            provider=s.provider or "Nyaa/Torrentio"))
-                except Exception as exc:
-                    errors.append(f"torrentio-nyaa: {exc}")
-            else:
-                errors.append("sin IMDb id → Torrentio-Nyaa omitido")
-
-            # Source 2: torlink --kind anime (Nyaa RSS + 1337x Anime category).
+            # torlink --kind anime: Nyaa (full-text RSS) + SubsPlease (JSON API,
+            # keyed by show + episode). Pass "title episode" so Nyaa narrows to
+            # the requested episode; SubsPlease matches the show name.
             try:
                 query = f"{title} {episode}" if episode else title
-                self._status_sig.emit(f"Buscando «{query}» en Nyaa/1337x…")
-                found.extend(ts.search(query, kind="anime", limit=10))
+                self._status_sig.emit(f"Buscando «{query}» en Nyaa/SubsPlease…")
+                found.extend(ts.search(query, kind="anime", limit=15))
             except Exception as exc:
                 errors.append(f"torlink-anime: {exc}")
 
