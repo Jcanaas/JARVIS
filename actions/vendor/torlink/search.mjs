@@ -1,8 +1,10 @@
 // Vendored torrent-search sources, adapted from torlink (baairon/torlink, MIT).
 // https://github.com/baairon/torlink — search-only subset (no TUI, no download
-// engine): YTS, The Pirate Bay and 1337x, each returning a normalized
-// TorrentResult. Invoked by actions/torrent_search.py as a subprocess:
-//   node search.mjs "<query>" --kind movie|tv --limit N
+// engine): YTS, The Pirate Bay, 1337x, Nyaa and SubsPlease, each returning a
+// normalized TorrentResult. The anime path (--kind anime) mirrors torlink's own
+// Anime source group (Nyaa + SubsPlease) so it returns the same releases.
+// Invoked by actions/torrent_search.py as a subprocess:
+//   node search.mjs "<query>" --kind movie|tv|anime --limit N
 // and prints a JSON array to stdout.
 
 import net from "node:net";
@@ -232,6 +234,59 @@ async function searchNyaa(query, extraCat = null) {
   return out;
 }
 
+// --- SubsPlease (anime) -----------------------------------------------------
+// SubsPlease is a dedicated anime release group with a clean JSON API keyed by
+// show + episode. Ported 1:1 from torlink (baairon/torlink) so results match.
+// The API has no swarm data, so every result reports seeders: 0.
+const SP_API = "https://subsplease.org/api/";
+const SP_RES_PREFERENCE = ["1080", "720", "480"];
+
+function _spPickBest(downloads) {
+  for (const res of SP_RES_PREFERENCE) {
+    const d = downloads.find((d) => d.res === res && d.magnet);
+    if (d) return d;
+  }
+  return downloads.find((d) => d.magnet);
+}
+
+async function searchSubsplease(query) {
+  const q = (query || "").trim();
+  const params = new URLSearchParams({ tz: "UTC" });
+  if (q) {
+    params.set("f", "search");
+    params.set("s", q);
+  } else {
+    params.set("f", "latest");
+  }
+  const res = await fetchWithRetries(`${SP_API}?${params.toString()}`, {}, 1);
+  const json = await res.json();
+  // The API returns an object keyed by show id, or [] when there are no matches.
+  if (!json || Array.isArray(json)) return [];
+
+  const out = [];
+  for (const entry of Object.values(json)) {
+    const dl = _spPickBest(entry.downloads ?? []);
+    if (!dl || !dl.magnet) continue;
+    const m = dl.magnet.match(/btih:([a-fA-F0-9]+)/i);
+    if (!m) continue;
+    const infoHash = m[1].toLowerCase();
+    const show = entry.show ?? "Unknown";
+    const ep = entry.episode ? ` - ${entry.episode}` : "";
+    const name = `${show}${ep} [${dl.res ?? "?"}p]`;
+    const sizeMatch = dl.magnet.match(/[?&]xl=(\d+)/);
+    out.push({
+      name,
+      infoHash,
+      source: "subsplease",
+      sizeBytes: sizeMatch ? Number(sizeMatch[1]) : 0,
+      seeders: 0,
+      leechers: 0,
+      magnet: buildMagnet(infoHash, name),
+    });
+  }
+  return out;
+}
+
 // --- 1337x (movies + tv) ---------------------------------------------------
 const X1337_HOSTS = ["1337x.to", "1337x.st", "x1337x.ws", "1337xx.to"];
 const STOP = new Set(["the", "a", "an", "of", "and", "or", "to"]);
@@ -354,12 +409,15 @@ async function main() {
 
   let sources;
   if (kind === "anime") {
-    // Nyaa is the dominant anime tracker; 1337x Anime category as fallback.
-    // Also query Nyaa with non-English-translated category to surface
-    // Spanish/European subtitle releases.
+    // Mirror torlink's Anime source group (Nyaa + SubsPlease) so results match,
+    // plus extra Nyaa passes and 1337x Anime for broader coverage.
+    // Nyaa is the dominant anime tracker; SubsPlease is a dedicated release
+    // group keyed by show + episode; 1337x Anime as fallback. The 1_3 pass
+    // (non-English-translated) surfaces Spanish/European subtitle releases.
     sources = [
       searchNyaa(query),
       searchNyaa(query, "1_3"),    // non-English-translated (includes Spanish subs)
+      searchSubsplease(query),
       searchX1337(query, "anime"),
     ];
   } else if (kind === "tv") {
