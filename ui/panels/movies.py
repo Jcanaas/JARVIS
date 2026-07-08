@@ -407,6 +407,19 @@ class _SeekSlider(QSlider):
 
 
 
+def _download_image(url: str, timeout: int = 15) -> bytes:
+    """Fetch image bytes with a browser User-Agent.
+
+    Some CDNs (notably media.kitsu.app, which serves anime posters) return HTTP
+    403 for the default 'Python-urllib/x.y' User-Agent, so anime posters showed
+    the 🎬 placeholder. TMDB's CDN doesn't block it, which is why movie posters
+    worked. Sending a browser UA fixes both.
+    """
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    return urllib.request.urlopen(req, timeout=timeout).read()
+
+
 def _round_pixmap(pixmap: "QPixmap", radius: int) -> "QPixmap":
     out = QPixmap(pixmap.size())
     out.fill(Qt.GlobalColor.transparent)
@@ -443,8 +456,7 @@ class _MovieCard(QWidget):
         self.poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if movie.poster_url:
             try:
-                import urllib.request
-                data = urllib.request.urlopen(movie.poster_url).read()
+                data = _download_image(movie.poster_url)
                 pixmap = QPixmap()
                 pixmap.loadFromData(data)
                 if not pixmap.isNull():
@@ -1145,15 +1157,27 @@ class MoviesModePanel(QWidget):
         self._stack = QStackedWidget()
         self._stack.setStyleSheet("background:transparent;")
 
-        # Grid view
+        # Grid view — hero + chips + poster grid scroll together as one page.
         grid_container = QWidget()
         grid_container.setStyleSheet("background:transparent;")
-        grid_lay = QVBoxLayout(grid_container)
+        gc_lay = QVBoxLayout(grid_container)
+        gc_lay.setContentsMargins(0, 0, 0, 0)
+        gc_lay.setSpacing(0)
+
+        self._page_scroll = QScrollArea()
+        self._page_scroll.setStyleSheet("background:transparent; border:none;")
+        self._page_scroll.setWidgetResizable(True)
+        self._page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        page = QWidget()
+        page.setStyleSheet("background:transparent;")
+        grid_lay = QVBoxLayout(page)
         grid_lay.setContentsMargins(0, 0, 0, 0)
         grid_lay.setSpacing(10)
 
-        # Hero banner (featured carousel)
+        # Hero banner (featured carousel) — large, scrolls with the page.
         self._hero = _HeroBanner()
+        self._hero.setFixedHeight(520)
         self._hero.play_clicked.connect(self._search_and_play)
         self._hero.info_clicked.connect(lambda m: self._show_detail.emit(m))
         self._hero.setVisible(False)
@@ -1203,18 +1227,19 @@ class MoviesModePanel(QWidget):
 
         grid_lay.addWidget(chips_row)
 
-        scroll = QScrollArea()
-        scroll.setStyleSheet("background:transparent; border:none;")
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Poster grid — no inner scroll; it grows with content and the whole
+        # page (hero included) scrolls as one, per the requested behaviour.
         self._grid_widget = QWidget()
         self._grid_widget.setObjectName("MovieGrid")
         self._grid_widget.setStyleSheet("background:transparent;")
         self._grid = QGridLayout(self._grid_widget)
         self._grid.setSpacing(14)
         self._grid.setContentsMargins(4, 12, 4, 12)
-        scroll.setWidget(self._grid_widget)
-        grid_lay.addWidget(scroll, 1)
+        grid_lay.addWidget(self._grid_widget)
+        grid_lay.addStretch(1)
+
+        self._page_scroll.setWidget(page)
+        gc_lay.addWidget(self._page_scroll)
         self._stack.addWidget(grid_container)
 
         # Detail view
@@ -1418,8 +1443,9 @@ class MoviesModePanel(QWidget):
             row = i // COLS
             self._grid.addWidget(card, row, col)
 
-        self._grid.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding),
-                          (len(items) // COLS) + 1, 0, 1, COLS)
+        # Scroll back to the top when new results arrive.
+        if hasattr(self, "_page_scroll"):
+            self._page_scroll.verticalScrollBar().setValue(0)
 
     def _on_back(self):
         """Contextual back: from the player, stop it; otherwise go to the grid."""
@@ -1457,8 +1483,7 @@ class MoviesModePanel(QWidget):
         poster_label.setStyleSheet(f"background:{C.DARK}; border-radius:6px;")
         if movie.poster_url:
             try:
-                import urllib.request
-                data = urllib.request.urlopen(movie.poster_url).read()
+                data = _download_image(movie.poster_url)
                 pixmap = QPixmap()
                 pixmap.loadFromData(data)
                 if not pixmap.isNull():
@@ -2821,8 +2846,7 @@ class AnimeModePanel(MoviesModePanel):
             px = None
             if anime.poster_url:
                 try:
-                    import urllib.request
-                    data = urllib.request.urlopen(anime.poster_url, timeout=15).read()
+                    data = _download_image(anime.poster_url)
                     px = QPixmap()
                     px.loadFromData(data)
                 except Exception:
