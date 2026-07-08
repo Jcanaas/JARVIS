@@ -50,8 +50,21 @@ setGlobalDispatcher(
       lookup: (hostname, options, callback) => {
         resolveDoH(hostname)
           .then((ip) => {
-            if (ip) callback(null, ip, net.isIPv6(ip) ? 6 : 4);
-            else dns.lookup(hostname, options, callback);
+            if (ip) {
+              const family = net.isIPv6(ip) ? 6 : 4;
+              // undici's connector calls lookup with { all: true } and expects
+              // the array form [{ address, family }]; Node's plain net path
+              // wants (err, address, family). Returning the scalar form to
+              // undici 6 on Node >=20 throws ERR_INVALID_IP_ADDRESS and breaks
+              // every request, so branch on options.all.
+              if (options && options.all) {
+                callback(null, [{ address: ip, family }]);
+              } else {
+                callback(null, ip, family);
+              }
+            } else {
+              dns.lookup(hostname, options, callback);
+            }
           })
           .catch(() => dns.lookup(hostname, options, callback));
       },
