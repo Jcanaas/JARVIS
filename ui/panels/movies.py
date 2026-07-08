@@ -1634,7 +1634,9 @@ class MoviesModePanel(QWidget):
             try:
                 from actions import vlc_player as vp
 
-                stream_url = vp.start_streaming(torrent.magnet, movie.title)
+                stream_url = vp.start_streaming(
+                    torrent.magnet, movie.title,
+                    file_index=getattr(torrent, "file_idx", -1))
                 # Playback touches Qt widgets, so hand the URL to the main thread.
                 self._stream_ready.emit(stream_url, movie)
             except Exception as e:
@@ -3026,7 +3028,8 @@ class AnimeModePanel(MoviesModePanel):
                 ts.Torrent(
                     title=s.title, magnet=s.magnet, seeders=s.seeders,
                     leechers=0, size=s.size, spanish=s.spanish,
-                    provider=s.provider or "Torrentio")
+                    provider=s.provider or "Torrentio",
+                    file_idx=getattr(s, "file_idx", -1))
                 for s in streams
             ]
             self._torrents_found.emit(torrents, anime)

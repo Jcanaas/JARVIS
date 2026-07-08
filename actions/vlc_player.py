@@ -35,12 +35,15 @@ def _locate_node() -> str:
     )
 
 
-def start_streaming(magnet: str, title: str = "") -> str:
+def start_streaming(magnet: str, title: str = "", file_index: int = -1) -> str:
     """Start a WebTorrent HTTP stream for a magnet link.
 
     Args:
         magnet: Magnet URI
         title: Optional title (unused, kept for API compatibility)
+        file_index: Index of the video file to serve inside the torrent
+            (Torrentio's fileIdx). Essential for season/batch torrents where
+            the requested episode is not the largest file. -1 = pick largest.
 
     Returns:
         HTTP URL to the video stream.
@@ -56,8 +59,11 @@ def start_streaming(magnet: str, title: str = "") -> str:
 
     # No --port: the script binds an ephemeral port and reports the real URL,
     # so repeated plays never clash on a fixed port.
+    cmd = [node, str(_STREAM_SCRIPT), magnet]
+    if file_index is not None and file_index >= 0:
+        cmd += ["--file-index", str(file_index)]
     _stream_process = subprocess.Popen(
-        [node, str(_STREAM_SCRIPT), magnet],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

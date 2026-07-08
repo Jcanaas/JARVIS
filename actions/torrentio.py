@@ -58,6 +58,7 @@ class Stream:
     size: str = ""
     provider: str = ""
     spanish: bool = False
+    file_idx: int = -1  # index of the video file inside the torrent (batches)
 
     def to_dict(self) -> dict:
         return {
@@ -67,6 +68,7 @@ class Stream:
             "size": self.size,
             "provider": self.provider,
             "spanish": self.spanish,
+            "file_idx": self.file_idx,
         }
 
 
@@ -97,6 +99,7 @@ def _parse_stream(item: dict) -> Stream | None:
     if m:
         provider = m.group(1).strip()
 
+    file_idx = item.get("fileIdx")
     return Stream(
         title=name,
         magnet=_build_magnet(info_hash, name),
@@ -104,6 +107,7 @@ def _parse_stream(item: dict) -> Stream | None:
         size=size,
         provider=provider,
         spanish=bool(_SPANISH_RE.search(raw)),
+        file_idx=int(file_idx) if isinstance(file_idx, int) else -1,
     )
 
 

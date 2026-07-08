@@ -33,6 +33,7 @@ class Torrent:
     size: str = ""
     spanish: bool = False  # Castilian/Spanish audio detected in the title
     provider: str = ""     # source label (YTS, 1337x, Peerflix, MejorTorrent…)
+    file_idx: int = -1     # video file index inside the torrent (-1 = largest)
 
     def to_dict(self) -> dict:
         return {
@@ -44,6 +45,7 @@ class Torrent:
             "size": self.size,
             "spanish": self.spanish,
             "provider": self.provider,
+            "file_idx": self.file_idx,
         }
 
 

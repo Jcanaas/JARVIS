@@ -21,11 +21,15 @@ const READY_TIMEOUT_MS = 45000; // metadata must arrive within this window
 function parseArgs(argv) {
   let magnet = "";
   let port = DEFAULT_PORT;
+  let fileIndex = -1; // -1 = unspecified (pick largest)
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--port") port = parseInt(argv[++i], 10) || DEFAULT_PORT;
-    else if (!magnet) magnet = argv[i];
+    else if (argv[i] === "--file-index") {
+      const v = parseInt(argv[++i], 10);
+      fileIndex = Number.isInteger(v) ? v : -1;
+    } else if (!magnet) magnet = argv[i];
   }
-  return { magnet, port };
+  return { magnet, port, fileIndex };
 }
 
 function fail(message) {
@@ -33,7 +37,7 @@ function fail(message) {
   process.exit(1);
 }
 
-const { magnet, port } = parseArgs(process.argv.slice(2));
+const { magnet, port, fileIndex } = parseArgs(process.argv.slice(2));
 if (!magnet) fail("No magnet link provided");
 
 const client = new WebTorrent();
@@ -52,7 +56,17 @@ client.add(magnet, (torrent) => {
   const pool = videos.length ? videos : torrent.files;
   if (!pool.length) fail("Torrent has no playable files");
 
-  const file = pool.reduce((a, b) => (b.length > a.length ? b : a));
+  let file;
+  // --file-index picks a specific file inside the torrent (Torrentio's fileIdx),
+  // which is essential for season/batch torrents where the requested episode is
+  // NOT the largest file. Fall back to the largest video if the index is out of
+  // range or points at a non-video (e.g. an .nfo).
+  if (fileIndex >= 0 && fileIndex < torrent.files.length &&
+      VIDEO_EXT.test(torrent.files[fileIndex].name)) {
+    file = torrent.files[fileIndex];
+  } else {
+    file = pool.reduce((a, b) => (b.length > a.length ? b : a));
+  }
 
   // Deselect everything, then prioritize only the chosen file so we don't waste
   // bandwidth downloading extras (samples, other episodes, etc.).
