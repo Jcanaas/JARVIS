@@ -88,7 +88,12 @@ def search(query: str, kind: str = "movie", limit: int = 10,
         cmd.append("--spanish")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=_TIMEOUT)
+        # The Node script prints UTF-8 JSON (anime titles contain Japanese and
+        # other non-Latin-1 characters). Force UTF-8 decoding — text=True would
+        # default to cp1252 on Windows and raise UnicodeDecodeError on byte 0x81.
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace",
+                                timeout=_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise TorrentSearchError("Torrent search timed out.") from None
 
