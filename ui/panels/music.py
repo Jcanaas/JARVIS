@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import *
 from ..theme import *
 from ..icons import *
 from ..widgets import *
+from ..widgets.inputs import SearchGlowInput
 
 class MusicModePanelV2(QWidget):
     _thumb_sig = pyqtSignal(object, object)
