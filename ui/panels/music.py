@@ -6,6 +6,8 @@ from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 
+from actions import app_settings
+
 from ..theme import *
 from ..icons import *
 from ..widgets import *
