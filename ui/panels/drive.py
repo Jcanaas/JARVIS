@@ -1,4 +1,11 @@
 from __future__ import annotations
+from pathlib import Path
+from PyQt6.QtPdf import QPdfDocument
+import html as html_lib
+import tempfile
+import mimetypes
+import json
+import threading
 
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *

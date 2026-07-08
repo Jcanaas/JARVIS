@@ -1,4 +1,8 @@
 from __future__ import annotations
+from actions.paths import MEMORY_DIR
+import requests
+import hashlib
+import base64
 
 import html as html_lib
 import re
@@ -62,6 +66,30 @@ def _sanitize_email_html_for_qt(html_body: str) -> str:
         flags=re.I,
     )
     return sanitized
+
+
+class _ComposeTextEdit(QTextEdit):
+    """QTextEdit que convierte imágenes/archivos pegados o soltados en adjuntos."""
+
+    files_pasted = pyqtSignal(list)
+
+    def canInsertFromMimeData(self, source) -> bool:
+        if source.hasImage() or source.hasUrls():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source):
+        want = source.hasUrls() or (
+            source.hasImage() and not source.hasText() and not source.hasHtml()
+        )
+        if want:
+            from actions.clipboard_files import mime_to_files
+
+            paths = mime_to_files(source)
+            if paths:
+                self.files_pasted.emit(paths)
+                return
+        super().insertFromMimeData(source)
 
 
 class GmailComposeDialog(QDialog):

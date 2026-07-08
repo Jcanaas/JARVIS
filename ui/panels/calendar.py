@@ -74,6 +74,384 @@ class _CalendarDayCell(QFrame):
 
 
 
+class CalendarEventDialog(QDialog):
+    """Modal para crear, ver y editar un evento de Google Calendar, incluida
+    la gestión de invitados desde la libreta de contactos local
+    (actions.contacts) — Google Calendar no expone una API de contactos con
+    el scope que ya tenemos, así que usamos una libreta propia en su lugar."""
+
+    def __init__(self, parent=None, event: dict | None = None, default_date: _date | None = None):
+        super().__init__(parent)
+        self._event = event or {}
+        self._event_id = self._event.get("id")
+        self._attendees: list[dict] = [
+            {"name": a.get("displayName") or a.get("email"), "email": a.get("email")}
+            for a in (self._event.get("attendees") or [])
+            if a.get("email")
+        ]
+        self._delete_requested = False
+        is_edit = bool(self._event_id)
+
+        self.setWindowTitle("Editar evento" if is_edit else "Nuevo evento")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        self.setStyleSheet(self._style())
+        self._result_payload: dict | None = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(9)
+
+        title = QLabel("Editar evento" if is_edit else "Nuevo evento")
+        title.setObjectName("ComposeTitle")
+        lay.addWidget(title)
+
+        self.title_input = QLineEdit(str(self._event.get("summary") or ""))
+        self.title_input.setObjectName("ComposeField")
+        self.title_input.setPlaceholderText("Título del evento")
+        lay.addWidget(self.title_input)
+
+        start_dt, end_dt = self._resolve_times(default_date)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.date_input = QDateEdit()
+        self.date_input.setObjectName("ComposeField")
+        self.date_input.setCalendarPopup(True)
+        self.date_input.setDate(QDate(start_dt.year, start_dt.month, start_dt.day))
+        row.addWidget(self.date_input, stretch=1)
+        self.start_time = QTimeEdit(QTime(start_dt.hour, start_dt.minute))
+        self.start_time.setObjectName("ComposeField")
+        row.addWidget(self.start_time)
+        self.end_time = QTimeEdit(QTime(end_dt.hour, end_dt.minute))
+        self.end_time.setObjectName("ComposeField")
+        row.addWidget(self.end_time)
+        lay.addLayout(row)
+
+        self.location_input = QLineEdit(str(self._event.get("location") or ""))
+        self.location_input.setObjectName("ComposeField")
+        self.location_input.setPlaceholderText("Ubicación (opcional)")
+        lay.addWidget(self.location_input)
+
+        self.desc_input = QTextEdit(str(self._event.get("description") or ""))
+        self.desc_input.setObjectName("ComposeBody")
+        self.desc_input.setPlaceholderText("Descripción (opcional)")
+        self.desc_input.setFixedHeight(64)
+        lay.addWidget(self.desc_input)
+
+        # -- invitados ------------------------------------------------------
+        attendees_title = QLabel("Invitados")
+        attendees_title.setObjectName("ComposeSectionLabel")
+        lay.addWidget(attendees_title)
+
+        pick_row = QHBoxLayout()
+        pick_row.setSpacing(6)
+        self.contact_combo = QComboBox()
+        self.contact_combo.setObjectName("ComposeField")
+        pick_row.addWidget(self.contact_combo, stretch=1)
+        add_contact_btn = QPushButton("Añadir")
+        add_contact_btn.setObjectName("ComposeAttach")
+        add_contact_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_contact_btn.clicked.connect(self._add_selected_contact)
+        pick_row.addWidget(add_contact_btn)
+        lay.addLayout(pick_row)
+        self._reload_contacts()
+
+        new_row = QHBoxLayout()
+        new_row.setSpacing(6)
+        self.new_name_input = QLineEdit()
+        self.new_name_input.setObjectName("ComposeField")
+        self.new_name_input.setPlaceholderText("Nombre (nuevo invitado)")
+        new_row.addWidget(self.new_name_input, stretch=1)
+        self.new_email_input = QLineEdit()
+        self.new_email_input.setObjectName("ComposeField")
+        self.new_email_input.setPlaceholderText("email@ejemplo.com")
+        self.new_email_input.returnPressed.connect(self._add_new_attendee)
+        new_row.addWidget(self.new_email_input, stretch=1)
+        add_new_btn = QPushButton()
+        add_new_btn.setObjectName("ComposeAttach")
+        add_new_btn.setIcon(_line_icon("plus", C.PRI, 13))
+        add_new_btn.setIconSize(QSize(13, 13))
+        add_new_btn.setFixedSize(30, 30)
+        add_new_btn.setToolTip("Añadir invitado y guardarlo como contacto")
+        add_new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_new_btn.clicked.connect(self._add_new_attendee)
+        new_row.addWidget(add_new_btn)
+        lay.addLayout(new_row)
+
+        self.attendees_list = QListWidget()
+        self.attendees_list.setObjectName("ComposeAttendeesList")
+        self.attendees_list.setMaximumHeight(104)
+        self.attendees_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lay.addWidget(self.attendees_list)
+        self._refresh_attendees_list()
+
+        self.feedback = QLabel("")
+        self.feedback.setObjectName("ComposeFeedback")
+        self.feedback.setWordWrap(True)
+        lay.addWidget(self.feedback)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(6)
+        if is_edit:
+            delete_btn = QPushButton("Eliminar evento")
+            delete_btn.setObjectName("ComposeCancel")
+            delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            delete_btn.clicked.connect(self._request_delete)
+            buttons.addWidget(delete_btn)
+        buttons.addStretch()
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.setObjectName("ComposeCancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(cancel_btn)
+        self.save_btn = QPushButton("Guardar cambios" if is_edit else "Crear evento")
+        self.save_btn.setObjectName("ComposeSend")
+        self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_btn.setIcon(_line_icon("plus", "#0a0e26", 15))
+        self.save_btn.setIconSize(QSize(15, 15))
+        self.save_btn.clicked.connect(self._save)
+        buttons.addWidget(self.save_btn)
+        lay.addLayout(buttons)
+
+    # -- helpers de fecha/hora ----------------------------------------------
+    def _resolve_times(self, default_date: _date | None) -> tuple[_datetime, _datetime]:
+        default_date = default_date or _date.today()
+        fallback_start = _datetime(default_date.year, default_date.month, default_date.day, 9, 0)
+        fallback_end = fallback_start + _timedelta(hours=1)
+        if not self._event:
+            return fallback_start, fallback_end
+        try:
+            from dateutil import parser as dtparser
+            start_raw = str(self._event.get("start") or "")
+            end_raw = str(self._event.get("end") or "")
+            start_dt = dtparser.parse(start_raw).replace(tzinfo=None) if start_raw else fallback_start
+            end_dt = dtparser.parse(end_raw).replace(tzinfo=None) if end_raw else (start_dt + _timedelta(hours=1))
+            return start_dt, end_dt
+        except Exception:
+            return fallback_start, fallback_end
+
+    # -- invitados / contactos -----------------------------------------------
+    def _reload_contacts(self):
+        from actions import contacts as contacts_mod
+        self.contact_combo.clear()
+        self.contact_combo.addItem("Elegir contacto…", "")
+        for c in contacts_mod.list_contacts():
+            email = c.get("email") or ""
+            if any(a["email"].lower() == email.lower() for a in self._attendees):
+                continue
+            name = c.get("name") or email
+            label = f"{name} <{email}>" if name != email else email
+            self.contact_combo.addItem(label, email)
+
+    def _add_selected_contact(self):
+        email = self.contact_combo.currentData()
+        if not email:
+            return
+        from actions import contacts as contacts_mod
+        contact = contacts_mod.find_contact(email) or {"name": email, "email": email}
+        self._add_attendee(contact.get("name") or email, email)
+        self._reload_contacts()
+
+    def _add_new_attendee(self):
+        from actions import contacts as contacts_mod
+        name = self.new_name_input.text().strip()
+        email = self.new_email_input.text().strip()
+        if not contacts_mod.is_valid_email(email):
+            self.feedback.setText("Introduce un email válido para el invitado.")
+            self.feedback.setStyleSheet("color:#FF5E82; background: transparent;")
+            return
+        try:
+            contacts_mod.upsert_contact(name, email)
+        except Exception:
+            pass
+        self._add_attendee(name or email, email)
+        self.new_name_input.clear()
+        self.new_email_input.clear()
+        self.feedback.setText("")
+        self._reload_contacts()
+
+    def _add_attendee(self, name: str, email: str):
+        if any(a["email"].lower() == email.lower() for a in self._attendees):
+            return
+        self._attendees.append({"name": name or email, "email": email})
+        self._refresh_attendees_list()
+
+    def _remove_attendee(self, email: str):
+        self._attendees = [a for a in self._attendees if a["email"].lower() != email.lower()]
+        self._refresh_attendees_list()
+        self._reload_contacts()
+
+    def _refresh_attendees_list(self):
+        self.attendees_list.clear()
+        if not self._attendees:
+            item = QListWidgetItem("Sin invitados.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.attendees_list.addItem(item)
+            return
+        for a in self._attendees:
+            item = QListWidgetItem()
+            self.attendees_list.addItem(item)
+            row = QWidget()
+            row.setStyleSheet("background: rgba(255,255,255,0.04); border-radius: 6px;")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(8, 4, 6, 4)
+            rl.setSpacing(6)
+            text = a["email"] if a["name"] == a["email"] else f"{a['name']}  ·  {a['email']}"
+            label = QLabel(text)
+            label.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px; background: transparent;")
+            rl.addWidget(label, stretch=1)
+            rm_btn = QPushButton()
+            rm_btn.setIcon(_line_icon("close", C.TEXT_DIM, 11))
+            rm_btn.setIconSize(QSize(11, 11))
+            rm_btn.setFixedSize(20, 20)
+            rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            rm_btn.setToolTip("Quitar invitado")
+            rm_btn.setStyleSheet("""
+                QPushButton { background: transparent; border: none; }
+                QPushButton:hover { background: rgba(255,94,130,0.16); border-radius: 5px; }
+            """)
+            rm_btn.clicked.connect(lambda _c=False, em=a["email"]: self._remove_attendee(em))
+            rl.addWidget(rm_btn)
+            item.setSizeHint(row.sizeHint())
+            self.attendees_list.setItemWidget(item, row)
+
+    # -- resultado ------------------------------------------------------------
+    def payload(self) -> dict | None:
+        return self._result_payload
+
+    def delete_requested(self) -> bool:
+        return self._delete_requested
+
+    def event_id(self) -> str | None:
+        return self._event_id
+
+    def _request_delete(self):
+        self._delete_requested = True
+        self.accept()
+
+    def _save(self):
+        title = self.title_input.text().strip()
+        if not title:
+            self.feedback.setText("Escribe un título para el evento.")
+            self.feedback.setStyleSheet("color:#FF5E82; background: transparent;")
+            return
+        d = self.date_input.date()
+        start_t = self.start_time.time()
+        end_t = self.end_time.time()
+        start_dt = _datetime(d.year(), d.month(), d.day(), start_t.hour(), start_t.minute())
+        end_dt = _datetime(d.year(), d.month(), d.day(), end_t.hour(), end_t.minute())
+        if end_dt <= start_dt:
+            end_dt = start_dt + _timedelta(hours=1)
+        self._result_payload = {
+            "summary": title,
+            "start": start_dt.isoformat(),
+            "end": end_dt.isoformat(),
+            "location": self.location_input.text().strip(),
+            "description": self.desc_input.toPlainText().strip(),
+            "attendees": [a["email"] for a in self._attendees],
+        }
+        self.accept()
+
+    def _style(self) -> str:
+        return f"""
+            QDialog {{
+                background: #0a1422;
+                color: {C.TEXT};
+                font-family: "{FONT_UI}", "{FONT_UI_FALLBACK}";
+            }}
+            QLabel#ComposeTitle {{
+                color: #f8fafc; font-size: 18px; font-weight: 900;
+            }}
+            QLabel#ComposeSectionLabel {{
+                color: {C.TEXT_MED};
+                background: transparent;
+                font-size: 10px;
+                font-weight: 800;
+                letter-spacing: 0.5px;
+                margin-top: 4px;
+            }}
+            QLineEdit#ComposeField, QTextEdit#ComposeBody, QDateEdit#ComposeField,
+            QTimeEdit#ComposeField, QComboBox#ComposeField {{
+                background: rgba(3, 9, 17, 0.72);
+                color: #e8ebff;
+                border: 1px solid rgba(182, 196, 255, 0.16);
+                border-radius: 7px;
+                padding: 8px 11px;
+                font-size: 13px;
+                selection-background-color: #5e82ff;
+            }}
+            QLineEdit#ComposeField:focus, QTextEdit#ComposeBody:focus,
+            QDateEdit#ComposeField:focus, QTimeEdit#ComposeField:focus,
+            QComboBox#ComposeField:focus {{
+                border-color: rgba(182, 196, 255, 0.55);
+            }}
+            QListWidget#ComposeAttendeesList {{
+                background: rgba(3, 9, 17, 0.5);
+                border: 1px solid rgba(182, 196, 255, 0.12);
+                border-radius: 7px;
+                padding: 4px;
+            }}
+            QPushButton#ComposeAttach {{
+                background: rgba(255, 255, 255, 0.05);
+                color: #dce1ff;
+                border: 1px solid rgba(182, 196, 255, 0.25);
+                border-radius: 7px;
+                padding: 0 12px;
+                min-height: 30px;
+                font-size: 12px;
+                font-weight: 700;
+            }}
+            QPushButton#ComposeAttach:hover {{
+                background: rgba(94, 130, 255, 0.14);
+                border-color: rgba(182, 196, 255, 0.45);
+            }}
+            QLabel#ComposeFeedback {{
+                color: rgba(188, 198, 238, 0.62);
+                background: transparent;
+                font-size: 11px;
+            }}
+            QPushButton#ComposeSend {{
+                background: {C.PRI};
+                color: #0a0e26;
+                border: none;
+                border-radius: 7px;
+                padding: 0 20px 0 14px;
+                min-height: 34px;
+                font-size: 13px;
+                font-weight: 800;
+            }}
+            QPushButton#ComposeSend:hover {{ background: #a7afff; }}
+            QPushButton#ComposeCancel {{
+                background: rgba(255, 255, 255, 0.05);
+                color: #dce1ff;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 7px;
+                padding: 0 16px;
+                min-height: 34px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QPushButton#ComposeCancel:hover {{ background: rgba(255,255,255,0.09); }}
+        """ + _scrollbar_qss()
+
+
+class _EventRow(QFrame):
+    """Fila clicable de la lista de eventos: abre el modal de detalle/edición
+    al pulsar en cualquier punto salvo en el botón de borrar (que consume su
+    propio evento de clic antes de que llegue aquí)."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.clicked.emit()
+
+
 class CalendarModePanel(QWidget):
     """Modo Calendario: vista mensual respaldada por Google Calendar."""
 

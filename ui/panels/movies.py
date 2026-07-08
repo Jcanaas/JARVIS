@@ -1,4 +1,7 @@
 from __future__ import annotations
+from pathlib import Path
+from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
+import time
 
 import threading
 
@@ -402,6 +405,166 @@ class _SeekSlider(QSlider):
 
 
 
+
+
+class _MovieCard(QWidget):
+    """Clickable movie card with poster, title, and rating."""
+
+    clicked = pyqtSignal(object)  # movie data
+
+    def __init__(self, movie, parent=None):
+        super().__init__(parent)
+        self.movie = movie
+        self.setStyleSheet(f"""
+            _MovieCard {{
+                background:{C.PANEL2}; border-radius:8px;
+                border:1px solid {C.BORDER};
+            }}
+            _MovieCard:hover {{
+                border:1px solid {C.PRI_DIM};
+                background:{C.PANEL};
+            }}
+        """)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 10)
+        lay.setSpacing(8)
+
+        # Poster image
+        self.poster = QLabel()
+        self.poster.setFixedSize(160, 240)
+        self.poster.setStyleSheet(f"background:{C.DARK}; border-radius:4px;")
+        self.poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if movie.poster_url:
+            try:
+                import urllib.request
+                data = urllib.request.urlopen(movie.poster_url).read()
+                pixmap = QPixmap()
+                pixmap.loadFromData(data)
+                if not pixmap.isNull():
+                    pixmap = pixmap.scaledToWidth(160, Qt.TransformationMode.SmoothTransformation)
+                    self.poster.setPixmap(pixmap)
+            except:
+                self.poster.setText("🎬")
+                self.poster.setFont(QFont(FONT_UI, 24))
+        else:
+            self.poster.setText("🎬")
+            self.poster.setFont(QFont(FONT_UI, 24))
+        lay.addWidget(self.poster, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # Title
+        title_label = QLabel(movie.title)
+        title_label.setFont(QFont(FONT_UI, 10, QFont.Weight.Bold))
+        title_label.setStyleSheet(f"color:{C.TEXT}; background:transparent;")
+        title_label.setWordWrap(True)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title_label)
+
+        # Rating + year
+        meta = f"★ {movie.rating:.1f}" if movie.rating else ""
+        if movie.release_year:
+            meta += f" • {movie.release_year}"
+        if meta:
+            meta_label = QLabel(meta)
+            meta_label.setFont(QFont(FONT_UI, 9))
+            meta_label.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent;")
+            meta_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(meta_label)
+
+        lay.addStretch()
+
+    def mousePressEvent(self, ev):
+        self.clicked.emit(self.movie)
+
+
+class _TorrentSelectDialog(QDialog):
+    """Dialog to select a torrent from a list of search results."""
+
+    def __init__(self, torrents: list, parent=None):
+        super().__init__(parent)
+        self.selected_torrent = None
+        self.setWindowTitle("Seleccionar Torrent")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(400)
+
+        lay = QVBoxLayout(self)
+
+        # Info label with a summary of how many are in Spanish.
+        n_es = sum(1 for t in torrents if getattr(t, "spanish", False))
+        info = QLabel(
+            f"Selecciona un torrent  ·  {len(torrents)} resultados, "
+            f"{n_es} en español (marcados en verde arriba):"
+        )
+        info.setStyleSheet(f"color:{C.TEXT_MED};")
+        lay.addWidget(info)
+
+        # Torrent list
+        self._list = QListWidget()
+        self._list.setStyleSheet(f"""
+            QListWidget {{
+                background:{C.PANEL}; color:{C.TEXT};
+                border:1px solid {C.BORDER}; border-radius:6px;
+            }}
+            QListWidget::item {{ padding:12px; border-radius:4px; }}
+            QListWidget::item:hover {{ background:{C.PANEL2}; }}
+            QListWidget::item:selected {{ background:{C.PRI}; color:{C.DARK}; font-weight:bold; }}
+        """)
+        self._list.itemDoubleClicked.connect(self._on_select)
+        lay.addWidget(self._list)
+
+        # Keep the incoming order (Castilian first, then seeders); don't re-sort.
+        for t in torrents:
+            size_str = t.size if t.size else ""
+            provider = getattr(t, "provider", "") or "torrent"
+            is_es = getattr(t, "spanish", False)
+            # Text label (not just a flag emoji, which Qt may not render on
+            # Windows) so Spanish vs. original is unmistakable.
+            lang = "[ESPAÑOL]" if is_es else "[ORIGINAL/VO]"
+            meta = f"📤 {t.seeders} seeders   {size_str}   ·  {provider}"
+            item = QListWidgetItem(f"{lang}  {t.title}\n{meta}")
+            item.setData(Qt.ItemDataRole.UserRole, t)
+            # Colour Spanish results green, others dimmer, so the list scans fast.
+            item.setForeground(QColor("#4ADE80") if is_es else QColor(C.TEXT_DIM))
+            self._list.addItem(item)
+
+        # Buttons
+        btn_lay = QHBoxLayout()
+        btn_lay.addStretch()
+
+        btn_select = QPushButton("Reproducir")
+        btn_select.setFixedHeight(36)
+        btn_select.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_select.setStyleSheet(f"""
+            QPushButton {{
+                background:{C.PRI}; color:{C.DARK};
+                border:none; border-radius:6px; font-weight:bold; padding:0 20px;
+            }}
+            QPushButton:hover {{ background:{C.PRI_DIM}; }}
+        """)
+        btn_select.clicked.connect(self._on_select)
+        btn_lay.addWidget(btn_select)
+
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setFixedHeight(36)
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background:transparent; color:{C.TEXT};
+                border:1px solid {C.BORDER}; border-radius:6px; padding:0 20px;
+            }}
+            QPushButton:hover {{ border-color:{C.PRI}; }}
+        """)
+        btn_cancel.clicked.connect(self.reject)
+        btn_lay.addWidget(btn_cancel)
+
+        lay.addLayout(btn_lay)
+
+    def _on_select(self):
+        item = self._list.currentItem()
+        if item:
+            self.selected_torrent = item.data(Qt.ItemDataRole.UserRole)
+            self.accept()
 
 
 class MoviesModePanel(QWidget):

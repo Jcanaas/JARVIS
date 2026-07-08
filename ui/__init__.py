@@ -64,6 +64,45 @@ from .theme import *
 from .icons import *
 from .widgets import *
 from .panels import *
+from .whatsapp import WhatsAppToast, WhatsAppModePicker, WhatsAppRuleDialog
+
+
+def _compute_initial_window_geometry(
+    default_size: tuple[int, int],
+    screen_geometry: QRect,
+    min_size: tuple[int, int],
+    margin: int = 24,
+) -> QRect:
+    """Compute a window rect that fits the available screen area and stays centered."""
+    try:
+        if not isinstance(screen_geometry, QRect):
+            screen_geometry = QRect(*screen_geometry)
+    except Exception:
+        screen_geometry = QRect(0, 0, *default_size)
+
+    if screen_geometry.isNull():
+        screen_geometry = QRect(0, 0, *default_size)
+
+    margin = max(0, int(margin))
+    usable_w = max(1, screen_geometry.width() - (2 * margin))
+    usable_h = max(1, screen_geometry.height() - (2 * margin))
+
+    default_w, default_h = default_size
+    min_w, min_h = min_size
+
+    target_w = min(default_w, usable_w)
+    if target_w < min_w:
+        target_w = min(min_w, usable_w)
+    target_h = min(default_h, usable_h)
+    if target_h < min_h:
+        target_h = min(min_h, usable_h)
+
+    target_w = max(1, min(target_w, max(1, usable_w)))
+    target_h = max(1, min(target_h, max(1, usable_h)))
+
+    x = screen_geometry.x() + max(0, (screen_geometry.width() - target_w) // 2)
+    y = screen_geometry.y() + max(0, (screen_geometry.height() - target_h) // 2)
+    return QRect(x, y, target_w, target_h)
 
 
 class MainWindow(QMainWindow):
@@ -84,13 +123,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("J.A.R.V.I.S — MARK XXXIX")
         self.setWindowIcon(_build_app_icon())
         self.setMinimumSize(_MIN_W, _MIN_H)
-        self.resize(_DEFAULT_W, _DEFAULT_H)
 
-        screen = QApplication.primaryScreen().availableGeometry()
-        self.move(
-            (screen.width()  - _DEFAULT_W) // 2,
-            (screen.height() - _DEFAULT_H) // 2,
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        screen_geometry = screen.availableGeometry() if screen else QRect(0, 0, _DEFAULT_W, _DEFAULT_H)
+        geometry = _compute_initial_window_geometry(
+            (_DEFAULT_W, _DEFAULT_H),
+            screen_geometry,
+            (_MIN_W, _MIN_H),
+            margin=24,
         )
+        self.setGeometry(geometry)
 
         self.on_text_command  = None
         self.on_download_cancel = None

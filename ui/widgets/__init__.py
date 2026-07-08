@@ -6,6 +6,7 @@ from .log import *
 from .glyphs import *
 from .inputs import *
 from .layouts import FlowLayout
+from .overlays import _CornerGrip, _FloatOverlay, _DetachWindow
 
 __all__ = [
     'HoverGlow', 'pulse_glow', '_SnapshotVeil', '_ANIM_DUR', '_HOVER_DUR',
@@ -16,4 +17,5 @@ __all__ = [
     '_SearchSvgIcon', '_FilterIcon',
     'SearchGlowInput', '_InputMask', '_BlueMask',
     'FlowLayout',
+    '_CornerGrip', '_FloatOverlay', '_DetachWindow',
 ]
