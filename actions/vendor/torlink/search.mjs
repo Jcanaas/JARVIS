@@ -5,6 +5,58 @@
 //   node search.mjs "<query>" --kind movie|tv --limit N
 // and prints a JSON array to stdout.
 
+import net from "node:net";
+import dns from "node:dns";
+import { Agent, setGlobalDispatcher } from "undici";
+
+// --- DNS-over-HTTPS to bypass ISP DNS blocks ------------------------------ //
+// Many ISPs (e.g. in Spain) block torrent trackers (YTS, TPB, 1337x) at the DNS
+// level, so the hosts fail to resolve without a VPN. Resolve every hostname via
+// Cloudflare DoH (reached by IP, so it doesn't depend on the poisoned system
+// DNS) and connect straight to that IP; undici keeps the real hostname for SNI
+// and cert validation, which defeats DNS-based blocks. IP-level blocks would
+// still need a VPN.
+const DOH_IPS = ["1.1.1.1", "1.0.0.1"];
+const dnsCache = new Map();
+
+async function resolveDoH(hostname) {
+  if (net.isIP(hostname)) return hostname;
+  if (dnsCache.has(hostname)) return dnsCache.get(hostname);
+  for (const ip of DOH_IPS) {
+    try {
+      const res = await fetch(
+        `https://${ip}/dns-query?name=${encodeURIComponent(hostname)}&type=A`,
+        { headers: { accept: "application/dns-json" } },
+      );
+      if (!res.ok) continue;
+      const json = await res.json();
+      const ans = (json.Answer || []).find((a) => a.type === 1 && a.data);
+      if (ans) {
+        dnsCache.set(hostname, ans.data);
+        return ans.data;
+      }
+    } catch {
+      // try next resolver
+    }
+  }
+  return null;
+}
+
+setGlobalDispatcher(
+  new Agent({
+    connect: {
+      lookup: (hostname, options, callback) => {
+        resolveDoH(hostname)
+          .then((ip) => {
+            if (ip) callback(null, ip, net.isIPv6(ip) ? 6 : 4);
+            else dns.lookup(hostname, options, callback);
+          })
+          .catch(() => dns.lookup(hostname, options, callback));
+      },
+    },
+  }),
+);
+
 const USER_AGENT = "Mark-XXXIX (+https://github.com/baairon/torlink)";
 
 const TRACKERS = [
@@ -52,11 +104,19 @@ function formatBytes(bytes) {
   return `${n.toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
 }
 
+const FETCH_TIMEOUT_MS = 6000;
+
 async function fetchWithRetries(url, opts = {}, retries = 2) {
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url, { headers: { "User-Agent": USER_AGENT }, ...opts });
+      // AbortSignal.timeout caps each request so a hanging host can't stall the
+      // whole search (Node's fetch has no default timeout).
+      const res = await fetch(url, {
+        headers: { "User-Agent": USER_AGENT },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        ...opts,
+      });
       if (res.ok) return res;
       lastError = new Error(`HTTP ${res.status} for ${url}`);
     } catch (e) {
@@ -68,7 +128,8 @@ async function fetchWithRetries(url, opts = {}, retries = 2) {
 }
 
 // --- YTS (movies) ---------------------------------------------------------
-const YTS_HOSTS = ["yts.mx", "yts.am", "yts.rs"];
+// yts.rs / yts.am resolve; yts.mx currently NXDOMAINs globally — kept last.
+const YTS_HOSTS = ["yts.rs", "yts.am", "yts.mx"];
 
 async function searchYts(query) {
   const params = new URLSearchParams({ limit: "50", query_term: query });
@@ -134,6 +195,43 @@ async function searchPirateBay(query, kind) {
   return out;
 }
 
+// --- Nyaa.si (anime) --------------------------------------------------------
+// Nyaa is the dominant anime tracker. The RSS endpoint returns structured data
+// with infoHash, seeders, leechers and size — no HTML scraping needed.
+// Category 1_0 = all anime; also query 1_3 (non-English-translated) for
+// Spanish-subtitled releases.
+async function searchNyaa(query, extraCat = null) {
+  const cat = extraCat || "1_0";
+  const url = `https://nyaa.si/?page=rss&q=${encodeURIComponent(query)}&c=${cat}&f=0&s=seeders&o=desc`;
+  const res = await fetchWithRetries(url, {}, 1);
+  const text = await res.text();
+  const out = [];
+  for (const block of text.split("<item>").slice(1)) {
+    const title = (
+      block.match(/<title><!\[CDATA\[([^\]]+)\]\]><\/title>/)?.[1] ||
+      block.match(/<title>([^<]+)<\/title>/)?.[1] || ""
+    ).trim();
+    const infoHash = block
+      .match(/<nyaa:infoHash>([a-fA-F0-9]+)<\/nyaa:infoHash>/i)?.[1]?.toLowerCase();
+    if (!infoHash || !title) continue;
+    const seeders = parseInt(
+      block.match(/<nyaa:seeders>(\d+)<\/nyaa:seeders>/i)?.[1] || "0", 10);
+    const leechers = parseInt(
+      block.match(/<nyaa:leechers>(\d+)<\/nyaa:leechers>/i)?.[1] || "0", 10);
+    const rawSize = block.match(/<nyaa:size>([^<]+)<\/nyaa:size>/i)?.[1] || "";
+    out.push({
+      name: title,
+      infoHash,
+      source: "nyaa",
+      sizeBytes: parseSize(rawSize),
+      seeders,
+      leechers,
+      magnet: buildMagnet(infoHash, title),
+    });
+  }
+  return out;
+}
+
 // --- 1337x (movies + tv) ---------------------------------------------------
 const X1337_HOSTS = ["1337x.to", "1337x.st", "x1337x.ws", "1337xx.to"];
 const STOP = new Set(["the", "a", "an", "of", "and", "or", "to"]);
@@ -170,7 +268,7 @@ async function detailMagnet(base, path) {
 }
 
 async function searchX1337(query, kind) {
-  const cat = kind === "tv" ? "TV" : "Movies";
+  const cat = kind === "tv" ? "TV" : kind === "anime" ? "Anime" : "Movies";
   const path = `/category-search/${encodeURIComponent(query).replace(/%20/g, "+")}/${cat}/1/`;
 
   let base = "", html = "", lastError;
@@ -220,12 +318,13 @@ async function searchX1337(query, kind) {
 // --- CLI entry point --------------------------------------------------------
 
 function parseArgs(argv) {
-  const args = { query: "", kind: "movie", limit: 10 };
+  const args = { query: "", kind: "movie", limit: 10, spanish: false };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--kind") args.kind = argv[++i];
     else if (a === "--limit") args.limit = parseInt(argv[++i], 10) || 10;
+    else if (a === "--spanish") args.spanish = true;
     else if (a === "--json") continue;
     else rest.push(a);
   }
@@ -233,39 +332,98 @@ function parseArgs(argv) {
   return args;
 }
 
+// Marks a release title as Castilian/Spanish audio. LAT (Latino) is treated as
+// Spanish too but ranked below Castilian by the caller if needed.
+const SPANISH_RE = /\b(castellano|español|espanol|spanish|espa\b|cast\b|dual)\b/i;
+
+function isSpanish(name) {
+  return SPANISH_RE.test(name || "");
+}
+
+// Overall budget for the whole search. Sources that haven't answered by then are
+// abandoned and we return whatever already arrived, so one slow tracker can't
+// stall the result.
+const OVERALL_TIMEOUT_MS = 9000;
+
 async function main() {
-  const { query, kind, limit } = parseArgs(process.argv.slice(3)); // skip "node search.mjs search"
+  const { query, kind, limit, spanish } = parseArgs(process.argv.slice(3)); // skip "node search.mjs search"
   if (!query) {
     console.error("Empty query");
     process.exit(1);
   }
 
-  const sources = kind === "tv"
-    ? [searchPirateBay(query, "tv"), searchX1337(query, "tv")]
-    : [searchYts(query), searchPirateBay(query, "movie"), searchX1337(query, "movie")];
-
-  const settled = await Promise.allSettled(sources);
-  const merged = [];
-  for (const s of settled) {
-    if (s.status === "fulfilled") merged.push(...s.value);
+  let sources;
+  if (kind === "anime") {
+    // Nyaa is the dominant anime tracker; 1337x Anime category as fallback.
+    // Also query Nyaa with non-English-translated category to surface
+    // Spanish/European subtitle releases.
+    sources = [
+      searchNyaa(query),
+      searchNyaa(query, "1_3"),    // non-English-translated (includes Spanish subs)
+      searchX1337(query, "anime"),
+    ];
+  } else if (kind === "tv") {
+    sources = [searchPirateBay(query, "tv"), searchX1337(query, "tv")];
+  } else {
+    sources = [searchYts(query), searchPirateBay(query, "movie"), searchX1337(query, "movie")];
   }
+
+  // When Spanish is requested (non-anime), add extra passes with a
+  // "castellano" hint — Castilian releases tag the title and don't surface on
+  // a plain (English) query.
+  if (spanish && kind !== "anime") {
+    const esQuery = `${query} castellano`;
+    sources.push(searchX1337(esQuery, kind === "tv" ? "tv" : "movie"));
+    sources.push(searchPirateBay(esQuery, kind === "tv" ? "tv" : "movie"));
+  }
+
+  // Each source resolves to its own results, or [] on failure — never rejects —
+  // so Promise.all settles as soon as every source has either answered or timed
+  // out. A global timer races it to cap the total wait.
+  const merged = [];
+  const collect = Promise.all(
+    sources.map((p) =>
+      p.then((rows) => merged.push(...rows)).catch(() => {}),
+    ),
+  );
+  const budget = new Promise((resolve) => setTimeout(resolve, OVERALL_TIMEOUT_MS));
+  await Promise.race([collect, budget]);
 
   if (merged.length === 0) {
     console.error("No results from any source");
     process.exit(1);
   }
 
-  merged.sort((a, b) => b.seeders - a.seeders);
-  const top = merged.slice(0, limit).map((r) => ({
+  // De-duplicate by infohash (same release can appear across sources/passes).
+  const seen = new Set();
+  const unique = [];
+  for (const r of merged) {
+    if (seen.has(r.infoHash)) continue;
+    seen.add(r.infoHash);
+    r.spanish = isSpanish(r.name);
+    unique.push(r);
+  }
+
+  // Rank: when Spanish is requested, Castilian releases first, then by seeders.
+  unique.sort((a, b) => {
+    if (spanish && a.spanish !== b.spanish) return a.spanish ? -1 : 1;
+    return b.seeders - a.seeders;
+  });
+
+  const top = unique.slice(0, limit).map((r) => ({
     name: r.name,
     magnet: r.magnet,
     seeders: r.seeders,
     leechers: r.leechers,
     size: formatBytes(r.sizeBytes),
     source: r.source,
+    spanish: !!r.spanish,
   }));
 
   process.stdout.write(JSON.stringify(top));
+  // Force exit: abandoned fetches from slow sources may still be pending and
+  // would otherwise keep the event loop alive past the result being ready.
+  process.exit(0);
 }
 
 main().catch((e) => {

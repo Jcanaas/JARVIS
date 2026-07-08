@@ -1,0 +1,14 @@
+{
+  "name": "jarvis-webtorrent-stream",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal WebTorrent HTTP streaming server for Jarvis movie playback.",
+  "main": "stream.mjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "webtorrent": "^2.4.1"
+  }
+}

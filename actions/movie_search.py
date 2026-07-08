@@ -19,7 +19,8 @@ from actions.paths import config_path, memory_path
 
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG_BASE = "https://image.tmdb.org/t/p/w342"  # 342px width (mobile-friendly)
-_TIMEOUT = 15
+TMDB_BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"  # wide image for hero banners
+_TIMEOUT = 5  # TMDB is fast, 5s is plenty
 _CACHE_DIR = memory_path("tmdb_cache")
 
 
@@ -38,6 +39,9 @@ class Movie:
     overview: str = ""
     rating: float = 0.0  # IMDb-style 0-10
     media_type: str = "movie"  # "movie" | "tv"
+    mal_id: int = 0          # MyAnimeList id (0 for non-Jikan results)
+    total_episodes: int = 0  # Total episode count (anime only, from Jikan)
+    backdrop_url: str = ""   # Wide/landscape image for hero banner
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -85,6 +89,11 @@ def _parse_movie(data: dict, media_type: str = "movie") -> Optional[Movie]:
             overview=data.get("overview", ""),
             rating=float(data.get("vote_average", 0) or 0),
             media_type=media_type,
+            backdrop_url=(
+                f"{TMDB_BACKDROP_BASE}{data['backdrop_path']}"
+                if data.get("backdrop_path")
+                else ""
+            ),
         )
     except (KeyError, ValueError, TypeError):
         return None
@@ -172,6 +181,104 @@ def get_details(tmdb_id: int, kind: str = "movie") -> Optional[Movie]:
     url = f"{TMDB_API_BASE}/{kind}/{tmdb_id}"
     data = _http_get(url, {"api_key": api_key, "language": "es-ES"})
     return _parse_movie(data, kind)
+
+
+def get_imdb_id_by_title(title: str, kind: str = "tv") -> str:
+    """Resolve an IMDb id by searching TMDB for the title.
+
+    Used when we have an anime title from Jikan (no TMDB id) and need an IMDb
+    id for Torrentio. Returns "" if no match or API key missing.
+    """
+    try:
+        results = search(title, kind=kind, limit=1)
+        if results:
+            return get_imdb_id(results[0].tmdb_id, kind=kind)
+    except Exception:
+        pass
+    return ""
+
+
+def get_imdb_id(tmdb_id: int, kind: str = "movie") -> str:
+    """Fetch the IMDb id (tt…) for a TMDB movie/TV id.
+
+    Torrentio and similar indexers key on IMDb ids, so this bridges a TMDB
+    result to them. Returns "" if unavailable.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        return ""
+    try:
+        url = f"{TMDB_API_BASE}/{kind}/{tmdb_id}/external_ids"
+        data = _http_get(url, {"api_key": api_key})
+        return data.get("imdb_id") or ""
+    except MovieSearchError:
+        return ""
+
+
+def search_anime(query: str, limit: int = 12) -> list[Movie]:
+    """Search TMDB for anime series/movies by title."""
+    api_key = _get_api_key()
+    if not api_key:
+        raise MovieSearchError("TMDB API key not configured.")
+    query = query.strip()
+    if not query:
+        raise MovieSearchError("Empty search query.")
+    url = f"{TMDB_API_BASE}/search/tv"
+    data = _http_get(url, {"api_key": api_key, "query": query, "language": "es-ES",
+                           "include_adult": "false", "page": 1})
+    results: list[Movie] = []
+    for item in data.get("results", [])[:limit]:
+        movie = _parse_movie(item, "tv")
+        if movie and movie.title:
+            results.append(movie)
+    if not results:
+        raise MovieSearchError(f"No anime found for '{query}'.")
+    return results
+
+
+def get_trending_anime(limit: int = 12) -> list[Movie]:
+    """Fetch popular anime via TMDB discover (animation + Japanese origin)."""
+    api_key = _get_api_key()
+    if not api_key:
+        raise MovieSearchError("TMDB API key not configured.")
+    url = f"{TMDB_API_BASE}/discover/tv"
+    data = _http_get(url, {
+        "api_key": api_key, "language": "es-ES",
+        "with_genres": "16", "with_original_language": "ja",
+        "with_keywords": "210024",   # keyword 210024 = "anime" tag on TMDB
+        "include_adult": "false",
+        "vote_count.gte": "200",     # hentai has <100 votes; real anime has thousands
+        "sort_by": "popularity.desc", "page": 1,
+    })
+    results: list[Movie] = []
+    for item in data.get("results", [])[:limit]:
+        movie = _parse_movie(item, "tv")
+        if movie and movie.title:
+            results.append(movie)
+    return results
+
+
+def get_airing_anime(limit: int = 12) -> list[Movie]:
+    """Fetch currently airing anime (returning series, Japanese animation)."""
+    api_key = _get_api_key()
+    if not api_key:
+        raise MovieSearchError("TMDB API key not configured.")
+    url = f"{TMDB_API_BASE}/discover/tv"
+    data = _http_get(url, {
+        "api_key": api_key, "language": "es-ES",
+        "with_genres": "16", "with_original_language": "ja",
+        "with_keywords": "210024",   # keyword 210024 = "anime"
+        "include_adult": "false",
+        "vote_count.gte": "50",      # lower threshold for currently airing (fewer votes yet)
+        "with_status": "0",  # 0 = returning / currently airing
+        "sort_by": "popularity.desc", "page": 1,
+    })
+    results: list[Movie] = []
+    for item in data.get("results", [])[:limit]:
+        movie = _parse_movie(item, "tv")
+        if movie and movie.title:
+            results.append(movie)
+    return results
 
 
 def search_action(parameters: dict) -> str:
