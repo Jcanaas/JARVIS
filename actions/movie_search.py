@@ -19,6 +19,7 @@ from actions.paths import config_path, memory_path
 
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG_BASE = "https://image.tmdb.org/t/p/w342"  # 342px width (mobile-friendly)
+TMDB_BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"  # wide image for hero banners
 _TIMEOUT = 5  # TMDB is fast, 5s is plenty
 _CACHE_DIR = memory_path("tmdb_cache")
 
@@ -38,6 +39,9 @@ class Movie:
     overview: str = ""
     rating: float = 0.0  # IMDb-style 0-10
     media_type: str = "movie"  # "movie" | "tv"
+    mal_id: int = 0          # MyAnimeList id (0 for non-Jikan results)
+    total_episodes: int = 0  # Total episode count (anime only, from Jikan)
+    backdrop_url: str = ""   # Wide/landscape image for hero banner
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -85,6 +89,11 @@ def _parse_movie(data: dict, media_type: str = "movie") -> Optional[Movie]:
             overview=data.get("overview", ""),
             rating=float(data.get("vote_average", 0) or 0),
             media_type=media_type,
+            backdrop_url=(
+                f"{TMDB_BACKDROP_BASE}{data['backdrop_path']}"
+                if data.get("backdrop_path")
+                else ""
+            ),
         )
     except (KeyError, ValueError, TypeError):
         return None

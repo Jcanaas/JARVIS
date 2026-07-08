@@ -29,6 +29,7 @@ class SettingsModePanel(QWidget):
         ("Ecualizador", "equalizer"),
         ("YouTube",    "youtube"),
         ("WhatsApp",   "whatsapp"),
+        ("Anime",      "anime"),
         ("Gmail",      "empty"),
         ("Drive",      "empty"),
         ("General",    "profile"),
@@ -98,6 +99,7 @@ class SettingsModePanel(QWidget):
             "equalizer": self._build_equalizer_page,
             "youtube": self._build_youtube_page,
             "whatsapp": self._build_whatsapp_page,
+            "anime": self._build_anime_page,
             "appearance": self._build_appearance_page,
             "startup": self._build_startup_page,
             "profile": self._build_profile_page,
@@ -1203,6 +1205,28 @@ class SettingsModePanel(QWidget):
             body, "Ventana siempre encima",
             "Mantiene la ventana de JARVIS por encima del resto.",
             self._ontop_switch,
+        )
+
+        l.addWidget(card)
+        l.addStretch(1)
+        return w
+
+    def _build_anime_page(self) -> QWidget:
+        from actions.anime_search import get_sfw, set_sfw
+        w = QWidget()
+        w.setStyleSheet("QWidget { border: none; background: transparent; }")
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(14)
+
+        card, body = self._make_card("CONTENIDO")
+
+        sfw_switch = ToggleSwitch(bool(get_sfw()))
+        sfw_switch.toggled.connect(lambda v: set_sfw(v))
+        self._add_row(
+            body, "Modo seguro (SFW)",
+            "Oculta contenido adulto/hentai en tendencias, búsqueda y géneros.",
+            sfw_switch, first=True,
         )
 
         l.addWidget(card)

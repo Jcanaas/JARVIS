@@ -407,34 +407,39 @@ class _SeekSlider(QSlider):
 
 
 
+def _round_pixmap(pixmap: "QPixmap", radius: int) -> "QPixmap":
+    out = QPixmap(pixmap.size())
+    out.fill(Qt.GlobalColor.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(pixmap.rect()), radius, radius)
+    p.setClipPath(path)
+    p.drawPixmap(0, 0, pixmap)
+    p.end()
+    return out
+
+
 class _MovieCard(QWidget):
-    """Clickable movie card with poster, title, and rating."""
+    """Clickable movie card — Netflix mockup style: rounded poster, hover fade."""
 
     clicked = pyqtSignal(object)  # movie data
+
+    _W, _H = 148, 200
 
     def __init__(self, movie, parent=None):
         super().__init__(parent)
         self.movie = movie
-        self.setStyleSheet(f"""
-            _MovieCard {{
-                background:{C.PANEL2}; border-radius:8px;
-                border:1px solid {C.BORDER};
-            }}
-            _MovieCard:hover {{
-                border:1px solid {C.PRI_DIM};
-                background:{C.PANEL};
-            }}
-        """)
+        self.setStyleSheet("background:transparent;")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 8, 8, 10)
-        lay.setSpacing(8)
+        lay.setContentsMargins(0, 0, 0, 7)
+        lay.setSpacing(7)
 
-        # Poster image
         self.poster = QLabel()
-        self.poster.setFixedSize(160, 240)
-        self.poster.setStyleSheet(f"background:{C.DARK}; border-radius:4px;")
+        self.poster.setFixedSize(self._W, self._H)
+        self.poster.setStyleSheet("background:#1a2226; border-radius:13px;")
         self.poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if movie.poster_url:
             try:
@@ -443,36 +448,55 @@ class _MovieCard(QWidget):
                 pixmap = QPixmap()
                 pixmap.loadFromData(data)
                 if not pixmap.isNull():
-                    pixmap = pixmap.scaledToWidth(160, Qt.TransformationMode.SmoothTransformation)
-                    self.poster.setPixmap(pixmap)
-            except:
+                    scaled = pixmap.scaled(
+                        self._W, self._H,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    x = (scaled.width() - self._W) // 2
+                    y = (scaled.height() - self._H) // 2
+                    cropped = scaled.copy(x, y, self._W, self._H)
+                    self.poster.setPixmap(_round_pixmap(cropped, 13))
+            except Exception:
                 self.poster.setText("🎬")
                 self.poster.setFont(QFont(FONT_UI, 24))
         else:
             self.poster.setText("🎬")
             self.poster.setFont(QFont(FONT_UI, 24))
-        lay.addWidget(self.poster, alignment=Qt.AlignmentFlag.AlignHCenter)
+        lay.addWidget(self.poster)
 
-        # Title
         title_label = QLabel(movie.title)
-        title_label.setFont(QFont(FONT_UI, 10, QFont.Weight.Bold))
-        title_label.setStyleSheet(f"color:{C.TEXT}; background:transparent;")
+        title_label.setFont(QFont("Inter", 9, QFont.Weight.DemiBold))
+        title_label.setStyleSheet("color:#f4f4f2; background:transparent;")
         title_label.setWordWrap(True)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title_label)
 
-        # Rating + year
-        meta = f"★ {movie.rating:.1f}" if movie.rating else ""
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(6)
         if movie.release_year:
-            meta += f" • {movie.release_year}"
-        if meta:
-            meta_label = QLabel(meta)
-            meta_label.setFont(QFont(FONT_UI, 9))
-            meta_label.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent;")
-            meta_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lay.addWidget(meta_label)
+            year_lbl = QLabel(str(movie.release_year))
+            year_lbl.setFont(QFont("Inter", 8))
+            year_lbl.setStyleSheet("color:#9aa6ab; background:transparent;")
+            meta_row.addWidget(year_lbl)
+        if movie.rating:
+            rating_lbl = QLabel(f"★ {movie.rating:.1f}")
+            rating_lbl.setFont(QFont("Inter", 8, QFont.Weight.DemiBold))
+            rating_lbl.setStyleSheet("color:#f1c64a; background:transparent;")
+            meta_row.addWidget(rating_lbl)
+        meta_row.addStretch(1)
+        lay.addLayout(meta_row)
 
-        lay.addStretch()
+        self._opacity_fx = QGraphicsOpacityEffect(self)
+        self._opacity_fx.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_fx)
+
+    def enterEvent(self, ev):
+        self._opacity_fx.setOpacity(0.82)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._opacity_fx.setOpacity(1.0)
+        super().leaveEvent(ev)
 
     def mousePressEvent(self, ev):
         self.clicked.emit(self.movie)
@@ -567,6 +591,434 @@ class _TorrentSelectDialog(QDialog):
             self.accept()
 
 
+class _UserAvatar(QWidget):
+    """Circular avatar showing user initials. Clickable (emits `clicked`)."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, username: str, parent=None):
+        super().__init__(parent)
+        self.username = username
+        self.setFixedSize(40, 40)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_username(self, username: str):
+        self.username = username
+        self.update()
+
+    def mousePressEvent(self, ev):
+        self.clicked.emit()
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        path = QPainterPath()
+        path.addEllipse(0, 0, 40, 40)
+        p.setClipPath(path)
+
+        grad = QLinearGradient(0, 0, 40, 40)
+        grad.setColorAt(0.0, QColor("#3a4a52"))
+        grad.setColorAt(1.0, QColor("#273035"))
+        p.fillRect(self.rect(), grad)
+
+        initials = "".join(w[0].upper() for w in self.username.split())[:2]
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setFont(QFont("Inter", 11, QFont.Weight.Bold))
+        p.setPen(QPen(QColor("#f4f4f2")))
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, initials or "?")
+
+
+class _HeroSearchGlyph(QWidget):
+    """Small grey magnifier icon for the mockup-style search bar."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(18, 18)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#9aa6ab"), 1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(2.5, 2.5, 10, 10))
+        p.drawLine(QPointF(15.5, 15.5), QPointF(11.5, 11.5))
+
+
+class _HeroBanner(QWidget):
+    """Featured banner — mockup style: rounded corners, meta chips on top,
+    carousel dots, circular play button with title, and a heart button."""
+
+    play_clicked = pyqtSignal(object)   # movie/anime
+    info_clicked = pyqtSignal(object)
+    _bg_ready = pyqtSignal(int, QImage)  # (carousel index, backdrop image)
+
+    _RADIUS = 18
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(420)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._items: list = []
+        self._index = 0
+        self._pixmaps: dict[int, QPixmap] = {}
+        self._pixmap: "QPixmap | None" = None
+        self._movie = None
+        self._liked: set = set()
+        self._dot_btns: list = []
+        self._bg_ready.connect(self._on_bg_ready)
+        self._build()
+        self._timer = QTimer(self)
+        self._timer.setInterval(8000)
+        self._timer.timeout.connect(self._advance)
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 16, 18, 18)
+        outer.setSpacing(0)
+
+        # Top row: meta chips left, carousel dots right
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self._chips_box = QWidget()
+        self._chips_box.setStyleSheet("background:transparent;")
+        chips_lay = QHBoxLayout(self._chips_box)
+        chips_lay.setContentsMargins(0, 0, 0, 0)
+        chips_lay.setSpacing(8)
+        top.addWidget(self._chips_box)
+        top.addStretch(1)
+        self._dots_box = QWidget()
+        self._dots_box.setStyleSheet("background:transparent;")
+        dots_lay = QHBoxLayout(self._dots_box)
+        dots_lay.setContentsMargins(0, 4, 4, 0)
+        dots_lay.setSpacing(6)
+        top.addWidget(self._dots_box, 0, Qt.AlignmentFlag.AlignTop)
+        outer.addLayout(top)
+
+        outer.addStretch(1)
+
+        # Bottom row: ⏵ circle + title/subtitle left, heart right
+        bottom = QHBoxLayout()
+        bottom.setSpacing(14)
+
+        self._play_btn = QPushButton("▶")
+        self._play_btn.setFixedSize(46, 46)
+        self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._play_btn.setToolTip("Reproducir")
+        self._play_btn.setStyleSheet("""
+            QPushButton {
+                background:rgba(255,255,255,235); color:#111820;
+                border:none; border-radius:23px;
+                font-size:13pt; padding-left:4px;
+            }
+            QPushButton:hover { background:#ffffff; }
+        """)
+        self._play_btn.clicked.connect(lambda: self.play_clicked.emit(self._movie))
+        bottom.addWidget(self._play_btn)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        self._title_lbl = QLabel("")
+        self._title_lbl.setFont(QFont("Inter", 13, QFont.Weight.DemiBold))
+        self._title_lbl.setStyleSheet("color:#ffffff; background:transparent;")
+        text_col.addWidget(self._title_lbl)
+        self._sub_lbl = QLabel("")
+        self._sub_lbl.setFont(QFont("Inter", 9))
+        self._sub_lbl.setStyleSheet("color:rgba(255,255,255,175); background:transparent;")
+        text_col.addWidget(self._sub_lbl)
+        bottom.addLayout(text_col)
+        bottom.addStretch(1)
+
+        self._like_btn = QPushButton("♡")
+        self._like_btn.setFixedSize(40, 40)
+        self._like_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._like_btn.setToolTip("Me gusta")
+        self._like_btn.clicked.connect(self._toggle_like)
+        bottom.addWidget(self._like_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        self._style_like()
+
+        outer.addLayout(bottom)
+
+    # -- carousel API ---------------------------------------------------
+
+    def set_items(self, items):
+        """Show a rotating featured carousel (grid view)."""
+        self._items = list(items)[:5]
+        self._pixmaps.clear()
+        self._rebuild_dots()
+        if self._items:
+            self._show_index(0)
+        if len(self._items) > 1:
+            self._timer.start()
+        else:
+            self._timer.stop()
+
+    def set_movie(self, movie, pixmap=None):
+        """Show a single fixed item (detail view / legacy callers)."""
+        self._timer.stop()
+        self._items = [movie] if movie else []
+        self._pixmaps = {0: pixmap} if (movie and pixmap) else {}
+        self._rebuild_dots()
+        if movie:
+            self._show_index(0)
+
+    def _show_index(self, i: int):
+        if not self._items:
+            return
+        self._index = i % len(self._items)
+        m = self._items[self._index]
+        self._movie = m
+        self._title_lbl.setText(getattr(m, "title", "") or "")
+        sub = "  ·  ".join(filter(None, [
+            str(m.release_year) if getattr(m, "release_year", 0) else "",
+            f"★ {m.rating:.1f}" if getattr(m, "rating", 0) else "",
+        ]))
+        self._sub_lbl.setText(sub or "Reproducir ahora")
+        self._set_chips(m)
+        self._style_dots()
+        self._style_like()
+        self._pixmap = self._pixmaps.get(self._index)
+        self.update()
+        if self._pixmap is None:
+            url = getattr(m, "backdrop_url", "") or getattr(m, "poster_url", "")
+            if url:
+                self._fetch(self._index, url)
+
+    def _advance(self):
+        if len(self._items) > 1 and self.isVisible():
+            self._show_index(self._index + 1)
+
+    # -- backdrop loading (thread-safe: QImage in worker, QPixmap here) --
+
+    def _fetch(self, index: int, url: str):
+        def work():
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0"}  # Más compatible con CDNs
+                )
+                data = urllib.request.urlopen(req, timeout=15).read()
+                img = QImage()
+                img.loadFromData(data)
+                if not img.isNull():
+                    # Escalar a resolución más alta si es pequeña
+                    if img.width() < 1200:
+                        img = img.scaledToWidth(
+                            1920, Qt.TransformationMode.SmoothTransformation
+                        )
+                    self._bg_ready.emit(index, img)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_bg_ready(self, index: int, img: QImage):
+        px = QPixmap.fromImage(img)
+        self._pixmaps[index] = px
+        if index == self._index:
+            self._pixmap = px
+            self.update()
+
+    # -- subcomponents ---------------------------------------------------
+
+    def _chip_texts(self, m) -> list:
+        out = []
+        eps = int(getattr(m, "total_episodes", 0) or 0)
+        if eps:
+            out.append(f"{eps} eps")
+        if getattr(m, "mal_id", 0):
+            out.append("Anime")
+        else:
+            out.append("Película" if getattr(m, "media_type", "") == "movie" else "Serie")
+        if getattr(m, "release_year", 0):
+            out.append(str(m.release_year))
+        if getattr(m, "rating", 0):
+            out.append(f"★ {m.rating:.1f}")
+        return out
+
+    def _set_chips(self, m):
+        lay = self._chips_box.layout()
+        while lay.count():
+            it = lay.takeAt(0)
+            if it and it.widget():
+                it.widget().deleteLater()
+        for text in self._chip_texts(m):
+            lbl = QLabel(text)
+            lbl.setFont(QFont("Inter", 8, QFont.Weight.DemiBold))
+            lbl.setStyleSheet(
+                "background:rgba(40,48,53,195); color:#e9ece9;"
+                "border:none; border-radius:12px; padding:5px 12px;"
+            )
+            lay.addWidget(lbl)
+
+    def _rebuild_dots(self):
+        lay = self._dots_box.layout()
+        while lay.count():
+            it = lay.takeAt(0)
+            if it and it.widget():
+                it.widget().deleteLater()
+        self._dot_btns = []
+        for i in range(len(self._items)):
+            d = QPushButton("")
+            d.setFixedSize(8, 8)
+            d.setCursor(Qt.CursorShape.PointingHandCursor)
+            d.clicked.connect(lambda _=False, ix=i: self._on_dot(ix))
+            lay.addWidget(d)
+            self._dot_btns.append(d)
+        self._dots_box.setVisible(len(self._items) > 1)
+        self._style_dots()
+
+    def _style_dots(self):
+        for i, d in enumerate(self._dot_btns):
+            on = i == self._index
+            d.setStyleSheet(
+                f"background:{'#ffffff' if on else 'rgba(255,255,255,80)'};"
+                "border:none; border-radius:4px;"
+            )
+
+    def _on_dot(self, ix: int):
+        self._show_index(ix)
+        if self._timer.isActive():
+            self._timer.start()   # restart the rotation countdown
+
+    def _toggle_like(self):
+        key = id(self._movie)
+        if key in self._liked:
+            self._liked.discard(key)
+        else:
+            self._liked.add(key)
+        self._style_like()
+
+    def _style_like(self):
+        liked = id(self._movie) in self._liked
+        self._like_btn.setText("♥" if liked else "♡")
+        self._like_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:rgba(15,22,26,150);
+                color:{'#ff6470' if liked else '#ffffff'};
+                border:1px solid rgba(255,255,255,70);
+                border-radius:20px; font-size:13pt;
+            }}
+            QPushButton:hover {{ background:rgba(255,255,255,40); }}
+        """)
+
+    def mousePressEvent(self, ev):
+        # Clicking the artwork opens the detail view (buttons eat their own clicks).
+        if self._movie is not None:
+            self.info_clicked.emit(self._movie)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # Rounded-corner clip (mockup card look)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), self._RADIUS, self._RADIUS)
+        p.setClipPath(path)
+
+        p.fillRect(self.rect(), QColor("#131a1e"))
+
+        if self._pixmap and not self._pixmap.isNull():
+            scaled = self._pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            p.drawPixmap(x, y, scaled)
+
+        # Gradient overlay: subtle top → dark bottom for text legibility
+        grad = QLinearGradient(0, 0, 0, self.height())
+        grad.setColorAt(0.0, QColor(0, 0, 0, 30))
+        grad.setColorAt(0.55, QColor(0, 0, 0, 70))
+        grad.setColorAt(1.0, QColor(7, 17, 21, 215))
+        p.fillRect(self.rect(), grad)
+        p.end()
+
+
+class _EpisodeRow(QWidget):
+    """Netflix-style episode list item: thumbnail, number badge, title, meta."""
+
+    play_clicked = pyqtSignal(int)  # episode number
+
+    def __init__(self, ep: dict, poster_pixmap=None, parent=None):
+        super().__init__(parent)
+        self._ep = ep
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("""
+            _EpisodeRow { background:transparent; border-radius:8px; }
+            _EpisodeRow:hover { background:rgba(255,255,255,18); }
+        """)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 6, 10, 6)
+        lay.setSpacing(12)
+
+        thumb = QLabel()
+        thumb.setFixedSize(140, 79)
+        thumb.setStyleSheet("background:#1a2226; border-radius:8px;")
+        thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if poster_pixmap and not poster_pixmap.isNull():
+            scaled = poster_pixmap.scaled(
+                140, 79, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = (scaled.width() - 140) // 2
+            y = (scaled.height() - 79) // 2
+            thumb.setPixmap(_round_pixmap(scaled.copy(x, y, 140, 79), 8))
+        else:
+            thumb.setText(str(ep.get("number", "?")))
+            thumb.setFont(QFont("Inter", 14, QFont.Weight.Bold))
+            thumb.setStyleSheet(
+                "background:#1a2226; border-radius:8px; color:#9aa6ab;"
+            )
+        lay.addWidget(thumb)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+        num = ep.get("number", "?")
+        title_lbl = QLabel(f"{num}. {ep.get('title', '')}")
+        title_lbl.setFont(QFont("Inter", 10, QFont.Weight.DemiBold))
+        title_lbl.setStyleSheet("color:#f4f4f2; background:transparent;")
+        title_lbl.setWordWrap(True)
+        text_col.addWidget(title_lbl)
+
+        meta_bits = []
+        if ep.get("aired"):
+            meta_bits.append(ep["aired"])
+        if ep.get("filler"):
+            meta_bits.append("Filler")
+        if ep.get("recap"):
+            meta_bits.append("Recap")
+        if meta_bits:
+            meta_lbl = QLabel("  ·  ".join(meta_bits))
+            meta_lbl.setFont(QFont("Inter", 8))
+            meta_lbl.setStyleSheet("color:#9aa6ab; background:transparent;")
+            text_col.addWidget(meta_lbl)
+        lay.addLayout(text_col, 1)
+
+        play_btn = QPushButton("▶")
+        play_btn.setFixedSize(36, 36)
+        play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        play_btn.setStyleSheet("""
+            QPushButton {
+                background:#273035; color:#f4f4f2; border:none;
+                border-radius:18px; font-size:11pt;
+            }
+            QPushButton:hover { background:#2f3d43; }
+        """)
+        play_btn.clicked.connect(lambda: self.play_clicked.emit(self._ep.get("number", 0)))
+        lay.addWidget(play_btn)
+
+    def mousePressEvent(self, ev):
+        self.play_clicked.emit(self._ep.get("number", 0))
+
+
 class MoviesModePanel(QWidget):
     """Movie/TV discovery with poster grid and detail view."""
 
@@ -607,72 +1059,177 @@ class MoviesModePanel(QWidget):
         QTimer.singleShot(0, self._load_trending)
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(12)
+        self.setStyleSheet("""
+            MoviesModePanel, AnimeModePanel {
+                background:#071115;
+            }
+            QScrollArea { background:transparent; border:none; }
+            QWidget#MovieGrid { background:transparent; }
+            QScrollBar:vertical {
+                background:transparent; width:8px; margin:0;
+            }
+            QScrollBar::handle:vertical {
+                background:#2f3d43; border-radius:4px; min-height:40px;
+            }
+            QScrollBar::handle:vertical:hover { background:#3a4a52; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background:transparent;
+            }
+        """)
+        self.setAutoFillBackground(True)
 
-        # Header
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 10)
+        root.setSpacing(10)
+
+        # Top bar — back, title pill and search bar in one row (mockup)
         header_lay = QHBoxLayout()
+        header_lay.setSpacing(10)
         self._back_btn = QPushButton("←")
-        self._back_btn.setFixedSize(36, 36)
+        self._back_btn.setFixedSize(40, 40)
         self._back_btn.clicked.connect(self._on_back)
         self._back_btn.setVisible(False)
         self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._back_btn.setStyleSheet(f"background:{C.PANEL2}; border:1px solid {C.BORDER}; border-radius:6px;")
+        self._back_btn.setStyleSheet(
+            "background:#273035; border:none; border-radius:12px;"
+            "color:#f4f4f2; font-size:13pt;"
+        )
         header_lay.addWidget(self._back_btn)
 
         self._title = QLabel("Películas y Series")
-        self._title.setFont(QFont(FONT_UI, 15, QFont.Weight.Bold))
-        self._title.setStyleSheet(f"color:{C.TEXT}; background:transparent;")
-        header_lay.addWidget(self._title, stretch=1)
-        header_lay.addStretch()
-        root.addLayout(header_lay)
+        self._title.setFont(QFont("Inter", 10, QFont.Weight.DemiBold))
+        self._title.setFixedHeight(40)
+        self._title.setStyleSheet(
+            "color:#f4f4f2; background:#273035; border:none;"
+            "border-radius:12px; padding:0 16px;"
+        )
+        header_lay.addWidget(self._title)
 
-        # Search row
-        search_row = QHBoxLayout()
-        search_row.setSpacing(8)
-        self._search = SearchGlowInput("Buscar una película o serie…")
+        # Search bar — dark pill, magnifier left (mockup)
+        search_frame = QFrame()
+        search_frame.setObjectName("MockupSearch")
+        search_frame.setFixedHeight(40)
+        search_frame.setStyleSheet(
+            "QFrame#MockupSearch { background:#273035; border:none; border-radius:12px; }"
+        )
+        sf_lay = QHBoxLayout(search_frame)
+        sf_lay.setContentsMargins(14, 0, 6, 0)
+        sf_lay.setSpacing(8)
+        sf_lay.addWidget(_HeroSearchGlyph())
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Películas, series, anime…")
+        self._search.setFrame(False)
+        self._search.setStyleSheet(
+            "background:transparent; border:none; color:#f4f4f2;"
+            "font-size:10pt; font-family:Inter;"
+        )
+        pal = self._search.palette()
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor("#9aa6ab"))
+        self._search.setPalette(pal)
         self._search.returnPressed.connect(self._do_search)
-        search_row.addWidget(self._search, stretch=1)
-        root.addLayout(search_row)
+        sf_lay.addWidget(self._search, 1)
 
-        # Filter chips
-        chips = QHBoxLayout()
-        chips.setSpacing(6)
-        for label, cb in (
-            ("Tendencias", self._load_trending),
-            ("Recientes", self._load_recent),
-        ):
-            chips.addWidget(self._chip(label, cb))
-        chips.addStretch(1)
-        root.addLayout(chips)
+        header_lay.addWidget(search_frame, 1)
+
+        # Usuario (avatar con iniciales) — al lado de la barra, no dentro
+        self._user_btn = _UserAvatar("?")
+        self._user_btn.setVisible(False)  # mostrado por AnimeModePanel si está logeado
+        self._user_btn.clicked.connect(self._show_user_menu)
+        header_lay.addWidget(self._user_btn)
+
+        root.addLayout(header_lay)
 
         # Stack: grid view | detail view
         self._stack = QStackedWidget()
+        self._stack.setStyleSheet("background:transparent;")
 
         # Grid view
         grid_container = QWidget()
+        grid_container.setStyleSheet("background:transparent;")
         grid_lay = QVBoxLayout(grid_container)
         grid_lay.setContentsMargins(0, 0, 0, 0)
+        grid_lay.setSpacing(10)
+
+        # Hero banner (featured carousel)
+        self._hero = _HeroBanner()
+        self._hero.play_clicked.connect(self._search_and_play)
+        self._hero.info_clicked.connect(lambda m: self._show_detail.emit(m))
+        self._hero.setVisible(False)
+        grid_lay.addWidget(self._hero)
+
+        # Genre pill row with paddle arrows, below the hero (mockup)
+        chips_row = QWidget()
+        chips_row.setStyleSheet("background:transparent;")
+        cr_lay = QHBoxLayout(chips_row)
+        cr_lay.setContentsMargins(0, 2, 0, 2)
+        cr_lay.setSpacing(8)
+
+        self._chips_scroll = QScrollArea()
+        self._chips_scroll.setWidgetResizable(True)
+        self._chips_scroll.setFixedHeight(40)
+        self._chips_scroll.setStyleSheet("background:transparent; border:none;")
+        self._chips_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._chips_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        chips_widget = QWidget()
+        chips_widget.setStyleSheet("background:transparent;")
+        chips = QHBoxLayout(chips_widget)
+        chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(8)
+        for i, (label, cb) in enumerate(self._chip_defs()):
+            chips.addWidget(self._chip(label, cb, primary=(i == 0)))
+        chips.addStretch(1)
+        self._chips_scroll.setWidget(chips_widget)
+        cr_lay.addWidget(self._chips_scroll, 1)
+
+        for glyph, delta in (("‹", -260), ("›", 260)):
+            arrow = QPushButton(glyph)
+            arrow.setFixedSize(36, 36)
+            arrow.setCursor(Qt.CursorShape.PointingHandCursor)
+            arrow.setStyleSheet("""
+                QPushButton {
+                    background:#273035; color:#f4f4f2; border:none;
+                    border-radius:18px; font-size:13pt; padding-bottom:3px;
+                }
+                QPushButton:hover { background:#2f3d43; }
+            """)
+            arrow.clicked.connect(
+                lambda _=False, d=delta: self._chips_scroll.horizontalScrollBar().setValue(
+                    self._chips_scroll.horizontalScrollBar().value() + d
+                )
+            )
+            cr_lay.addWidget(arrow)
+
+        grid_lay.addWidget(chips_row)
+
         scroll = QScrollArea()
-        scroll.setStyleSheet(f"background:{C.PANEL}; border:1px solid {C.BORDER_A}; border-radius:11px;")
+        scroll.setStyleSheet("background:transparent; border:none;")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._grid_widget = QWidget()
+        self._grid_widget.setObjectName("MovieGrid")
+        self._grid_widget.setStyleSheet("background:transparent;")
         self._grid = QGridLayout(self._grid_widget)
-        self._grid.setSpacing(12)
+        self._grid.setSpacing(14)
+        self._grid.setContentsMargins(4, 12, 4, 12)
         scroll.setWidget(self._grid_widget)
-        grid_lay.addWidget(scroll)
+        grid_lay.addWidget(scroll, 1)
         self._stack.addWidget(grid_container)
 
         # Detail view
         detail_container = QWidget()
+        detail_container.setStyleSheet("background:transparent;")
         detail_lay = QVBoxLayout(detail_container)
         detail_lay.setContentsMargins(0, 0, 0, 0)
         detail_scroll = QScrollArea()
-        detail_scroll.setStyleSheet(f"background:{C.PANEL}; border:1px solid {C.BORDER_A}; border-radius:11px;")
+        detail_scroll.setStyleSheet("background:transparent; border:none;")
         detail_scroll.setWidgetResizable(True)
+        detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._detail_content = QWidget()
+        self._detail_content.setStyleSheet("background:transparent;")
         self._detail_layout = QVBoxLayout(self._detail_content)
+        self._detail_layout.setContentsMargins(0, 0, 0, 0)
         detail_scroll.setWidget(self._detail_content)
         detail_lay.addWidget(detail_scroll)
         self._stack.addWidget(detail_container)
@@ -745,20 +1302,44 @@ class MoviesModePanel(QWidget):
 
     def _chip(self, label: str, cb, primary: bool = False) -> QPushButton:
         b = QPushButton(label)
+        b.setCheckable(True)
+        b.setChecked(primary)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setFixedHeight(34)
-        bg = C.PRI_DIM if primary else "transparent"
-        fg = C.DARK if primary else C.TEXT_DIM
-        b.setStyleSheet(f"""
-            QPushButton {{
-                background:{bg}; color:{fg};
-                border:1px solid {C.BORDER}; border-radius:8px;
-                padding:0 14px; font-size:11px; font-weight:600;
-            }}
-            QPushButton:hover {{ border-color:{C.PRI_DIM}; color:{C.TEXT}; }}
+        b.setFixedHeight(36)
+        b.setStyleSheet("""
+            QPushButton {
+                background:#273035; color:#ffffff;
+                border:none; border-radius:18px;
+                padding:0 18px; font-size:9pt; font-weight:600;
+                font-family:Inter;
+            }
+            QPushButton:checked {
+                background:#ffffff; color:#111820;
+            }
+            QPushButton:hover:!checked { background:#2f3d43; }
         """)
-        b.clicked.connect(lambda _=False: cb())
+        def _activate():
+            # Deactivate siblings in the same parent layout
+            p = b.parentWidget()
+            if p:
+                for sib in p.findChildren(QPushButton):
+                    if sib is not b and sib.isCheckable():
+                        sib.setChecked(False)
+            b.setChecked(True)
+            cb()
+        b.clicked.connect(lambda _=False: _activate())
         return b
+
+    def _chip_defs(self) -> list:
+        """(label, callback) pairs for the pill row. Panels override this."""
+        return [
+            ("Tendencias", self._load_trending),
+            ("Recientes", self._load_recent),
+        ]
+
+    def _show_user_menu(self):
+        """Menú de usuario (para override en AnimeModePanel)."""
+        pass
 
     def _set_status(self, text: str):
         self._status.setText(text)
@@ -775,7 +1356,7 @@ class MoviesModePanel(QWidget):
         def work():
             try:
                 from actions import movie_search as ms
-                items = ms.search(query, limit=12)
+                items = ms.search(query, limit=15)
                 self._results_ready.emit(items, f"Resultados para «{query}»", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -788,7 +1369,7 @@ class MoviesModePanel(QWidget):
         def work():
             try:
                 from actions import movie_search as ms
-                items = ms.get_trending(kind="movie", limit=12)
+                items = ms.get_trending(kind="movie", limit=15)
                 self._results_ready.emit(items, "Películas en tendencia", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -801,7 +1382,7 @@ class MoviesModePanel(QWidget):
         def work():
             try:
                 from actions import movie_search as ms
-                items = ms.get_trending(kind="movie", window="week", limit=12)
+                items = ms.get_trending(kind="movie", window="week", limit=15)
                 self._results_ready.emit(items, "Películas de esta semana", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -817,22 +1398,28 @@ class MoviesModePanel(QWidget):
         self._set_status(header)
         self._title.setText(header)
 
+        # Featured carousel in the hero banner (first results)
+        if hasattr(self, "_hero"):
+            self._hero.set_items(items[:5])
+            self._hero.setVisible(bool(items))
+
         # Clear grid
         while self._grid.count():
             item = self._grid.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
 
-        # Add movie cards (4 columns)
+        # Add movie cards
+        COLS = 5
         for i, movie in enumerate(items):
             card = _MovieCard(movie)
             card.clicked.connect(lambda m: self._show_detail.emit(m))
-            col = i % 4
-            row = i // 4
+            col = i % COLS
+            row = i // COLS
             self._grid.addWidget(card, row, col)
 
         self._grid.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding),
-                          (len(items) // 4) + 1, 0, 1, 4)
+                          (len(items) // COLS) + 1, 0, 1, COLS)
 
     def _on_back(self):
         """Contextual back: from the player, stop it; otherwise go to the grid."""
@@ -1836,27 +2423,250 @@ class _CalendarDayCell(QFrame):
 
 
 class AnimeModePanel(MoviesModePanel):
-    """Anime discovery — Jikan (MyAnimeList) backed by Nyaa/Torrentio with anime aesthetic."""
+    """Anime discovery and streaming — same UI as Movies but backed by Nyaa/Torrentio-nyaa.
+
+    Adds MyAnimeList account integration: connect, browse watchlist, and update
+    watch status / episode progress / score from within Jarvis.
+    """
+
+    _mal_login_done = pyqtSignal(str, str)   # (username, error)
+    _mal_status_ready = pyqtSignal(int, dict) # (mal_id, status_data)
+    _mal_save_done = pyqtSignal(str)          # (result_message)
+    _episodes_ready = pyqtSignal(list, object, object)   # (episodes, anime, poster_pixmap)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Relabel after MoviesModePanel.__init__ built the widgets.
         self._title.setText("Anime")
-        self._title.setStyleSheet(
-            f"color: #FF6B9D; background: transparent; font-weight: 900; font-size: 28px; "
-            f"text-shadow: 0 2px 8px rgba(255, 107, 157, 0.3);"
-        )
         self._search.setPlaceholderText("Buscar anime…")
-        # Anime-specific color scheme: hot pink glow
-        self._back_btn.setStyleSheet(
-            f"background:{C.PANEL2}; border:1px solid #FF6B9D; border-radius:6px; "
-            f"color:#FF6B9D; font-weight:700;"
-        )
-        self._back_btn.setIcon(_line_icon("chevron_left", "#FF6B9D", 20))
-        self.setStyleSheet(
-            f"{self.styleSheet()}\n"
-            f"QLabel#AnimeSection {{ color: #FF6B9D; }}\n"
-        )
+
+        # MAL state
+        self._mal_detail_card = None
+        self._mal_detail_anime = None
+        self._ep_loading_lbl = None
+
+        # Insert MAL row between the top bar (index 0) and the stack (index 1)
+        self._mal_row = self._build_mal_row()
+        self.layout().insertWidget(1, self._mal_row)
+
+        # Wire new signals
+        self._mal_login_done.connect(self._on_mal_login)
+        self._mal_status_ready.connect(self._on_mal_status_ready)
+        self._mal_save_done.connect(self._on_mal_save_done)
+
+    # ------------------------------------------------------------------
+    # Genre pill row
+    # ------------------------------------------------------------------
+
+    _GENRE_CHIPS = (
+        ("Acción", 1), ("Aventura", 2), ("Comedia", 4), ("Drama", 8),
+        ("Fantasía", 10), ("Romance", 22), ("Terror", 14), ("Misterio", 7),
+        ("Sci-Fi", 24), ("Deportes", 30),
+    )
+
+    def _chip_defs(self) -> list:
+        defs = [
+            ("Viendo", lambda: self._load_mal_list("watching")),
+            ("Planificado", lambda: self._load_mal_list("plan_to_watch")),
+            ("Completado", lambda: self._load_mal_list("completed")),
+            ("Tendencias", self._load_trending),
+            ("En emisión", self._load_recent),
+        ]
+        for label, gid in self._GENRE_CHIPS:
+            defs.append((label, lambda g=gid, l=label: self._load_genre(g, l)))
+        return defs
+
+    def _load_genre(self, genre_id: int, label: str):
+        self._set_status(f"Cargando anime de {label}…")
+
+        def work():
+            try:
+                from actions import anime_search
+                items = anime_search.get_anime_by_genre(genre_id, limit=15)
+                self._results_ready.emit(items, f"Anime — {label}", "")
+            except Exception as e:
+                self._results_ready.emit([], "", str(e))
+
+        self._run_async(work)
+
+    # ------------------------------------------------------------------
+    # MAL header row
+    # ------------------------------------------------------------------
+
+    def _build_mal_row(self) -> QWidget:
+        from actions.mal_auth import is_logged_in, get_username
+        w = QWidget()
+        w.setFixedHeight(38)
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+
+        if is_logged_in():
+            self._add_logged_in_widgets(lay, get_username())
+            w.setVisible(False)   # el avatar de la barra de búsqueda ya lo indica
+        else:
+            lbl = QLabel("MyAnimeList:")
+            lbl.setFont(QFont("Inter", 9))
+            lbl.setStyleSheet("color:#9aa6ab; background:transparent;")
+            lay.addWidget(lbl)
+            self._add_connect_widget(lay)
+
+        lay.addStretch(1)
+        return w
+
+    def _add_connect_widget(self, lay: QHBoxLayout):
+        btn = QPushButton("Conectar cuenta")
+        btn.setFixedHeight(28)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet("""
+            QPushButton {
+                background:transparent; color:#f4f4f2;
+                border:1px solid #2f3d43; border-radius:14px;
+                font-size:9pt; font-family:Inter; padding:0 14px;
+            }
+            QPushButton:hover { background:#2f3d43; }
+        """)
+        btn.clicked.connect(self._do_mal_login)
+        lay.addWidget(btn)
+
+        from actions.mal_auth import get_client_id
+        if not get_client_id():
+            help_lbl = QLabel("(necesita client_id en api_keys.json → mal_client_id)")
+            help_lbl.setFont(QFont("Inter", 8))
+            help_lbl.setStyleSheet("color:#9aa6ab; background:transparent;")
+            lay.addWidget(help_lbl)
+
+        if hasattr(self, "_user_btn"):
+            self._user_btn.setVisible(False)
+
+    def _add_logged_in_widgets(self, lay: QHBoxLayout, username: str):
+        # No widgets propios: el avatar vive en la barra de búsqueda.
+        if hasattr(self, "_user_btn"):
+            self._user_btn.set_username(username)
+            self._user_btn.setVisible(True)
+
+    def _refresh_mal_row(self):
+        """Rebuild the MAL row in place after login/logout."""
+        lay = self._mal_row.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        from actions.mal_auth import is_logged_in, get_username
+        if is_logged_in():
+            self._add_logged_in_widgets(lay, get_username())
+            self._mal_row.setVisible(False)
+        else:
+            lbl = QLabel("MyAnimeList:")
+            lbl.setFont(QFont("Inter", 9))
+            lbl.setStyleSheet("color:#9aa6ab; background:transparent;")
+            lay.addWidget(lbl)
+            self._add_connect_widget(lay)
+            self._mal_row.setVisible(True)
+        lay.addStretch(1)
+
+    # ------------------------------------------------------------------
+    # MAL login / logout
+    # ------------------------------------------------------------------
+
+    def _do_mal_login(self):
+        from actions.mal_auth import get_client_id
+        client_id = get_client_id()
+        if not client_id:
+            self._set_status(
+                "Añade 'mal_client_id' a config/api_keys.json "
+                "(registra tu app en myanimelist.net/apiconfig)"
+            )
+            return
+        self._set_status("Abriendo navegador en http://localhost:8765/callback para autorizar MyAnimeList…")
+
+        def work():
+            try:
+                from actions.mal_auth import login
+                tokens = login(client_id)
+                username = tokens.get("username", "")
+                if not username:
+                    raise RuntimeError("El login devolvió un token pero sin usuario.")
+                self._mal_login_done.emit(username, "")
+            except Exception as exc:
+                import traceback
+                err_msg = f"{type(exc).__name__}: {exc}"
+                print(f"MAL login failed: {err_msg}\n{traceback.format_exc()}")
+                self._mal_login_done.emit("", err_msg)
+
+        self._run_async(work)
+
+    def _on_mal_login(self, username: str, error: str):
+        if error:
+            self._set_status(f"❌ Error de login MAL: {error}")
+        elif username:
+            self._set_status(f"✓ Conectado a MyAnimeList como @{username}")
+            self._refresh_mal_row()
+        else:
+            self._set_status("❌ Login MAL: respuesta inválida (sin usuario ni error)")
+
+    def _do_mal_logout(self):
+        from actions.mal_auth import logout
+        logout()
+        self._refresh_mal_row()
+        self._set_status("Sesión de MyAnimeList cerrada")
+
+    def _show_user_menu(self):
+        """Menú de usuario en la barra de búsqueda."""
+        from actions.mal_auth import get_username
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background:#1a2226; color:#f4f4f2;
+                border:1px solid #2f3d43; border-radius:8px; padding:6px;
+            }
+            QMenu::item { padding:6px 18px; border-radius:5px; }
+            QMenu::item:selected { background:#2f3d43; }
+        """)
+
+        username = get_username()
+        if username:
+            user_act = menu.addAction(f"👤  @{username}")
+            user_act.setEnabled(False)
+            menu.addSeparator()
+
+        logout_act = menu.addAction("Cerrar sesión")
+        logout_act.triggered.connect(self._do_mal_logout)
+
+        menu.exec(self._user_btn.mapToGlobal(self._user_btn.rect().bottomLeft()))
+
+    # ------------------------------------------------------------------
+    # MAL watchlist loading
+    # ------------------------------------------------------------------
+
+    def _load_mal_list(self, status: str):
+        from actions.mal_api import STATUS_LABELS
+        label = STATUS_LABELS.get(status, status)
+        self._set_status(f"Cargando lista MAL: {label}…")
+
+        def work():
+            try:
+                from actions.mal_api import get_watchlist
+                from actions.movie_search import Movie
+                raw = get_watchlist(status=status, limit=50)
+                items = [
+                    Movie(
+                        tmdb_id=0,
+                        title=r["title"],
+                        poster_url=r["poster_url"],
+                        rating=r["rating"],
+                        media_type="tv",
+                        mal_id=r["mal_id"],
+                        total_episodes=r.get("mal_total", 0),
+                    )
+                    for r in raw
+                ]
+                header = f"MAL — {label} ({len(items)})"
+                self._results_ready.emit(items, header, "")
+            except Exception as exc:
+                self._results_ready.emit([], "", str(exc))
+
+        self._run_async(work)
 
     # ------------------------------------------------------------------
     # Overridden data sources
@@ -1871,7 +2681,7 @@ class AnimeModePanel(MoviesModePanel):
         def work():
             try:
                 from actions import anime_search
-                items = anime_search.search_anime(query, limit=12)
+                items = anime_search.search_anime(query, limit=15)
                 self._results_ready.emit(items, f"Anime: «{query}»", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -1884,7 +2694,7 @@ class AnimeModePanel(MoviesModePanel):
         def work():
             try:
                 from actions import anime_search
-                items = anime_search.get_trending_anime(limit=12)
+                items = anime_search.get_trending_anime(limit=15)
                 self._results_ready.emit(items, "Anime en tendencia", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -1897,20 +2707,282 @@ class AnimeModePanel(MoviesModePanel):
         def work():
             try:
                 from actions import anime_search
-                items = anime_search.get_airing_anime(limit=12)
+                items = anime_search.get_airing_anime(limit=15)
                 self._results_ready.emit(items, "Anime en emisión", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
 
         self._run_async(work)
 
-    def _search_and_play(self, anime):
+    @staticmethod
+    def _simplify_anime_title(title: str) -> str:
+        """Strip part/season suffixes so 'JoJo Part 7: Steel Ball Run' → 'JoJo'."""
+        import re
+        t = re.sub(
+            r'\s*:?\s*(?:Part|Season|Parte|Temporada|Cour)\s+\S+.*$',
+            '', title, flags=re.IGNORECASE
+        )
+        t = re.sub(r'\s*\(\d{4}\)\s*$', '', t).strip()
+        return t or title
+
+    # ------------------------------------------------------------------
+    # Detail view with episode picker + MAL status section
+    # ------------------------------------------------------------------
+
+    def _show_movie_detail(self, anime):
+        self._current_view = "detail"
+        self._detail_movie = anime
+        self._mal_detail_anime = anime
+        self._mal_detail_card = None
+        self._back_btn.setVisible(True)
+        self._title.setText(anime.title)
+
+        while self._detail_layout.count():
+            item = self._detail_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        # -- Hero banner at the top of the detail view --
+        hero = _HeroBanner()
+        hero.setFixedHeight(240)
+        hero.play_clicked.connect(lambda m: self._search_and_play(m))
+        hero.info_clicked.connect(lambda _: None)
+        hero.set_movie(anime)   # fetches the backdrop by itself
+        self._detail_layout.addWidget(hero)
+
+        # -- Meta row (year · rating · episodes) --
+        meta_widget = QWidget()
+        meta_lay = QHBoxLayout(meta_widget)
+        meta_lay.setContentsMargins(4, 8, 4, 4)
+        meta_lay.setSpacing(16)
+
+        total_ep = int(getattr(anime, "total_episodes", 0) or 0)
+        for text in filter(None, [
+            str(anime.release_year) if anime.release_year else None,
+            f"★ {anime.rating:.1f}" if anime.rating else None,
+            f"{total_ep} eps" if total_ep else None,
+        ]):
+            lbl = QLabel(text)
+            lbl.setFont(QFont(FONT_UI, 10))
+            lbl.setStyleSheet(f"color:{C.TEXT_MED};")
+            meta_lay.addWidget(lbl)
+        meta_lay.addStretch(1)
+        self._detail_layout.addWidget(meta_widget)
+
+        # -- Synopsis --
+        if anime.overview:
+            overview = QLabel(anime.overview)
+            overview.setWordWrap(True)
+            overview.setFont(QFont(FONT_UI, 10))
+            overview.setStyleSheet(f"color:{C.TEXT_MED}; padding:0 4px;")
+            self._detail_layout.addWidget(overview)
+
+        # -- MAL status card (only if logged in and we have a mal_id) --
+        from actions.mal_auth import is_logged_in
+        mal_id = int(getattr(anime, "mal_id", 0) or 0)
+        if is_logged_in() and mal_id:
+            self._mal_detail_card = self._build_mal_status_card(anime, mal_id)
+            self._detail_layout.addWidget(self._mal_detail_card)
+            self._load_mal_status(mal_id)
+
+        # -- Episodes section --
+        ep_title = QLabel("Episodios")
+        ep_title.setFont(QFont(FONT_UI, 12, QFont.Weight.Bold))
+        ep_title.setStyleSheet(f"color:{C.TEXT}; padding:8px 4px 0 4px;")
+        self._detail_layout.addWidget(ep_title)
+
+        self._ep_loading_lbl = QLabel("Cargando episodios…")
+        self._ep_loading_lbl.setFont(QFont(FONT_UI, 10))
+        self._ep_loading_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; padding:4px;")
+        self._detail_layout.addWidget(self._ep_loading_lbl)
+
+        self._episodes_list_container = QVBoxLayout()
+        self._episodes_list_container.setSpacing(6)
+        self._detail_layout.addLayout(self._episodes_list_container)
+
+        self._detail_layout.addStretch()
+        self._stack.setCurrentIndex(1)
+
+        if mal_id:
+            self._load_episodes(anime, mal_id)
+        else:
+            self._ep_loading_lbl.setText("No se encontraron episodios.")
+
+    def _load_episodes(self, anime, mal_id: int):
+        try:
+            self._episodes_ready.disconnect()
+        except Exception:
+            pass
+        self._episodes_ready.connect(self._on_episodes_ready)
+
+        poster_pixmap = None
+
+        def work():
+            px = None
+            if anime.poster_url:
+                try:
+                    import urllib.request
+                    data = urllib.request.urlopen(anime.poster_url, timeout=15).read()
+                    px = QPixmap()
+                    px.loadFromData(data)
+                except Exception:
+                    px = None
+            try:
+                from actions import anime_search
+                episodes = anime_search.get_episodes(mal_id)
+                self._episodes_ready.emit(episodes, anime, px)
+            except Exception as exc:
+                self._episodes_ready.emit([], anime, px)
+
+        self._run_async(work)
+
+    def _on_episodes_ready(self, episodes: list, anime, poster_pixmap):
+        if anime is not self._detail_movie:
+            return   # el usuario ya navegó a otro anime
+
+        if self._ep_loading_lbl:
+            self._ep_loading_lbl.setText(
+                "No se encontraron episodios." if not episodes else ""
+            )
+            self._ep_loading_lbl.setVisible(not episodes)
+
+        for ep in episodes:
+            row = _EpisodeRow(ep, poster_pixmap)
+            row.play_clicked.connect(
+                lambda n, a=anime: self._search_and_play(a, episode=n)
+            )
+            self._episodes_list_container.addWidget(row)
+
+    # ------------------------------------------------------------------
+    # MAL status card in the detail view
+    # ------------------------------------------------------------------
+
+    def _build_mal_status_card(self, anime, mal_id: int) -> QWidget:
+        from actions.mal_api import STATUS_LABELS, STATUS_KEYS
+        card = QFrame()
+        card.setStyleSheet(
+            f"background:{C.PANEL2}; border:1px solid {C.BORDER}; border-radius:10px;"
+        )
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(10)
+
+        title = QLabel("MyAnimeList")
+        title.setFont(QFont(FONT_UI, 10, QFont.Weight.Bold))
+        title.setStyleSheet(f"color:{C.PRI};")
+        lay.addWidget(title)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+
+        row.addWidget(self._mk_label("Estado:"))
+        status_combo = QComboBox()
+        status_combo.addItem("— Sin añadir —", "")
+        for key in STATUS_KEYS:
+            status_combo.addItem(STATUS_LABELS[key], key)
+        row.addWidget(status_combo)
+
+        row.addWidget(self._mk_label("Ep:"))
+        ep_minus = QPushButton("◀")
+        ep_minus.setFixedSize(24, 24)
+        ep_spin = QSpinBox()
+        ep_spin.setRange(0, max(1, int(getattr(anime, "total_episodes", 0) or 999)))
+        ep_plus = QPushButton("▶")
+        ep_plus.setFixedSize(24, 24)
+        ep_minus.clicked.connect(lambda: ep_spin.setValue(max(0, ep_spin.value() - 1)))
+        ep_plus.clicked.connect(lambda: ep_spin.setValue(ep_spin.value() + 1))
+        row.addWidget(ep_minus)
+        row.addWidget(ep_spin)
+        row.addWidget(ep_plus)
+        if int(getattr(anime, "total_episodes", 0) or 0):
+            row.addWidget(self._mk_label(f"/ {anime.total_episodes}"))
+
+        row.addWidget(self._mk_label("Nota:"))
+        score_combo = QComboBox()
+        score_combo.addItem("—", 0)
+        for s in range(1, 11):
+            score_combo.addItem(str(s), s)
+        row.addWidget(score_combo)
+
+        save_btn = QPushButton("Guardar")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{C.PRI_DIM}; color:{C.DARK};
+                border:none; border-radius:6px; padding:4px 14px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{C.PRI}; }}
+        """)
+        save_btn.clicked.connect(lambda: self._save_mal_status(
+            mal_id, status_combo, ep_spin, score_combo
+        ))
+        row.addWidget(save_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        card._status_combo = status_combo
+        card._ep_spin = ep_spin
+        card._score_combo = score_combo
+        return card
+
+    @staticmethod
+    def _mk_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setFont(QFont(FONT_UI, 9))
+        lbl.setStyleSheet(f"color:{C.TEXT_MED};")
+        return lbl
+
+    def _load_mal_status(self, mal_id: int):
+        def work():
+            try:
+                from actions.mal_api import get_anime_status
+                data = get_anime_status(mal_id)
+                self._mal_status_ready.emit(mal_id, data)
+            except Exception:
+                self._mal_status_ready.emit(mal_id, {})
+
+        self._run_async(work)
+
+    def _on_mal_status_ready(self, mal_id: int, data: dict):
+        card = self._mal_detail_card
+        if card is None or not hasattr(card, "_status_combo"):
+            return
+        ls = data.get("list_status", {}) or {}
+        status = ls.get("status", "")
+        idx = card._status_combo.findData(status)
+        card._status_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        card._ep_spin.setValue(int(ls.get("num_episodes_watched") or 0))
+        score_idx = card._score_combo.findData(int(ls.get("score") or 0))
+        card._score_combo.setCurrentIndex(score_idx if score_idx >= 0 else 0)
+
+    def _save_mal_status(self, mal_id: int, status_combo, ep_spin, score_combo):
+        status = status_combo.currentData() or None
+        watched = ep_spin.value()
+        score = score_combo.currentData() or None
+        self._set_status("Guardando en MyAnimeList…")
+
+        def work():
+            try:
+                from actions.mal_api import update_status
+                update_status(mal_id, status=status, num_watched=watched, score=score)
+                self._mal_save_done.emit("✓ Guardado en MyAnimeList")
+            except Exception as exc:
+                self._mal_save_done.emit(f"Error al guardar en MAL: {exc}")
+
+        self._run_async(work)
+
+    def _on_mal_save_done(self, message: str):
+        self._set_status(message)
+
+    def _search_and_play(self, anime, episode: int = 0):
         """Like MoviesModePanel but uses Nyaa via Torrentio + torlink --kind anime.
 
         Jikan results have tmdb_id=0; in that case we do a title-based TMDB lookup
         to resolve the IMDb id needed by Torrentio.
         """
-        self._set_status(f"Buscando torrents de «{anime.title}»…")
+        ep_txt = f" ep {episode}" if episode else ""
+        self._set_status(f"Buscando torrents de «{anime.title}»{ep_txt}…")
+        title = self._simplify_anime_title(anime.title)
 
         def work():
             import re
@@ -1928,18 +3000,20 @@ class AnimeModePanel(MoviesModePanel):
                 if tmdb_id:
                     imdb = ms.get_imdb_id(tmdb_id, kind=kind)
                 else:
-                    imdb = ms.get_imdb_id_by_title(anime.title, kind="tv")
+                    imdb = ms.get_imdb_id_by_title(title, kind="tv")
             except Exception as exc:
                 imdb = ""
                 errors.append(f"imdb_id: {exc}")
 
             if imdb:
                 self._status_sig.emit(
-                    f"Buscando «{anime.title}» en Nyaa via Torrentio ({imdb})…"
+                    f"Buscando «{anime.title}»{ep_txt} en Nyaa via Torrentio ({imdb})…"
                 )
                 try:
                     from actions import torrentio
-                    results = torrentio.search_anime(imdb, kind=kind, limit=15)
+                    results = torrentio.search_anime(
+                        imdb, kind=kind, episode=episode, limit=15
+                    )
                     for s in results:
                         found.append(ts.Torrent(
                             title=s.title, magnet=s.magnet, seeders=s.seeders,
@@ -1952,8 +3026,9 @@ class AnimeModePanel(MoviesModePanel):
 
             # Source 2: torlink --kind anime (Nyaa RSS + 1337x Anime category).
             try:
-                self._status_sig.emit(f"Buscando «{anime.title}» en Nyaa/1337x…")
-                found.extend(ts.search(anime.title, kind="anime", limit=10))
+                query = f"{title} {episode}" if episode else title
+                self._status_sig.emit(f"Buscando «{query}» en Nyaa/1337x…")
+                found.extend(ts.search(query, kind="anime", limit=10))
             except Exception as exc:
                 errors.append(f"torlink-anime: {exc}")
 
