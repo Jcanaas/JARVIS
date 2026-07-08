@@ -163,6 +163,38 @@ def search(imdb_id: str, kind: str = "movie", season: int = 0, episode: int = 0,
     return streams[:limit]
 
 
+def search_by_id(video_id: str, limit: int = 15) -> list[Stream]:
+    """Fetch anime streams for a ready-made Stremio video id.
+
+    `video_id` is passed straight into the series stream path, so it accepts
+    Kitsu ids with absolute episode numbering ("kitsu:12:1044") — the format
+    Anime Kitsu produces and Torrentio indexes natively. No providers= filter,
+    so Torrentio's default config (which includes NyaaSi, the dominant anime
+    tracker) is used.
+    """
+    if not video_id:
+        raise TorrentioError("No video id provided.")
+
+    url = f"{_BASE}/stream/series/{video_id}.json"
+
+    try:
+        r = requests.get(url, timeout=_TIMEOUT,
+                         headers={"User-Agent": "Mozilla/5.0 (Jarvis)"})
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as exc:
+        raise TorrentioError(f"Torrentio request failed: {exc}") from exc
+    except ValueError as exc:
+        raise TorrentioError(f"Invalid Torrentio response: {exc}") from exc
+
+    streams = [s for item in data.get("streams", []) if (s := _parse_stream(item))]
+    if not streams:
+        raise TorrentioError(f"No Torrentio streams for '{video_id}'.")
+
+    streams.sort(key=lambda s: s.seeders, reverse=True)
+    return streams[:limit]
+
+
 def search_anime(imdb_id: str, kind: str = "tv", season: int = 0, episode: int = 0,
                  limit: int = 15) -> list[Stream]:
     """Fetch anime torrent streams via Torrentio (default config, NyaaSi source).
