@@ -1380,8 +1380,10 @@ class MoviesModePanel(QWidget):
 
         def work():
             try:
-                from actions import movie_search as ms
-                items = ms.search(query, limit=15)
+                from actions import cinemeta
+                # Cinemeta ranks by title relevance, so "The Furious" returns the
+                # actual film first instead of the more popular "Fast & Furious".
+                items = cinemeta.search(query, kind="multi", limit=18)
                 self._results_ready.emit(items, f"Resultados para «{query}»", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -1393,8 +1395,8 @@ class MoviesModePanel(QWidget):
 
         def work():
             try:
-                from actions import movie_search as ms
-                items = ms.get_trending(kind="movie", limit=15)
+                from actions import cinemeta
+                items = cinemeta.get_trending(kind="movie", limit=18)
                 self._results_ready.emit(items, "Películas en tendencia", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
@@ -1402,13 +1404,13 @@ class MoviesModePanel(QWidget):
         self._run_async(work)
 
     def _load_recent(self):
-        self._set_status("Buscando películas recientes…")
+        self._set_status("Cargando series en tendencia…")
 
         def work():
             try:
-                from actions import movie_search as ms
-                items = ms.get_trending(kind="movie", window="week", limit=15)
-                self._results_ready.emit(items, "Películas de esta semana", "")
+                from actions import cinemeta
+                items = cinemeta.get_trending(kind="series", limit=18)
+                self._results_ready.emit(items, "Series en tendencia", "")
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
 
@@ -1571,17 +1573,19 @@ class MoviesModePanel(QWidget):
             # Sources 1 & 2: Stremio addons keyed by IMDb id that aggregate
             # Spanish-only sites (Peerflix: DonTorrent/MejorTorrent/Wolfmax4k,
             # 100% Castilian; Torrentio: MejorTorrent/Cinecalidad + intl).
-            try:
-                from actions import movie_search as ms
-                tmdb_id = getattr(movie, "tmdb_id", 0)
-                if tmdb_id:
-                    imdb = ms.get_imdb_id(tmdb_id, kind=kind)
-                else:
-                    # Fallback for anime/items without tmdb_id: title-based lookup
-                    imdb = ms.get_imdb_id_by_title(movie.title, kind=kind)
-            except Exception as exc:
-                imdb = ""
-                errors.append(f"imdb_id: {exc}")
+            # Cinemeta results already carry the IMDb id, so no TMDB→IMDb bridge.
+            imdb = getattr(movie, "imdb_id", "")
+            if not imdb:
+                try:
+                    from actions import movie_search as ms
+                    tmdb_id = getattr(movie, "tmdb_id", 0)
+                    if tmdb_id:
+                        imdb = ms.get_imdb_id(tmdb_id, kind=kind)
+                    else:
+                        imdb = ms.get_imdb_id_by_title(movie.title, kind=kind)
+                except Exception as exc:
+                    imdb = ""
+                    errors.append(f"imdb_id: {exc}")
 
             if imdb:
                 self._status_sig.emit(

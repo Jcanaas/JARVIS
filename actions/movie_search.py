@@ -43,6 +43,7 @@ class Movie:
     total_episodes: int = 0  # Total episode count (anime only, from Jikan)
     backdrop_url: str = ""   # Wide/landscape image for hero banner
     kitsu_id: str = ""       # Kitsu id (anime only, e.g. "10"); "" for non-anime
+    imdb_id: str = ""        # IMDb id (tt…) when known (Cinemeta results)
 
     def to_dict(self) -> dict:
         return asdict(self)
