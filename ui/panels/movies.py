@@ -448,6 +448,7 @@ class _MovieCard(QWidget):
         # Fixed size so cards line up in a clean grid regardless of how long the
         # title is (1- vs 2-line titles were breaking row alignment).
         self.setFixedWidth(self._W)
+        self._orig_pixmap: "QPixmap | None" = None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 7)
@@ -505,17 +506,35 @@ class _MovieCard(QWidget):
         meta_row.addStretch(1)
         lay.addLayout(meta_row)
 
-        self._opacity_fx = QGraphicsOpacityEffect(self)
-        self._opacity_fx.setOpacity(1.0)
-        self.setGraphicsEffect(self._opacity_fx)
-
     def enterEvent(self, ev):
-        self._opacity_fx.setOpacity(0.82)
+        # QGraphicsOpacityEffect is intentionally avoided here: Qt caches its
+        # rendered pixmap at the widget's backing-store position, and inside a
+        # QScrollArea that cache goes stale on scroll — cards visually "stick"
+        # at their old spot instead of following the scroll. Dimming the
+        # poster's own pixmap on hover avoids that entirely.
+        self._set_dim(True)
         super().enterEvent(ev)
 
     def leaveEvent(self, ev):
-        self._opacity_fx.setOpacity(1.0)
+        self._set_dim(False)
         super().leaveEvent(ev)
+
+    def _set_dim(self, dim: bool):
+        pm = self.poster.pixmap()
+        if pm is None or pm.isNull():
+            return
+        if dim:
+            dimmed = QPixmap(pm.size())
+            dimmed.fill(Qt.GlobalColor.transparent)
+            p = QPainter(dimmed)
+            p.setOpacity(0.82)
+            p.drawPixmap(0, 0, pm)
+            p.end()
+            if self._orig_pixmap is None:
+                self._orig_pixmap = pm
+            self.poster.setPixmap(dimmed)
+        elif self._orig_pixmap is not None:
+            self.poster.setPixmap(self._orig_pixmap)
 
     def mousePressEvent(self, ev):
         self.clicked.emit(self.movie)
@@ -941,12 +960,29 @@ class _HeroBanner(QWidget):
 
         p.fillRect(self.rect(), QColor("#131a1e"))
 
-        if self._pixmap and not self._pixmap.isNull():
-            scaled = self._pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        if self._pixmap and not self._pixmap.isNull() and self.width() > 0 and self.height() > 0:
+            src_w, src_h = self._pixmap.width(), self._pixmap.height()
+            cover_scale = max(self.width() / src_w, self.height() / src_h)
+            if cover_scale > 1.6:
+                # The source is too small (or portrait) to cover the hero
+                # without a heavy upscale — a low-res anime poster stretched
+                # ~8x to fill a wide hero looked pixelated and not landscape
+                # at all. Fit it instead (no crop, no upscale past 1.6x) and
+                # let the dark background/gradient fill the rest.
+                fit_scale = min(1.6, self.width() / src_w, self.height() / src_h)
+                target_w = max(1, int(src_w * fit_scale))
+                target_h = max(1, int(src_h * fit_scale))
+                scaled = self._pixmap.scaled(
+                    target_w, target_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            else:
+                scaled = self._pixmap.scaled(
+                    self.size(),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
             x = (self.width() - scaled.width()) // 2
             y = (self.height() - scaled.height()) // 2
             p.drawPixmap(x, y, scaled)

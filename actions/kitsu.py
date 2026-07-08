@@ -71,6 +71,23 @@ def _first_year(release_info) -> int:
     return int(m.group(1)) if m else 0
 
 
+# Kitsu poster URLs come in two shapes:
+#   .../poster_images/<id>/medium.jpg              (numeric id, most anime)
+#   .../anime/<id>/poster_image/medium-<hash>.jpeg (hashed uploads, no larger
+#                                                    variant exists — 404s)
+# Only upgrade the first, safe shape; the anchored regex leaves the hashed
+# shape untouched so we never point at a URL that doesn't exist.
+_POSTER_MEDIUM_RE = re.compile(r"(/poster_images/\d+/)medium(\.jpg)$")
+
+
+def _upgrade_poster(url: str) -> str:
+    """Swap the known-safe 'medium' poster URL shape for 'large' (390x554 ->
+    550x780). Used only as a backdrop fallback, where more pixels matter more
+    than for the small grid thumbnail. Returns the original url unchanged for
+    any other shape."""
+    return _POSTER_MEDIUM_RE.sub(r"\1large\2", url) if url else url
+
+
 def _parse_meta(item: dict) -> Movie | None:
     """Turn a Kitsu catalog/meta entry into a Movie."""
     kitsu_id = str(item.get("kitsu_id") or "")
@@ -90,7 +107,7 @@ def _parse_meta(item: dict) -> Movie | None:
         title=item.get("name") or "",
         release_year=_first_year(item.get("releaseInfo")),
         poster_url=item.get("poster") or "",
-        backdrop_url=item.get("background") or item.get("poster") or "",
+        backdrop_url=item.get("background") or _upgrade_poster(item.get("poster") or ""),
         overview=item.get("description") or "",
         rating=rating,
         media_type="tv",
