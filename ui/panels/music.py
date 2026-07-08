@@ -3086,3 +3086,270 @@ class _PanelControls(QWidget):
                 self._bar.raise_()
 
 
+
+
+class _MusicFloatWindow(QWidget):
+    """Compact always-on-top floating music player (audio-only, no video surface).
+
+    Draggable from the art, title, artist, and time areas.
+    Updates via update_state(); controls call back into MainWindow via the
+    `callbacks` dict supplied at construction.
+    """
+
+    def __init__(self, callbacks: dict):
+        super().__init__()
+        self._cb = callbacks
+        self._drag: QPoint | None = None
+        self._origin: QPoint | None = None
+        self._duration = 0.0
+        self._position = 0.0
+        self._playing = False
+        self._user_dragging_slider = False
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(360, 104)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        # Album art
+        self._art_lbl = QLabel()
+        self._art_lbl.setFixedSize(76, 76)
+        self._art_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._art_lbl.setStyleSheet(
+            "background: rgba(94,130,255,0.07); border-radius: 10px;"
+        )
+        outer.addWidget(self._art_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # Right column
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        right.setContentsMargins(0, 0, 0, 0)
+        outer.addLayout(right, stretch=1)
+
+        # Title row — title + borderless close button
+        top = QHBoxLayout()
+        top.setSpacing(4)
+        top.setContentsMargins(0, 0, 0, 0)
+        self._title = QLabel("— Ninguna canción —")
+        self._title.setStyleSheet(
+            "color: #DCE1FF; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+        self._title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        top.addWidget(self._title, stretch=1)
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(18, 18)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(lambda: self._cb.get("close", lambda: None)())
+        close_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " color: rgba(175,200,230,0.40); font-size: 13px; padding: 0; }"
+            "QPushButton:hover { color: #B6C4FF; }"
+            "QPushButton:pressed { color: #5E82FF; }"
+        )
+        top.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        right.addLayout(top)
+
+        # Artist
+        self._artist = QLabel("")
+        self._artist.setStyleSheet(
+            "color: rgba(182,196,255,0.75); font-size: 10px; background: transparent;"
+        )
+        right.addWidget(self._artist)
+
+        # Seek slider
+        self._seek = QSlider(Qt.Orientation.Horizontal)
+        self._seek.setRange(0, 100000)
+        self._seek.setValue(0)
+        self._seek.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._seek.setFixedHeight(14)
+        self._seek.setStyleSheet(
+            "QSlider::groove:horizontal{height:3px;background:rgba(255,255,255,0.10);border-radius:2px;}"
+            "QSlider::sub-page:horizontal{background:#B6C4FF;border-radius:2px;}"
+            "QSlider::handle:horizontal{background:#DCE1FF;width:10px;height:10px;"
+            "margin:-4px 0;border-radius:5px;}"
+            "QSlider::handle:horizontal:hover{background:#b6c4ff;}"
+        )
+        self._seek.sliderPressed.connect(lambda: setattr(self, '_user_dragging_slider', True))
+        self._seek.sliderMoved.connect(self._on_slider_moved)
+        self._seek.sliderReleased.connect(self._on_seek)
+        right.addWidget(self._seek)
+
+        # Controls row — time + prev/play/next
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(4)
+        ctrl.setContentsMargins(0, 0, 0, 0)
+        self._time_lbl = QLabel("--:-- / --:--")
+        self._time_lbl.setStyleSheet(
+            "color: rgba(180,210,240,0.45); font-size: 9px; background: transparent;"
+        )
+        ctrl.addWidget(self._time_lbl)
+        ctrl.addStretch()
+        self._prev_btn = _MediaBtn(_MediaBtn.PREV)
+        self._prev_btn.setFixedSize(26, 26)
+        self._prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._prev_btn.clicked.connect(lambda: self._cb.get("prev", lambda: None)())
+        self._play_btn = _MediaBtn(_MediaBtn.PLAY)
+        self._play_btn.setFixedSize(30, 30)
+        self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._play_btn.clicked.connect(lambda: self._cb.get("toggle", lambda: None)())
+        self._next_btn = _MediaBtn(_MediaBtn.NEXT)
+        self._next_btn.setFixedSize(26, 26)
+        self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._next_btn.clicked.connect(lambda: self._cb.get("next", lambda: None)())
+        ctrl.addWidget(self._prev_btn)
+        ctrl.addWidget(self._play_btn)
+        ctrl.addWidget(self._next_btn)
+        right.addLayout(ctrl)
+
+        # Install drag on non-interactive children
+        for w in (self._art_lbl, self._title, self._artist, self._time_lbl):
+            w.installEventFilter(self)
+
+        # Progress interpolation timer (250 ms tick)
+        self._anim = QTimer(self)
+        self._anim.setInterval(250)
+        self._anim.timeout.connect(self._tick)
+        self._anim.start()
+
+    # ------------------------------------------------------------------ paint
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(182, 196, 255, 45), 1))
+        p.setBrush(QColor(5, 10, 20, 244))
+        p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 14, 14)
+
+    # ------------------------------------------------------------------ drag
+    def eventFilter(self, obj, event):
+        t = event.type()
+        if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._drag = event.globalPosition().toPoint()
+            self._origin = self.pos()
+        elif t == QEvent.Type.MouseMove and self._drag is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self.move(self._origin + (event.globalPosition().toPoint() - self._drag))
+        elif t == QEvent.Type.MouseButtonRelease:
+            self._drag = None
+        return False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag = event.globalPosition().toPoint()
+            self._origin = self.pos()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            self.move(self._origin + (event.globalPosition().toPoint() - self._drag))
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag = None
+
+    # ---------------------------------------------------------------- progress
+    def _tick(self):
+        if self._user_dragging_slider or not self._playing or self._duration <= 0:
+            return
+        self._position = min(self._duration, self._position + 0.25)
+        pct = int((self._position / self._duration) * 100000)
+        self._seek.blockSignals(True)
+        self._seek.setValue(max(0, min(100000, pct)))
+        self._seek.blockSignals(False)
+        self._time_lbl.setText(
+            f"{self._fmt(self._position)} / {self._fmt(self._duration)}"
+        )
+
+    @staticmethod
+    def _fmt(s: float) -> str:
+        m = int(s // 60); ss = int(s % 60); return f"{m}:{ss:02d}"
+
+    @staticmethod
+    def _make_round_pix(pix: QPixmap, size: int, radius: int) -> QPixmap:
+        scaled = pix.scaled(
+            size, size,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        if scaled.width() > size or scaled.height() > size:
+            x = (scaled.width() - size) // 2
+            y = (scaled.height() - size) // 2
+            scaled = scaled.copy(x, y, size, size)
+        out = QPixmap(size, size)
+        out.fill(Qt.GlobalColor.transparent)
+        p = QPainter(out)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
+        p.setClipPath(path)
+        p.drawPixmap(0, 0, scaled)
+        p.end()
+        return out
+
+    def _on_slider_moved(self, _):
+        self._user_dragging_slider = True
+        if self._duration > 0:
+            pos = (self._seek.value() / 100000.0) * self._duration
+            self._time_lbl.setText(f"{self._fmt(pos)} / {self._fmt(self._duration)}")
+
+    def _on_seek(self):
+        self._user_dragging_slider = False
+        if self._duration > 0:
+            pos = (self._seek.value() / 100000.0) * self._duration
+            self._position = pos
+            self._time_lbl.setText(f"{self._fmt(pos)} / {self._fmt(self._duration)}")
+            seek_cb = self._cb.get("seek")
+            if seek_cb:
+                seek_cb(pos)
+
+    # ----------------------------------------------------------------- update
+    def update_state(
+        self,
+        title: str,
+        artists: str,
+        position: float,
+        duration: float,
+        playing: bool,
+        thumb_pix: "QPixmap | None" = None,
+    ):
+        self._duration = float(duration or 0)
+        self._position = float(position or 0)
+        self._playing = bool(playing)
+
+        short = title[:32].rstrip() + "…" if len(title) > 33 else title
+        self._title.setText(short or "— Ninguna canción —")
+        self._title.setToolTip(title)
+        self._artist.setText(str(artists or ""))
+        self._play_btn.set_shape(_MediaBtn.PAUSE if playing else _MediaBtn.PLAY)
+
+        if thumb_pix is not None and not thumb_pix.isNull():
+            self._art_lbl.setPixmap(self._make_round_pix(thumb_pix, 76, 10))
+            self._art_lbl.setStyleSheet("background: transparent;")
+
+        if not self._user_dragging_slider:
+            if self._duration > 0:
+                pct = int((self._position / self._duration) * 100000)
+                self._seek.blockSignals(True)
+                self._seek.setValue(max(0, min(100000, pct)))
+                self._seek.blockSignals(False)
+                self._time_lbl.setText(
+                    f"{self._fmt(self._position)} / {self._fmt(self._duration)}"
+                )
+            else:
+                self._seek.setValue(0)
+                self._time_lbl.setText("--:-- / --:--")
+
+    def closeEvent(self, event):
+        self._anim.stop()
+        super().closeEvent(event)
+
+
+
+
+
