@@ -2734,6 +2734,40 @@ class AnimeModePanel(MoviesModePanel):
         t = re.sub(r'\s*\(\d{4}\)\s*$', '', t).strip()
         return t or title
 
+    @staticmethod
+    def _title_match_score(query: str, release_title: str) -> float:
+        """Score how closely a torrent release title matches the searched title.
+
+        Release titles are noisy ("[Group] Monster - 01 [1080p].mkv"), so the
+        anime name is extracted (group tags, episode numbers and tech tags
+        stripped) and compared to the query with a fuzzy ratio, boosted when the
+        name starts with the query as a whole word. This keeps an exact-name
+        match ("Monster") above near-collisions ("Monster Hunter", "Re:Monster").
+        """
+        import re
+        import difflib
+
+        q = (query or "").lower().strip()
+        if not q:
+            return 0.0
+        n = (release_title or "").lower()
+        n = re.sub(r'\[[^\]]*\]', ' ', n)          # [Group], [1080p]
+        n = re.sub(r'\([^)]*\)', ' ', n)           # (2004), (Batch)
+        n = re.sub(r'\.(mkv|mp4|avi)$', ' ', n)
+        n = re.sub(r'[-_.:]', ' ', n)
+        n = re.sub(r'\b\d{3,4}p\b', ' ', n)        # 1080p
+        n = re.sub(r'\bs\d+\b', ' ', n)            # season markers (S3)
+        n = re.sub(
+            r'\b(ova|bd|batch|complete|collection|dual|audio|eng|sub|multiple|'
+            r'subtitle|hevc|x265|x264|aac|web|dl|remux|bluray)\b', ' ', n)
+        n = re.sub(r'\b\d+\b', ' ', n)             # loose episode numbers
+        n = re.sub(r'\s+', ' ', n).strip()
+
+        ratio = difflib.SequenceMatcher(None, q, n).ratio()
+        if re.match(r'^' + re.escape(q) + r'\b', n):
+            ratio += 0.4
+        return ratio
+
     # ------------------------------------------------------------------
     # Detail view with episode picker + MAL status section
     # ------------------------------------------------------------------
@@ -3010,10 +3044,13 @@ class AnimeModePanel(MoviesModePanel):
             # torlink --kind anime: Nyaa (full-text RSS) + SubsPlease (JSON API,
             # keyed by show + episode). Pass "title episode" so Nyaa narrows to
             # the requested episode; SubsPlease matches the show name.
+            # spanish=False: anime is wanted in Japanese/original, so don't rank
+            # or tag Castilian releases first the way movies do.
             try:
                 query = f"{title} {episode}" if episode else title
                 self._status_sig.emit(f"Buscando «{query}» en Nyaa/SubsPlease…")
-                found.extend(ts.search(query, kind="anime", limit=15))
+                found.extend(ts.search(query, kind="anime", limit=15,
+                                       spanish=False))
             except Exception as exc:
                 errors.append(f"torlink-anime: {exc}")
 
@@ -3025,7 +3062,7 @@ class AnimeModePanel(MoviesModePanel):
                 )
                 return
 
-            # De-duplicate by infohash, sort by seeders.
+            # De-duplicate by infohash.
             seen, unique = set(), []
             for t in found:
                 m = re.search(r"btih:([a-zA-Z0-9]+)", t.magnet or "")
@@ -3034,7 +3071,14 @@ class AnimeModePanel(MoviesModePanel):
                     continue
                 seen.add(key)
                 unique.append(t)
-            unique.sort(key=lambda t: t.seeders, reverse=True)
+
+            # Rank by how closely each release title matches the searched anime
+            # title, then by seeders. Keeps "Monster" above "Monster Hunter" /
+            # "Re:Monster" instead of drowning it under higher-seeded neighbours.
+            unique.sort(
+                key=lambda t: (self._title_match_score(title, t.title), t.seeders),
+                reverse=True,
+            )
 
             self._torrents_found.emit(unique, anime)
 
