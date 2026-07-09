@@ -111,6 +111,7 @@ class MainWindow(QMainWindow):
     _playback_sig = pyqtSignal(dict)
     _playback_like_sig = pyqtSignal(str, bool, str)
     _download_sig = pyqtSignal(dict)
+    _downloads_changed_sig = pyqtSignal(list)  # DownloadManager snapshot → UI thread
     _whatsapp_chat_sig = pyqtSignal(str)
     _mic_avail_sig = pyqtSignal(bool)
     _toast_sig = pyqtSignal(str, int)
@@ -159,8 +160,10 @@ class MainWindow(QMainWindow):
         self._youtube_panel: QWidget | None = None
         self._movies_panel: QWidget | None = None
         self._anime_panel: QWidget | None = None
+        self._games_panel: QWidget | None = None
         self._calendar_panel: QWidget | None = None
         self._settings_panel: QWidget | None = None
+        self._cardtrader_panel: QWidget | None = None
 
         central = QWidget()
         central.setObjectName("AppRoot")
@@ -224,12 +227,23 @@ class MainWindow(QMainWindow):
         self._playback_sig.connect(self._apply_playback)
         self._playback_like_sig.connect(self._apply_playback_like)
         self._download_sig.connect(self._apply_download_state)
+        self._downloads_changed_sig.connect(self._downloads_list.render)
         self._whatsapp_chat_sig.connect(self._open_whatsapp)
         self._mic_avail_sig.connect(self._apply_mic_available)
         self._toast_sig.connect(self._show_toast)
         self._wa_notify_sig.connect(self._show_wa_notification)
         self._wa_unread_sig.connect(self._apply_wa_unread_badge)
         self._wa_avatar_sig.connect(self._apply_wa_toast_avatar)
+
+        # Persistent downloads: the manager fires its listener on a worker
+        # thread, so bounce the snapshot onto the Qt thread via a signal. Then
+        # resume anything that was mid-download when the app last closed.
+        from actions.download_manager import get_manager as _get_dl_manager
+        self._dl_manager = _get_dl_manager()
+        self._dl_manager.add_listener(
+            lambda snapshot: self._downloads_changed_sig.emit(list(snapshot))
+        )
+        QTimer.singleShot(0, self._dl_manager.resume_interrupted)
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -491,7 +505,7 @@ class MainWindow(QMainWindow):
     def _set_mode_combo(self, mode: str):
         self._active_mode = mode
         # Remember the last space so "Espacio inicial → Último usado" works.
-        if mode in ("Normal", "WhatsApp", "Gmail", "Drive", "Music", "YouTube", "Movies", "Anime", "Calendar"):
+        if mode in ("Normal", "WhatsApp", "Gmail", "Drive", "Music", "YouTube", "Movies", "Anime", "Games", "Calendar", "CardTrader"):
             try:
                 app_settings.set("last_space", mode)
             except Exception:
@@ -517,7 +531,9 @@ class MainWindow(QMainWindow):
             "YouTube": ("YouTube", "Vídeos y reproducción"),
             "Movies": ("Películas", "Streaming via torrents"),
             "Anime": ("Anime", "Manga y series japonesas"),
+            "Games": ("Juegos", "SteamDB · FitGirl Repacks"),
             "Calendar": ("Calendario", "Google Calendar"),
+            "CardTrader": ("Cartas Magic", "CardTrader"),
             "Ajustes": ("Ajustes", "Configuración de la app"),
         }
         title, context = mode_copy.get(mode, (mode, "Espacio de trabajo"))
@@ -589,6 +605,15 @@ class MainWindow(QMainWindow):
         self._center_stack.setCurrentWidget(self._anime_panel)
         self._center_stack.setVisible(True)
 
+    def _show_games_mode(self):
+        self._set_mode_combo("Games")
+        self._apply_right_panel_visibility()
+        if self._games_panel is None:
+            self._games_panel = GamesModePanel(parent=self)
+            self._center_stack.addWidget(self._games_panel)
+        self._center_stack.setCurrentWidget(self._games_panel)
+        self._center_stack.setVisible(True)
+
     def _show_calendar_mode(self):
         self._set_mode_combo("Calendar")
         self._apply_right_panel_visibility()
@@ -596,6 +621,15 @@ class MainWindow(QMainWindow):
             self._calendar_panel = CalendarModePanel(parent=self)
             self._center_stack.addWidget(self._calendar_panel)
         self._center_stack.setCurrentWidget(self._calendar_panel)
+        self._center_stack.setVisible(True)
+
+    def _show_cardtrader_mode(self):
+        self._set_mode_combo("CardTrader")
+        self._apply_right_panel_visibility()
+        if self._cardtrader_panel is None:
+            self._cardtrader_panel = CardTraderModePanel(parent=self)
+            self._center_stack.addWidget(self._cardtrader_panel)
+        self._center_stack.setCurrentWidget(self._cardtrader_panel)
         self._center_stack.setVisible(True)
 
     def _show_settings_mode(self):
@@ -628,8 +662,12 @@ class MainWindow(QMainWindow):
             self._show_movies_mode()
         elif mode == "Anime":
             self._show_anime_mode()
+        elif mode == "Games":
+            self._show_games_mode()
         elif mode == "Calendar":
             self._show_calendar_mode()
+        elif mode == "CardTrader":
+            self._show_cardtrader_mode()
         elif mode == "Ajustes":
             self._show_settings_mode()
         else:
@@ -786,13 +824,15 @@ class MainWindow(QMainWindow):
             {"mode": "Normal", "icon": "home", "label": "Inicio", "labelHasKeyword": ["I"], "hasBadge": False},
             {"mode": "WhatsApp", "icon": "chat", "label": "WhatsApp", "labelHasKeyword": ["W"], "hasBadge": True},
             {"mode": "Gmail", "icon": "mail", "label": "Correo", "labelHasKeyword": ["C"], "hasBadge": False},
-            {"mode": "Drive", "icon": "drive", "label": "Drive", "labelHasKeyword": ["D"], "hasBadge": False},
+            {"mode": "Drive", "icon": "drive_svg", "label": "Drive", "labelHasKeyword": ["D"], "hasBadge": False},
             {"mode": "Music", "icon": "music", "label": "Música", "labelHasKeyword": ["M"], "hasBadge": False},
             {"mode": "YouTube", "icon": "youtube", "label": "YouTube", "labelHasKeyword": ["Y"], "hasBadge": False},
             {"mode": "Movies", "icon": "film", "label": "Películas", "labelHasKeyword": ["P"], "hasBadge": False},
-            {"mode": "Anime", "icon": "tv", "label": "Anime", "labelHasKeyword": ["N"], "hasBadge": False},
-            {"mode": "Calendar", "icon": "calendar", "label": "Calendario", "labelHasKeyword": ["A"], "hasBadge": False},
-            {"mode": "Ajustes", "icon": "settings", "label": "Ajustes", "labelHasKeyword": ["J"], "hasBadge": False},
+            {"mode": "Anime", "icon": "anime", "label": "Anime", "labelHasKeyword": ["N"], "hasBadge": False},
+            {"mode": "Games", "icon": "gamepad", "label": "Juegos", "labelHasKeyword": ["U"], "hasBadge": False},
+            {"mode": "Calendar", "icon": "calendar_svg", "label": "Calendario", "labelHasKeyword": ["A"], "hasBadge": False},
+            {"mode": "CardTrader", "icon": "corona", "label": "Cartas Magic", "labelHasKeyword": ["G"], "hasBadge": False},
+            {"mode": "Ajustes", "icon": "settings_svg", "label": "Ajustes", "labelHasKeyword": ["J"], "hasBadge": False},
         ]
         self._mode_icon_names = {item["mode"]: item["icon"] for item in nav_items}
         self._mode_shortcuts = {
@@ -908,6 +948,16 @@ class MainWindow(QMainWindow):
         self._download_widget = DownloadWidget()
         self._download_widget.cancel_requested.connect(self._request_download_cancel)
         activity_layout.addWidget(self._download_widget)
+
+        # Persistent torrent downloads (games/movies/anime) — managed list with
+        # per-item progress + a three-dot menu, backed by DownloadManager.
+        self._downloads_list = DownloadsListWidget()
+        self._downloads_list.pause_requested.connect(self._on_download_pause)
+        self._downloads_list.resume_requested.connect(self._on_download_resume)
+        self._downloads_list.remove_requested.connect(self._on_download_remove)
+        self._downloads_list.open_requested.connect(self._on_download_open)
+        activity_layout.addWidget(self._downloads_list)
+
         lay.addWidget(activity, stretch=1)
 
         divider_one = QFrame()
@@ -1531,6 +1581,18 @@ class MainWindow(QMainWindow):
                 y -= gap
             except Exception:
                 continue
+
+    def _on_download_pause(self, download_id: str):
+        self._dl_manager.pause(download_id)
+
+    def _on_download_resume(self, download_id: str):
+        self._dl_manager.resume(download_id)
+
+    def _on_download_remove(self, download_id: str):
+        self._dl_manager.remove(download_id)
+
+    def _on_download_open(self, download_id: str):
+        self._dl_manager.open_folder(download_id)
 
     def _request_download_cancel(self):
         if callable(self.on_download_cancel):
