@@ -4,6 +4,7 @@ from datetime import date as _date, datetime as _datetime, timedelta as _timedel
 import time
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
@@ -405,6 +406,12 @@ class _SeekSlider(QSlider):
 
 
 
+
+
+# Shared, bounded pool for per-episode thumbnail downloads. A long anime
+# (One Piece = 1389 episodes) would otherwise spawn one thread per row; this
+# caps concurrent network fetches while rows still populate progressively.
+_THUMB_POOL = ThreadPoolExecutor(max_workers=6)
 
 
 def _download_image(url: str, timeout: int = 15) -> bytes:
@@ -1000,6 +1007,9 @@ class _EpisodeRow(QWidget):
     """Netflix-style episode list item: thumbnail, number badge, title, meta."""
 
     play_clicked = pyqtSignal(int)  # episode number
+    _thumb_ready = pyqtSignal(QPixmap)  # marshals the bg-thread download to the UI thread
+
+    _TW, _TH = 140, 79
 
     def __init__(self, ep: dict, poster_pixmap=None, parent=None):
         super().__init__(parent)
@@ -1014,25 +1024,38 @@ class _EpisodeRow(QWidget):
         lay.setContentsMargins(6, 6, 10, 6)
         lay.setSpacing(12)
 
-        thumb = QLabel()
-        thumb.setFixedSize(140, 79)
-        thumb.setStyleSheet("background:#1a2226; border-radius:8px;")
-        thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        if poster_pixmap and not poster_pixmap.isNull():
-            scaled = poster_pixmap.scaled(
-                140, 79, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = (scaled.width() - 140) // 2
-            y = (scaled.height() - 79) // 2
-            thumb.setPixmap(_round_pixmap(scaled.copy(x, y, 140, 79), 8))
-        else:
-            thumb.setText(str(ep.get("number", "?")))
-            thumb.setFont(QFont("Inter", 14, QFont.Weight.Bold))
-            thumb.setStyleSheet(
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(self._TW, self._TH)
+        self.thumb.setStyleSheet("background:#1a2226; border-radius:8px;")
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._thumb_ready.connect(self._on_thumb_ready)
+        # Kept so a failed per-episode fetch (long series often proxy stills
+        # through metahub.space, which 404s for many season/episode combos)
+        # can fall back to the series poster instead of a bare number.
+        self._poster_fallback = poster_pixmap
+
+        thumb_url = ep.get("thumbnail") or ""
+        if thumb_url:
+            # Placeholder (episode number) while its own still loads in the
+            # background; the still — not the series poster — actually shows
+            # this episode.
+            self.thumb.setText(str(ep.get("number", "?")))
+            self.thumb.setFont(QFont("Inter", 14, QFont.Weight.Bold))
+            self.thumb.setStyleSheet(
                 "background:#1a2226; border-radius:8px; color:#9aa6ab;"
             )
-        lay.addWidget(thumb)
+            _THUMB_POOL.submit(self._fetch_thumb, thumb_url)
+        elif poster_pixmap and not poster_pixmap.isNull():
+            # No per-episode still available (e.g. movies/specials) — fall
+            # back to the series poster rather than a bare number.
+            self._set_thumb_pixmap(poster_pixmap)
+        else:
+            self.thumb.setText(str(ep.get("number", "?")))
+            self.thumb.setFont(QFont("Inter", 14, QFont.Weight.Bold))
+            self.thumb.setStyleSheet(
+                "background:#1a2226; border-radius:8px; color:#9aa6ab;"
+            )
+        lay.addWidget(self.thumb)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(4)
@@ -1072,6 +1095,37 @@ class _EpisodeRow(QWidget):
 
     def mousePressEvent(self, ev):
         self.play_clicked.emit(self._ep.get("number", 0))
+
+    def _fetch_thumb(self, url: str):
+        """Runs on a _THUMB_POOL worker thread."""
+        pm = QPixmap()
+        try:
+            data = _download_image(url, timeout=10)
+            pm.loadFromData(data)
+        except Exception:
+            pm = QPixmap()  # empty/null -> _on_thumb_ready falls back to the poster
+        self._thumb_ready.emit(pm)  # cross-thread signal, queued to the UI thread
+
+    def _on_thumb_ready(self, pm: QPixmap):
+        # The row may have been deleted (user navigated away) by the time the
+        # background download finishes; guard against the dangling C++ object.
+        try:
+            if not pm.isNull():
+                self._set_thumb_pixmap(pm)
+            elif self._poster_fallback and not self._poster_fallback.isNull():
+                self._set_thumb_pixmap(self._poster_fallback)
+        except RuntimeError:
+            pass
+
+    def _set_thumb_pixmap(self, pm: "QPixmap"):
+        scaled = pm.scaled(
+            self._TW, self._TH, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = (scaled.width() - self._TW) // 2
+        y = (scaled.height() - self._TH) // 2
+        self.thumb.setText("")
+        self.thumb.setPixmap(_round_pixmap(scaled.copy(x, y, self._TW, self._TH), 8))
 
 
 class MoviesModePanel(QWidget):
