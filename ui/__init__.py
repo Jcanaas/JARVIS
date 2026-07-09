@@ -1379,6 +1379,10 @@ class MainWindow(QMainWindow):
             return
         self._mic_available = available
         if not available:
+            # Save current state before forcing mute (in case mic reconnects)
+            from actions import app_settings
+            if app_settings.get("mic_default_state", "on") == "remember":
+                app_settings.set("mic_last_state", "off" if self._muted else "on")
             self._muted = True
             self.hud.muted = True
             self._mute_btn.setEnabled(False)
@@ -1387,9 +1391,16 @@ class MainWindow(QMainWindow):
             self._log.append_log("SYS: No microphone detected.")
         else:
             self._mute_btn.setEnabled(True)
-            self._muted = False
-            self.hud.muted = False
-            self._apply_state("LISTENING")
+            # Restore state based on mode when mic reconnects
+            from actions import app_settings
+            mic_default_state = app_settings.get("mic_default_state", "on")
+            if mic_default_state == "remember":
+                last_state = app_settings.get("mic_last_state", "on")
+                self._muted = last_state == "off"
+            else:
+                self._muted = mic_default_state == "off"
+            self.hud.muted = self._muted
+            self._apply_state("MUTED" if self._muted else "LISTENING")
             self._style_mute_btn()
             self._log.append_log("SYS: Microphone connected.")
 
