@@ -2113,7 +2113,8 @@ class JarvisLive:
                     self._turn_done_event = asyncio.Event()
 
                     print("[JARVIS] ✅ Connected.")
-                    self.ui.set_state("LISTENING")
+                    if not self.ui.muted:
+                        self.ui.set_state("LISTENING")
                     self.ui.write_log("SYS: JARVIS online.")
 
                     tg.create_task(self._send_realtime())
