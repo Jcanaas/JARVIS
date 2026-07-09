@@ -12,6 +12,7 @@ from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 
+from actions.perf_helpers import SharedThreadPool
 from ..theme import *
 from ..icons import *
 from ..widgets import *
@@ -190,7 +191,7 @@ class DriveModePanel(QWidget):
             actions.addWidget(btn)
         actions.addStretch()
         root.addLayout(actions)
-        QTimer.singleShot(200, self.load_recent)
+        QTimer.singleShot(500, self.load_recent)
 
     def _panel_style(self) -> str:
         return f"""
@@ -344,7 +345,7 @@ class DriveModePanel(QWidget):
                 result = exc
             self._result_sig.emit(op, result)
 
-        threading.Thread(target=worker, daemon=True).start()
+        SharedThreadPool().submit(worker)
 
     def _selected_file(self) -> dict:
         item = self.file_list.currentItem()
@@ -524,7 +525,7 @@ class DriveModePanel(QWidget):
                 result = exc
             self._preview_sig.emit(request_id, result)
 
-        threading.Thread(target=worker, daemon=True).start()
+        SharedThreadPool().submit(worker)
 
     def _render_drive_metadata(self, file: dict):
         name = html_lib.escape(str(file.get("name") or "(sin nombre)"))

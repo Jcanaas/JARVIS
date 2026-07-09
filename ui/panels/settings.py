@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import *
 
 from actions import app_settings
 from actions.paths import config_path
+from actions.perf_helpers import SharedThreadPool
 
 from ..theme import *
 from ..icons import *
@@ -703,7 +704,7 @@ class SettingsModePanel(QWidget):
                     self, "Error al exportar", m,
                 ))
 
-        threading.Thread(target=_work, daemon=True).start()
+        SharedThreadPool().submit(_work)
 
     def _settings_import_playlist(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -733,7 +734,7 @@ class SettingsModePanel(QWidget):
                     self, "Error al importar", m,
                 ))
 
-        threading.Thread(target=_work, daemon=True).start()
+        SharedThreadPool().submit(_work)
 
     def _settings_play_imported(self, tracks: list, name: str = ""):
         win = self.window()

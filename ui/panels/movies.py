@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import *
 from ..theme import *
 from ..icons import *
 from ..widgets import *
+from actions.perf_helpers import DiskImageCache, SharedThreadPool
 
 try:
     import vlc
@@ -408,23 +409,30 @@ class _SeekSlider(QSlider):
 
 
 
-# Shared, bounded pool for per-episode thumbnail downloads. A long anime
-# (One Piece = 1389 episodes) would otherwise spawn one thread per row; this
-# caps concurrent network fetches while rows still populate progressively.
-_THUMB_POOL = ThreadPoolExecutor(max_workers=6)
+# Backdrop/thumbnail disk cache and shared thread pool (from perf_helpers)
+_BACKDROP_CACHE = DiskImageCache("movie_backdrops")
+_THUMB_CACHE_DISK = DiskImageCache("movie_thumbs")
 
 
-def _download_image(url: str, timeout: int = 15) -> bytes:
-    """Fetch image bytes with a browser User-Agent.
+def _download_image(url: str, timeout: int = 15, cache=None) -> bytes:
+    """Fetch image bytes with a browser User-Agent and disk caching.
 
     Some CDNs (notably media.kitsu.app, which serves anime posters) return HTTP
     403 for the default 'Python-urllib/x.y' User-Agent, so anime posters showed
     the 🎬 placeholder. TMDB's CDN doesn't block it, which is why movie posters
     worked. Sending a browser UA fixes both.
     """
+    if cache is None:
+        cache = _THUMB_CACHE_DISK
+    cached = cache.get(url)
+    if cached:
+        return cached
     import urllib.request
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    return urllib.request.urlopen(req, timeout=timeout).read()
+    data = urllib.request.urlopen(req, timeout=timeout).read()
+    if data and cache:
+        cache.put(url, data)
+    return data
 
 
 def _round_pixmap(pixmap: "QPixmap", radius: int) -> "QPixmap":
@@ -841,12 +849,9 @@ class _HeroBanner(QWidget):
     def _fetch(self, index: int, url: str):
         def work():
             try:
-                import urllib.request
-                req = urllib.request.Request(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0"}  # Más compatible con CDNs
-                )
-                data = urllib.request.urlopen(req, timeout=15).read()
+                data = _download_image(url, timeout=10, cache=_BACKDROP_CACHE)
+                if not data:
+                    return
                 img = QImage()
                 img.loadFromData(data)
                 if not img.isNull():
@@ -858,7 +863,7 @@ class _HeroBanner(QWidget):
                     self._bg_ready.emit(index, img)
             except Exception:
                 pass
-        threading.Thread(target=work, daemon=True).start()
+        SharedThreadPool().submit(work)
 
     def _on_bg_ready(self, index: int, img: QImage):
         px = QPixmap.fromImage(img)
@@ -1044,7 +1049,7 @@ class _EpisodeRow(QWidget):
             self.thumb.setStyleSheet(
                 "background:#1a2226; border-radius:8px; color:#9aa6ab;"
             )
-            _THUMB_POOL.submit(self._fetch_thumb, thumb_url)
+            SharedThreadPool().submit(self._fetch_thumb, thumb_url)
         elif poster_pixmap and not poster_pixmap.isNull():
             # No per-episode still available (e.g. movies/specials) — fall
             # back to the series poster rather than a bare number.
@@ -1097,10 +1102,10 @@ class _EpisodeRow(QWidget):
         self.play_clicked.emit(self._ep.get("number", 0))
 
     def _fetch_thumb(self, url: str):
-        """Runs on a _THUMB_POOL worker thread."""
+        """Runs on a SharedThreadPool worker thread. Download, cache, and decode."""
         pm = QPixmap()
         try:
-            data = _download_image(url, timeout=10)
+            data = _download_image(url, timeout=10, cache=_THUMB_CACHE_DISK)
             pm.loadFromData(data)
         except Exception:
             pm = QPixmap()  # empty/null -> _on_thumb_ready falls back to the poster
