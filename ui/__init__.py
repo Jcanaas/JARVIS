@@ -138,7 +138,6 @@ class MainWindow(QMainWindow):
         self.on_download_cancel = None
         self._muted           = False
         self._mic_available   = True
-        self._load_mic_state_from_config()
         self._toast_label: QLabel | None = None
         self._wa_toasts: list[WhatsAppToast] = []
         self._wa_avatar_cache: dict[str, bytes] = {}
@@ -280,6 +279,7 @@ class MainWindow(QMainWindow):
         self.on_playback_command = None  # callback: fn(action, params)
         self._music_float: _MusicFloatWindow | None = None
 
+        self._load_mic_state_from_config()
         self._apply_startup_settings()
 
     def closeEvent(self, event):
