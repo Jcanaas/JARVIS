@@ -2099,7 +2099,8 @@ class JarvisLive:
         while True:
             try:
                 print("[JARVIS] 🔌 Connecting...")
-                self.ui.set_state("THINKING")
+                if not self.ui.muted:
+                    self.ui.set_state("THINKING")
                 config = self._build_config()
 
                 async with (
@@ -2126,7 +2127,8 @@ class JarvisLive:
                 print(f"[JARVIS] ⚠️ {e}")
                 traceback.print_exc()
             self.set_speaking(False)
-            self.ui.set_state("THINKING")
+            if not self.ui.muted:
+                self.ui.set_state("THINKING")
             print("[JARVIS] 🔄 Reconnecting in 3s...")
             await asyncio.sleep(3)
 
