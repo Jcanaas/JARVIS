@@ -466,19 +466,31 @@ def playlist_preview(query_or_id: str = "", limit: int = 5) -> dict:
     }
 
 
+_LIKED_THUMB_CACHE: dict = {"ts": 0.0, "url": ""}
+
+
 def list_playlists(limit: int | None = None) -> List[Dict]:
     yt = _get_ytmusic(require_auth=True)
     pls = yt.get_library_playlists(limit=_optional_limit(limit))
     out = []
     seen: set[str] = set()
 
+    # The liked-songs cover requires its own API round-trip; cache it for a
+    # while so opening the playlists view doesn't pay it every time.
+    import time as _time
     liked_thumb = ""
-    try:
-        liked_preview = get_liked_songs(limit=1)
-        if isinstance(liked_preview, list) and liked_preview:
-            liked_thumb = _thumbnail_url(liked_preview[0])
-    except Exception:
-        liked_thumb = ""
+    if (_time.monotonic() - _LIKED_THUMB_CACHE["ts"]) < 600 and _LIKED_THUMB_CACHE["url"]:
+        liked_thumb = _LIKED_THUMB_CACHE["url"]
+    else:
+        try:
+            liked_preview = get_liked_songs(limit=1)
+            if isinstance(liked_preview, list) and liked_preview:
+                liked_thumb = _thumbnail_url(liked_preview[0])
+            if liked_thumb:
+                _LIKED_THUMB_CACHE["ts"] = _time.monotonic()
+                _LIKED_THUMB_CACHE["url"] = liked_thumb
+        except Exception:
+            liked_thumb = ""
 
     out.append({
         "playlistId": "LM",
@@ -921,17 +933,37 @@ def download_liked_audio(limit: int = 25, output_dir: str = "", shuffle: bool = 
 # ytmusicapi client
 # ---------------------------------------------------------------------------
 
+_YT_CLIENT_CACHE: dict = {"key": None, "client": None}
+
+
 def _get_ytmusic(require_auth: bool = False):
-    """Return a YTMusic client. Uses OAuth if available, else unauthenticated."""
+    """Return a YTMusic client. Uses OAuth if available, else unauthenticated.
+
+    The client is memoized per auth-file mtime: constructing YTMusic re-reads
+    and parses the oauth file every time, which added latency to every call."""
     from ytmusicapi import YTMusic
     if OAUTH_FILE.exists():
         try:
-            return YTMusic(str(OAUTH_FILE))
+            key = ("oauth", OAUTH_FILE.stat().st_mtime_ns)
+            if _YT_CLIENT_CACHE["key"] == key and _YT_CLIENT_CACHE["client"] is not None:
+                return _YT_CLIENT_CACHE["client"]
+            client = YTMusic(str(OAUTH_FILE))
+            _YT_CLIENT_CACHE["key"] = key
+            _YT_CLIENT_CACHE["client"] = client
+            return client
         except Exception:
             pass
     if require_auth:
-        return _refresh_ytmusic_auth()
-    return YTMusic()
+        client = _refresh_ytmusic_auth()
+        _YT_CLIENT_CACHE["key"] = None
+        _YT_CLIENT_CACHE["client"] = None
+        return client
+    if _YT_CLIENT_CACHE["key"] == ("anon",) and _YT_CLIENT_CACHE["client"] is not None:
+        return _YT_CLIENT_CACHE["client"]
+    client = YTMusic()
+    _YT_CLIENT_CACHE["key"] = ("anon",)
+    _YT_CLIENT_CACHE["client"] = client
+    return client
 
 
 def _save_ytmusic_headers(headers: Dict[str, str]) -> None:

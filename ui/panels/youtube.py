@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import *
 from ..theme import *
 from ..icons import *
 from ..widgets import *
+from actions.perf_helpers import DiskImageCache
 
 class _AspectVideo(QWidget):
     """Keeps a child surface at a fixed aspect ratio, centered (no double black bars)."""
@@ -283,6 +284,7 @@ class YouTubeModePanel(QWidget):
         self._progress_hook = progress_hook
         self._by_id: dict[str, dict] = {}
         self._thumb_cache: dict[str, bytes] = {}
+        self._thumb_disk_cache = DiskImageCache("yt_thumbs")
         self._thumb_loading: set[str] = set()
         self._thumb_targets: dict[str, list[QLabel]] = {}
         self._thumb_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="yt-art")
@@ -698,10 +700,14 @@ class YouTubeModePanel(QWidget):
         def worker():
             raw = b""
             try:
-                import requests
-                resp = requests.get(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg", timeout=8)
-                if resp.ok:
-                    raw = resp.content
+                raw = self._thumb_disk_cache.get(vid)
+                if not raw:
+                    import requests
+                    resp = requests.get(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg", timeout=6)
+                    if resp.ok:
+                        raw = resp.content
+                        if raw:
+                            self._thumb_disk_cache.put(vid, raw)
             except Exception:
                 raw = b""
             self._thumb_sig.emit(vid, raw)

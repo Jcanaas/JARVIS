@@ -13,6 +13,7 @@ from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 
 from actions import app_settings
+from actions.perf_helpers import DiskImageCache
 
 from ..theme import *
 from ..icons import *
@@ -30,6 +31,11 @@ class MusicModePanelV2(QWidget):
         self._current_playlist: dict | None = None
         self._search_results: dict[str, list[dict]] = {"songs": [], "playlists": [], "artists": []}
         self._thumb_cache: dict[str, bytes] = {}
+        self._thumb_disk_cache = DiskImageCache("yt_music_thumbs")
+        self._thumb_pixmap_cache: dict[tuple[str, int], QPixmap] = {}
+        self._playlist_tracks_cache: dict[str, tuple[float, list[dict]]] = {}
+        self._playlist_request = 0
+        self._library_playlists_cache: list[dict] | None = None
         self._thumb_loading: set[str] = set()
         self._thumb_rows: dict[str, set[int]] = {}
         self._thumb_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="music-art")
@@ -949,6 +955,9 @@ class MusicModePanelV2(QWidget):
         raw = data.get("thumb_b64") or ""
         if not raw:
             return None
+        cache_key = (raw[:64], size)
+        if cache_key in self._thumb_pixmap_cache:
+            return self._thumb_pixmap_cache[cache_key]
         try:
             pix = QPixmap()
             pix.loadFromData(base64.b64decode(raw))
@@ -971,6 +980,7 @@ class MusicModePanelV2(QWidget):
                 painter.setClipPath(clip)
                 painter.drawPixmap(0, 0, cropped)
                 painter.end()
+                self._thumb_pixmap_cache[cache_key] = result
                 return result
         except Exception:
             pass
@@ -1109,10 +1119,15 @@ class MusicModePanelV2(QWidget):
         cached = self._thumb_cache.get(url)
         if cached is not None:
             return base64.b64encode(cached).decode("ascii")
+        cached = self._thumb_disk_cache.get(url)
+        if cached is not None:
+            self._thumb_cache[url] = cached
+            return base64.b64encode(cached).decode("ascii")
         try:
-            resp = requests.get(url, timeout=8)
+            resp = requests.get(url, timeout=4)
             resp.raise_for_status()
             self._thumb_cache[url] = resp.content
+            self._thumb_disk_cache.put(url, resp.content)
             return base64.b64encode(resp.content).decode("ascii")
         except Exception:
             return ""
@@ -1130,6 +1145,11 @@ class MusicModePanelV2(QWidget):
         if cached is not None:
             self._apply_thumb(url, cached)
             return
+        cached = self._thumb_disk_cache.get(url)
+        if cached is not None:
+            self._thumb_cache[url] = cached
+            self._apply_thumb(url, cached)
+            return
         if url in self._thumb_loading:
             return
         if self._thumb_executor_closed:
@@ -1139,9 +1159,13 @@ class MusicModePanelV2(QWidget):
         def worker():
             raw = b""
             try:
-                resp = requests.get(url, timeout=6)
-                resp.raise_for_status()
-                raw = resp.content
+                raw = self._thumb_disk_cache.get(url)
+                if not raw:
+                    resp = requests.get(url, timeout=4)
+                    resp.raise_for_status()
+                    raw = resp.content
+                    if raw:
+                        self._thumb_disk_cache.put(url, raw)
             except Exception:
                 raw = b""
             try:
@@ -1581,6 +1605,25 @@ class MusicModePanelV2(QWidget):
         self._show_browse_content()
         self.filter_row.setVisible(False)
         self._set_active_section("playlists")
+        # Render the last known list instantly, then refresh silently in the
+        # background; a stale-by-seconds library beats staring at "Cargando...".
+        cached = self._library_playlists_cache
+        if cached is not None:
+            self.filter_row.setVisible(False)
+            self._show_playlists(list(cached))
+
+            def worker():
+                try:
+                    fresh = __import__("actions.ytmusic", fromlist=["list_playlists"]).list_playlists(limit=None)
+                except Exception:
+                    return
+                try:
+                    self._result_sig.emit("library_playlists_refresh", fresh)
+                except RuntimeError:
+                    pass
+
+            threading.Thread(target=worker, daemon=True).start()
+            return
         self._run("library_playlists", lambda: __import__("actions.ytmusic", fromlist=["list_playlists"]).list_playlists(limit=None))
 
     def search(self):
@@ -1707,22 +1750,74 @@ class MusicModePanelV2(QWidget):
         if kind == "song":
             self._play_song(data)
 
+    # First page rendered immediately; the rest streams in from a background
+    # fetch. get_playlist with limit=None walks every continuation page
+    # sequentially, which froze the UI for seconds on large playlists.
+    _PLAYLIST_FIRST_PAGE = 100
+    _PLAYLIST_CACHE_TTL = 300.0  # seconds
+
     def open_playlist(self, data: dict):
         pid = data.get("playlistId") or data.get("browseId") or ""
         if not pid:
             return
         self._current_playlist = dict(data)
         self._table_kind = "playlist_tracks"
+        self._playlist_request += 1
         self._set_header(self._playlist_title(data), self._playlist_meta(data), "Lista", data)
+
+        import time as _time
+        cached = self._playlist_tracks_cache.get(pid)
+        if cached and (_time.monotonic() - cached[0]) < self._PLAYLIST_CACHE_TTL:
+            self._show_songs(list(cached[1]), table_kind="playlist_tracks", playlist=self._current_playlist or {})
+            return
 
         def _load():
             return __import__("actions.ytmusic", fromlist=["list_playlist_tracks"]).list_playlist_tracks(
                 query_or_id=pid,
-                limit=None,
+                limit=self._PLAYLIST_FIRST_PAGE,
                 shuffle=False,
             )
 
         self._run("playlist_tracks", _load)
+
+    def _fetch_remaining_playlist_tracks(self, pid: str, request: int):
+        """Fetch the full track list in the background and append the tail."""
+        def worker():
+            try:
+                tracks = __import__("actions.ytmusic", fromlist=["list_playlist_tracks"]).list_playlist_tracks(
+                    query_or_id=pid,
+                    limit=None,
+                    shuffle=False,
+                )
+            except Exception:
+                return
+            import time as _time
+            self._playlist_tracks_cache[pid] = (_time.monotonic(), list(tracks))
+            try:
+                self._result_sig.emit("playlist_tracks_full", (request, pid, tracks))
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _append_playlist_tail(self, tracks: list[dict]):
+        """Append tracks beyond the already-rendered first page without resetting the table."""
+        start = len(self._items)
+        if len(tracks) <= start:
+            return
+        for idx in range(start, len(tracks)):
+            data = dict(tracks[idx])
+            data["_kind"] = "song"
+            data["_index"] = idx
+            self._items.append(data)
+            self._add_song_row(idx, data, idx)
+        if self._current_playlist:
+            playlist = dict(self._current_playlist)
+            playlist["itemCount"] = len(self._items)
+            self._current_playlist = playlist
+            self._set_header(self._playlist_title(playlist), self._playlist_meta(playlist, len(self._items)), "Lista", playlist)
+        self._prefetch_thumbnails()
+        self._restore_playing_selection()
 
     def _play_song(self, data: dict):
         self._mark_playing_row(
@@ -2122,11 +2217,41 @@ class MusicModePanelV2(QWidget):
             return
         if op == "library_playlists":
             self.filter_row.setVisible(False)
+            self._library_playlists_cache = list(result or [])
             self._show_playlists(list(result or []))
+            return
+        if op == "library_playlists_refresh":
+            fresh = list(result or [])
+            changed = fresh != (self._library_playlists_cache or [])
+            self._library_playlists_cache = fresh
+            # Only re-render if something actually changed and the user is
+            # still looking at the playlists view.
+            if changed and self._table_kind == "playlists" and not self._artist_page_open:
+                self._show_playlists(fresh)
             return
         if op == "playlist_tracks":
             self.filter_row.setVisible(False)
-            self._show_songs(list(result or []), table_kind="playlist_tracks", playlist=self._current_playlist or {})
+            tracks = list(result or [])
+            self._show_songs(tracks, table_kind="playlist_tracks", playlist=self._current_playlist or {})
+            pid = ""
+            if self._current_playlist:
+                pid = self._current_playlist.get("playlistId") or self._current_playlist.get("browseId") or ""
+            if pid:
+                if len(tracks) >= self._PLAYLIST_FIRST_PAGE:
+                    self._fetch_remaining_playlist_tracks(pid, self._playlist_request)
+                else:
+                    import time as _time
+                    self._playlist_tracks_cache[pid] = (_time.monotonic(), tracks)
+            return
+        if op == "playlist_tracks_full":
+            request, pid, tracks = result
+            current_pid = ""
+            if self._current_playlist:
+                current_pid = self._current_playlist.get("playlistId") or self._current_playlist.get("browseId") or ""
+            if (request != self._playlist_request or pid != current_pid
+                    or self._table_kind != "playlist_tracks"):
+                return
+            self._append_playlist_tail(list(tracks or []))
             return
         if op == "search_all":
             if not isinstance(result, dict):

@@ -37,6 +37,7 @@ import numpy as np
 import wave
 import tempfile
 from actions.file_processor import _process_audio
+from actions.perf_helpers import DiskImageCache
 
 BG = "#0A0C16"
 PANEL = "rgba(255, 255, 255, 0.050)"
@@ -503,6 +504,7 @@ class WhatsAppWindow(QWidget):
         self._chat_avatar_labels: dict[str, QLabel] = {}
         self._avatar_url_labels: dict[str, list[QLabel]] = {}
         self._avatar_cache: dict[str, bytes] = {}
+        self._avatar_disk_cache = DiskImageCache("wa_avatars")
         self._avatar_url_loading: set[str] = set()
         self._avatar_image_loading: set[str] = set()
         self._name_cache: dict[str, str] = {}
@@ -647,6 +649,11 @@ class WhatsAppWindow(QWidget):
         self._incoming_refresh_timer = QTimer(self)
         self._incoming_refresh_timer.setSingleShot(True)
         self._incoming_refresh_timer.timeout.connect(self.load_chats)
+        # Debounce search input (250ms) to avoid re-rendering on every keystroke.
+        self._search_debounce_timer = QTimer(self)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.setInterval(250)
+        self._search_debounce_timer.timeout.connect(self._render_chat_list)
         # Listen for new incoming messages from the manager (called from its
         # polling thread → marshalled to the GUI thread via the Qt signal).
         self._closing = False
@@ -828,7 +835,7 @@ class WhatsAppWindow(QWidget):
             self.chat_search = QLineEdit()
             self.chat_search.setPlaceholderText("Buscar chats")
             self.chat_search.addAction(_wa_icon("search", TEXT_MED, 16), QLineEdit.ActionPosition.LeadingPosition)
-            self.chat_search.textChanged.connect(self._render_chat_list)
+            self.chat_search.textChanged.connect(self._on_search_changed)
             chats_col.addWidget(self.chat_search)
 
             chips = QHBoxLayout()
@@ -1379,6 +1386,11 @@ class WhatsAppWindow(QWidget):
             self.chat_list.setCurrentItem(self._chat_items[current])
         QTimer.singleShot(0, self._load_visible_chat_avatars)
 
+    def _on_search_changed(self):
+        """Debounce search input: restart timer to delay render."""
+        self._search_debounce_timer.stop()
+        self._search_debounce_timer.start()
+
     def _load_visible_chat_avatars(self):
         if not self.chat_mode or not hasattr(self, "chat_list"):
             return
@@ -1677,6 +1689,10 @@ class WhatsAppWindow(QWidget):
             return None
         raw = self._avatar_cache.get(url)
         if raw is None:
+            raw = self._avatar_disk_cache.get(url)
+            if raw:
+                self._avatar_cache[url] = raw
+        if raw is None:
             self._ensure_avatar_image_async(url)
             return None
         pix = QPixmap()
@@ -1723,11 +1739,14 @@ class WhatsAppWindow(QWidget):
                 resp = requests.get(url, timeout=5)
                 resp.raise_for_status()
                 raw = resp.content
+                if raw:
+                    self._avatar_disk_cache.put(url, raw)
             except Exception:
                 raw = b""
             self.avatar_image_loaded.emit(url, raw)
 
-        threading.Thread(target=worker, daemon=True).start()
+        from actions.perf_helpers import SharedThreadPool
+        SharedThreadPool().submit(worker)
 
     def _apply_avatar_image(self, url: str, raw):
         url = str(url or "").strip()
@@ -3027,6 +3046,20 @@ class WhatsAppWindow(QWidget):
                 indicator.set_ack(int(final_msg.get("ack")))
             except (TypeError, ValueError):
                 pass
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.chat_mode and hasattr(self, "_ack_timer"):
+            self._ack_timer.start()
+        if hasattr(self, "_qr_poll_timer"):
+            self._qr_poll_timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if hasattr(self, "_ack_timer"):
+            self._ack_timer.stop()
+        if hasattr(self, "_qr_poll_timer"):
+            self._qr_poll_timer.stop()
 
 
 def main():
