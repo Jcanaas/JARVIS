@@ -1349,8 +1349,10 @@ class MainWindow(QMainWindow):
         elif mic_state == "remember":
             self._muted = last_state == "off"
 
+        # Force state update regardless of what _apply_mic_available may have done
         self.hud.muted = self._muted
-        self._apply_state("MUTED" if self._muted else "LISTENING")
+        self.hud.state = "MUTED" if self._muted else "LISTENING"
+        self._apply_state(self.hud.state)
         self._style_mute_btn()
 
     def _toggle_mute(self):
