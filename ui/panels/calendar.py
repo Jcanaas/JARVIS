@@ -8,6 +8,7 @@ from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 
+from actions.perf_helpers import SharedThreadPool
 from ..theme import *
 from ..icons import *
 from ..widgets import *
@@ -742,7 +743,7 @@ class CalendarModePanel(QWidget):
             except Exception as e:
                 self._month_sig.emit([], str(e))
 
-        threading.Thread(target=work, daemon=True).start()
+        SharedThreadPool().submit(work)
 
     @staticmethod
     def _event_date(ev: dict) -> _date | None:
