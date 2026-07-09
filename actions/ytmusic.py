@@ -31,6 +31,7 @@ except Exception:
     _YTDLP_OK = False
 
 from actions.paths import RESOURCE_DIR, config_path
+from actions.perf_helpers import SharedThreadPool
 
 BASE_DIR   = RESOURCE_DIR
 OAUTH_FILE = config_path("ytmusic_oauth.json")
@@ -728,7 +729,7 @@ def queue_playlist_download(
         if should_start:
             _DOWNLOAD_QUEUE_RUNNING = True
     if should_start:
-        threading.Thread(target=_queue_worker, kwargs={"progress_hook": progress_hook, "cancel_event": cancel_event}, daemon=True).start()
+        SharedThreadPool().submit(_queue_worker, progress_hook=progress_hook, cancel_event=cancel_event)
     return {"queued": True, "queue_length": queue_len, "job": job}
 
 
