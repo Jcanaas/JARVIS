@@ -164,7 +164,8 @@ class ToggleSwitch(QWidget):
         super().mousePressEvent(event)
 
     def paintEvent(self, event):
-        from PyQt6.QtGui import QColor, QRectF
+        from PyQt6.QtGui import QColor
+        from PyQt6.QtCore import QRectF
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
