@@ -1351,6 +1351,7 @@ class MainWindow(QMainWindow):
 
         self.hud.muted = self._muted
         self._apply_state("MUTED" if self._muted else "LISTENING")
+        self._style_mute_btn()
 
     def _toggle_mute(self):
         if not self._mic_available:
