@@ -1146,6 +1146,7 @@ class MoviesModePanel(QWidget):
         self._detail_movie = None
         self._playing_movie = None
         self._playing_episode = 0  # absolute episode number (0 for movies)
+        self._episode_numbers: list[int] = []  # populated by AnimeModePanel
 
         # Playback backend + player state (mirrors the YouTube player).
         self._player = _VLCBackend() if HAS_VLC else None
@@ -1365,6 +1366,13 @@ class MoviesModePanel(QWidget):
         pp.setContentsMargins(0, 0, 0, 0)
         pp.setSpacing(8)
 
+        # Header: what's playing (anime/movie title + episode when applicable).
+        self._player_header = QLabel("")
+        self._player_header.setFont(QFont("Inter", 13, QFont.Weight.DemiBold))
+        self._player_header.setStyleSheet("color:#f4f4f2; background:transparent;")
+        self._player_header.setWordWrap(True)
+        pp.addWidget(self._player_header)
+
         self.video_surface = QWidget()
         self.video_surface.setObjectName("MoviesSurface")
         self.video_surface.setStyleSheet("QWidget#MoviesSurface { background:#000000; border-radius:12px; }")
@@ -1386,6 +1394,34 @@ class MoviesModePanel(QWidget):
         self._player_col.setSpacing(0)
         self._player_col.addWidget(self.video_box, 0, Qt.AlignmentFlag.AlignHCenter)
         pp.addLayout(self._player_col)
+
+        # Prev/Siguiente episode row — anime only, hidden for movies/single items.
+        nav_row = QHBoxLayout()
+        nav_row.addStretch(1)
+        self._prev_ep_btn = QPushButton("⏮  Anterior")
+        self._next_ep_btn = QPushButton("Siguiente  ⏭")
+        for b in (self._prev_ep_btn, self._next_ep_btn):
+            b.setFixedHeight(38)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet("""
+                QPushButton {
+                    background:#273035; color:#f4f4f2; border:none;
+                    border-radius:8px; padding:0 18px; font-weight:600;
+                }
+                QPushButton:hover { background:#2f3d43; }
+                QPushButton:disabled { color:#5a666b; }
+            """)
+        self._prev_ep_btn.clicked.connect(lambda: self._play_adjacent_episode(-1))
+        self._next_ep_btn.clicked.connect(lambda: self._play_adjacent_episode(1))
+        nav_row.addWidget(self._prev_ep_btn)
+        nav_row.addSpacing(10)
+        nav_row.addWidget(self._next_ep_btn)
+        nav_row.addStretch(1)
+        self._nav_row_widget = QWidget()
+        self._nav_row_widget.setLayout(nav_row)
+        self._nav_row_widget.setVisible(False)
+        pp.addWidget(self._nav_row_widget)
+
         pp.addStretch(1)
         self._stack.addWidget(player_page)
 
@@ -1772,6 +1808,7 @@ class MoviesModePanel(QWidget):
         self._current_view = "player"
         self._back_btn.setVisible(True)
         self._title.setText(f"▶ {movie.title}")
+        self._update_player_header_and_nav()
         self._stack.setCurrentIndex(2)
         self._placeholder.setText(f"Preparando «{movie.title}» (seeders: {torrent.seeders})…")
         self._placeholder.show()
@@ -1810,6 +1847,36 @@ class MoviesModePanel(QWidget):
         self._start_poller()
         self._set_status(f"▶ Reproduciendo «{movie.title}»")
 
+    def _update_player_header_and_nav(self):
+        """Set the 'now playing' header and show/enable episode nav buttons.
+
+        Episode nav only makes sense for anime with a known episode list
+        (self._episode_numbers, populated by AnimeModePanel when the detail
+        view loads episodes); movies/series without one keep the row hidden.
+        """
+        movie = self._playing_movie
+        title = getattr(movie, "title", "") if movie else ""
+        ep = self._playing_episode
+        header = f"{title}  ·  Episodio {ep}" if ep else title
+        self._player_header.setText(header)
+
+        numbers = getattr(self, "_episode_numbers", [])
+        show_nav = bool(numbers) and ep in numbers
+        self._nav_row_widget.setVisible(show_nav)
+        if show_nav:
+            idx = numbers.index(ep)
+            self._prev_ep_btn.setEnabled(idx > 0)
+            self._next_ep_btn.setEnabled(idx < len(numbers) - 1)
+
+    def _play_adjacent_episode(self, delta: int):
+        numbers = getattr(self, "_episode_numbers", [])
+        movie = self._playing_movie
+        if not numbers or movie is None or self._playing_episode not in numbers:
+            return
+        idx = numbers.index(self._playing_episode) + delta
+        if 0 <= idx < len(numbers):
+            self._search_and_play(movie, episode=numbers[idx])
+
     # -- transport controls -------------------------------------------------
     def _toggle_play(self):
         if self._player:
@@ -1818,12 +1885,25 @@ class MoviesModePanel(QWidget):
     def _on_volume(self, value: int):
         if self._player:
             self._player.set_volume(value)
+        # Keep the embedded slider and the fullscreen overlay's in sync,
+        # whichever one the user didn't just drag.
+        if self.volume.value() != value:
+            self.volume.blockSignals(True)
+            self.volume.setValue(value)
+            self.volume.blockSignals(False)
+        ov = self._float_overlay
+        if ov is not None and ov.volume is not None and ov.volume.value() != value:
+            ov.volume.blockSignals(True)
+            ov.volume.setValue(value)
+            ov.volume.blockSignals(False)
 
-    def _on_seek_released(self):
+    def _on_seek_released(self, value: "int | None" = None):
+        """value is None when triggered by the embedded slider (reads
+        self.seek directly); the fullscreen overlay passes its own value."""
         self._user_dragging = False
         if not self._player or self._duration <= 0:
             return
-        frac = self.seek.value() / 1000.0
+        frac = (value if value is not None else self.seek.value()) / 1000.0
         self._player.seek_abs(frac * self._duration)
 
     def _forward_video(self):
@@ -1852,6 +1932,16 @@ class MoviesModePanel(QWidget):
         """)
         return menu
 
+    def _active_control_btn(self, name: str):
+        """Return the audio/subs button to anchor a popup menu to: the
+        fullscreen overlay's when detached (the embedded _pc bar is hidden
+        and off-position there), else the embedded panel's own button."""
+        if self._detached_mode == "fullscreen" and self._float_overlay is not None:
+            btn = getattr(self._float_overlay, name, None)
+            if btn is not None:
+                return btn
+        return getattr(self._pc, name)
+
     def _show_audio_menu(self):
         if not (self._player and self._player.available()):
             return
@@ -1863,7 +1953,8 @@ class MoviesModePanel(QWidget):
         for tid, name in tracks:
             act = menu.addAction(("● " if tid == current else "     ") + self._track_label(name))
             act.triggered.connect(lambda _=False, i=tid: self._player.set_audio_track(i))
-        menu.exec(self._pc.audio_btn.mapToGlobal(self._pc.audio_btn.rect().topLeft()))
+        btn = self._active_control_btn("audio_btn")
+        menu.exec(btn.mapToGlobal(btn.rect().topLeft()))
 
     def _show_subs_menu(self):
         if not (self._player and self._player.available()):
@@ -1899,7 +1990,8 @@ class MoviesModePanel(QWidget):
         reset = menu.addAction("Restablecer sincronía")
         reset.triggered.connect(lambda: self._player.set_subtitle_delay(0))
 
-        menu.exec(self._pc.subs_btn.mapToGlobal(self._pc.subs_btn.rect().topLeft()))
+        btn = self._active_control_btn("subs_btn")
+        menu.exec(btn.mapToGlobal(btn.rect().topLeft()))
 
     def _nudge_subs(self, delta_us: int):
         if self._player and self._player.available():
@@ -1965,11 +2057,18 @@ class MoviesModePanel(QWidget):
     def _apply_position(self, pos: float, dur: float, playing: bool):
         self._duration = dur
         self.play_btn.set_shape(_MediaBtn.PAUSE if playing else _MediaBtn.PLAY)
-        if self._float_overlay is not None:
-            self._float_overlay.set_playing(playing)
+        clock = f"{self._fmt_clock(pos)} / {self._fmt_clock(dur)}"
+        ov = self._float_overlay
+        if ov is not None:
+            ov.set_playing(playing)
         if not self._user_dragging and dur > 0:
-            self.seek.setValue(int(max(0.0, min(1.0, pos / dur)) * 1000))
-        self.time_lbl.setText(f"{self._fmt_clock(pos)} / {self._fmt_clock(dur)}")
+            frac = int(max(0.0, min(1.0, pos / dur)) * 1000)
+            self.seek.setValue(frac)
+            if ov is not None and ov.seek is not None:
+                ov.seek.setValue(frac)
+        self.time_lbl.setText(clock)
+        if ov is not None and ov.time_lbl is not None:
+            ov.time_lbl.setText(clock)
 
     @staticmethod
     def _fmt_clock(seconds: float) -> str:
@@ -1989,8 +2088,8 @@ class MoviesModePanel(QWidget):
         box = getattr(self, "video_box", None)
         if box is None:
             return
-        avail_w = self.width() - 40
-        max_h = int(self.height() * 0.74)
+        avail_w = self.width() - 24
+        max_h = int(self.height() * 0.88)
         if avail_w <= 0 or max_h <= 0:
             return
         w = avail_w
@@ -2063,15 +2162,27 @@ class MoviesModePanel(QWidget):
 
         overlay = _FloatOverlay({
             "toggle": self._toggle_play,
+            "prev": lambda: self._play_adjacent_episode(-1),
+            "next": lambda: self._play_adjacent_episode(1),
             "rewind": self._rewind_video,
             "forward": self._forward_video,
             "restore": self._reattach_video,
             "moved": self._on_pip_moved,
             "resized": self._on_pip_resized,
-        }, draggable=(mode == "floating"), resizable=(mode == "floating"))
+            "seek_pressed": lambda: setattr(self, "_user_dragging", True),
+            "seek_released": self._on_seek_released,
+            "volume_changed": self._on_volume,
+            "subs": self._show_subs_menu,
+            "audio": self._show_audio_menu,
+        }, draggable=(mode == "floating"), resizable=(mode == "floating"),
+           full_controls=True)
         self._float_overlay = overlay
         if self._playing_movie is not None:
-            overlay.set_meta(getattr(self._playing_movie, "title", ""), "")
+            ep = getattr(self, "_playing_episode", 0)
+            sub = f"Episodio {ep}" if ep else ""
+            overlay.set_meta(getattr(self._playing_movie, "title", ""), sub)
+        if overlay.volume is not None:
+            overlay.volume.setValue(self.volume.value())
 
         if mode == "fullscreen":
             self._fs_window = win
@@ -2897,6 +3008,7 @@ class AnimeModePanel(MoviesModePanel):
         self._detail_movie = anime
         self._mal_detail_anime = anime
         self._mal_detail_card = None
+        self._episode_numbers = []  # stale from a previously opened anime
         self._back_btn.setVisible(True)
         self._title.setText(anime.title)
 
@@ -3003,6 +3115,11 @@ class AnimeModePanel(MoviesModePanel):
     def _on_episodes_ready(self, episodes: list, anime, poster_pixmap):
         if anime is not self._detail_movie:
             return   # el usuario ya navegó a otro anime
+
+        # Feeds the prev/next episode nav row shown under the player.
+        self._episode_numbers = [int(ep.get("number", 0)) for ep in episodes]
+        if self._current_view == "player" and self._playing_movie is anime:
+            self._update_player_header_and_nav()
 
         if self._ep_loading_lbl:
             self._ep_loading_lbl.setText(

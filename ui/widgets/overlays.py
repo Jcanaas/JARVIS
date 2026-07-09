@@ -59,7 +59,8 @@ class _FloatOverlay(QWidget):
     (polled, to avoid child enter/leave flicker), and drags the video with it.
     """
 
-    def __init__(self, callbacks: dict, draggable: bool = True, resizable: bool = False):
+    def __init__(self, callbacks: dict, draggable: bool = True, resizable: bool = False,
+                full_controls: bool = False):
         super().__init__()
         self._cb = callbacks
         self._drag = None
@@ -69,6 +70,11 @@ class _FloatOverlay(QWidget):
         self._min_w = 320
         self._resize_anchor = None
         self._resize_w0 = 0
+        # Seek/volume/subtitle/audio-track controls, shown only in fullscreen
+        # (not the small draggable PiP window, which has no room for them).
+        # Opt-in via full_controls so music.py's separate _FloatOverlay class
+        # and youtube.py's plain usage of this one are unaffected.
+        self._show_extra = full_controls and not resizable
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -99,6 +105,42 @@ class _FloatOverlay(QWidget):
         self._restore.clicked.connect(lambda: self._cb.get("restore", lambda: None)())
         top_l.addWidget(self._restore, alignment=Qt.AlignmentFlag.AlignTop)
 
+        # Seek row (fullscreen only): time label + progress slider, sitting
+        # just above the transport row. This — plus volume/audio/subtitle in
+        # the transport row below — was previously missing entirely in
+        # fullscreen: only prev/rewind/play/forward/next existed there, so
+        # switching to fullscreen silently dropped seek/volume/subtitles.
+        self._seekrow = None
+        self.seek: "QSlider | None" = None
+        self.time_lbl: "QLabel | None" = None
+        self.volume: "QSlider | None" = None
+        self.subs_btn: "QPushButton | None" = None
+        self.audio_btn: "QPushButton | None" = None
+        if self._show_extra:
+            self._seekrow = QWidget(self)
+            self._seekrow.setStyleSheet(
+                "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                " stop:0 rgba(0,0,0,0), stop:1 rgba(0,0,0,0.5));"
+            )
+            sr_l = QHBoxLayout(self._seekrow)
+            sr_l.setContentsMargins(16, 4, 16, 4)
+            sr_l.setSpacing(10)
+            self.time_lbl = QLabel("0:00 / 0:00")
+            self.time_lbl.setStyleSheet("color:#FFFFFF; font-size:11px; background:transparent;")
+            self.seek = QSlider(Qt.Orientation.Horizontal)
+            self.seek.setRange(0, 1000)
+            self.seek.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.seek.setStyleSheet(
+                "QSlider::groove:horizontal { height:4px; background:rgba(255,255,255,0.25); border-radius:2px; }"
+                "QSlider::sub-page:horizontal { background:#5E82FF; border-radius:2px; }"
+                "QSlider::handle:horizontal { background:#DCE1FF; width:13px; height:13px; margin:-5px 0; border-radius:6px; }"
+            )
+            self.seek.sliderPressed.connect(lambda: self._cb.get("seek_pressed", lambda: None)())
+            self.seek.sliderReleased.connect(
+                lambda: self._cb.get("seek_released", lambda: None)(self.seek.value()))
+            sr_l.addWidget(self.time_lbl)
+            sr_l.addWidget(self.seek, 1)
+
         self._bottom = QWidget(self)
         self._bottom.setStyleSheet(
             "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
@@ -127,6 +169,36 @@ class _FloatOverlay(QWidget):
         bot_l.addWidget(self._next)
         bot_l.addStretch()
 
+        if self._show_extra:
+            self.volume = QSlider(Qt.Orientation.Horizontal)
+            self.volume.setRange(0, 100)
+            self.volume.setValue(90)
+            self.volume.setFixedWidth(88)
+            self.volume.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.volume.setStyleSheet(
+                "QSlider::groove:horizontal { height:4px; background:rgba(255,255,255,0.25); border-radius:2px; }"
+                "QSlider::sub-page:horizontal { background:#B6C4FF; border-radius:2px; }"
+                "QSlider::handle:horizontal { background:#DCE1FF; width:12px; height:12px; margin:-4px 0; border-radius:6px; }"
+            )
+            self.volume.valueChanged.connect(
+                lambda v: self._cb.get("volume_changed", lambda _v: None)(v))
+            self.audio_btn = _icon_button("audio", "Pista de audio", size=36, icon_size=18)
+            self.audio_btn.clicked.connect(lambda: self._cb.get("audio", lambda: None)())
+            self.subs_btn = QPushButton("CC")
+            self.subs_btn.setToolTip("Subtítulos")
+            self.subs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.subs_btn.setFixedSize(36, 36)
+            self.subs_btn.setStyleSheet(
+                "QPushButton { color:#FFFFFF; background:transparent; border:none;"
+                " font-size:12px; font-weight:800; }"
+                "QPushButton:hover { color:#B6C4FF; }"
+            )
+            self.subs_btn.clicked.connect(lambda: self._cb.get("subs", lambda: None)())
+            bot_l.addWidget(self.volume)
+            bot_l.addSpacing(4)
+            bot_l.addWidget(self.audio_btn)
+            bot_l.addWidget(self.subs_btn)
+
         self._grip = _CornerGrip(self) if self._resizable else None
 
         self._set_controls_visible(False)
@@ -144,6 +216,8 @@ class _FloatOverlay(QWidget):
         w, h = self.width(), self.height()
         self._top.setGeometry(0, 0, w, 58)
         self._bottom.setGeometry(0, h - 64, w, 64)
+        if self._seekrow is not None:
+            self._seekrow.setGeometry(0, h - 64 - 34, w, 34)
         if self._grip is not None:
             self._grip.move(w - self._grip.width() - 3, h - self._grip.height() - 3)
             self._grip.raise_()
@@ -178,12 +252,16 @@ class _FloatOverlay(QWidget):
     def _set_controls_visible(self, visible: bool):
         self._top.setVisible(visible)
         self._bottom.setVisible(visible)
+        if self._seekrow is not None:
+            self._seekrow.setVisible(visible)
         # Keep the resize grip visible regardless of hover state.
         if self._grip is not None:
             self._grip.setVisible(True)
         if visible:
             self._top.raise_()
             self._bottom.raise_()
+            if self._seekrow is not None:
+                self._seekrow.raise_()
         if self._grip is not None:
             self._grip.raise_()
 
