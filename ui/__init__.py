@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
         self.on_download_cancel = None
         self._muted           = False
         self._mic_available   = True
+        self._load_mic_state_from_config()
         self._toast_label: QLabel | None = None
         self._wa_toasts: list[WhatsAppToast] = []
         self._wa_avatar_cache: dict[str, bytes] = {}
@@ -1328,12 +1329,32 @@ class MainWindow(QMainWindow):
             )
             threading.Thread(target=self.on_text_command, args=(msg,), daemon=True).start()
 
+    def _load_mic_state_from_config(self):
+        """Load microphone state from app settings on startup."""
+        from actions import app_settings
+        mic_state = app_settings.get("mic_default_state", "on")
+        last_state = app_settings.get("mic_last_state", "on")
+
+        if mic_state == "on":
+            self._muted = False
+        elif mic_state == "off":
+            self._muted = True
+        elif mic_state == "remember":
+            self._muted = last_state == "off"
+
+        self.hud.muted = self._muted
+        self._apply_state("MUTED" if self._muted else "LISTENING")
+
     def _toggle_mute(self):
         if not self._mic_available:
             return  # button is locked when there's no microphone
         self._muted = not self._muted
         self.hud.muted = self._muted
         self._style_mute_btn()
+        # Save last state if remember mode is enabled
+        from actions import app_settings
+        if app_settings.get("mic_default_state", "on") == "remember":
+            app_settings.set("mic_last_state", "off" if self._muted else "on")
         if self._muted:
             self._apply_state("MUTED")
             self._log.append_log("SYS: Microphone muted.")

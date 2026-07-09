@@ -1086,6 +1086,24 @@ class SettingsModePanel(QWidget):
             self._out_combo,
         )
 
+        # Microphone default state
+        self._mic_state_combo = QComboBox()
+        self._mic_state_combo.addItem("Encendido (por defecto)", "on")
+        self._mic_state_combo.addItem("Apagado (por defecto)", "off")
+        self._mic_state_combo.addItem("Recordar último estado", "remember")
+        mic_state = app_settings.get("mic_default_state", "on")
+        mi = self._mic_state_combo.findData(mic_state)
+        self._mic_state_combo.setCurrentIndex(mi if mi >= 0 else 0)
+        self._mic_state_combo.setFixedHeight(32)
+        self._mic_state_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mic_state_combo.setStyleSheet(self._combo_qss())
+        self._mic_state_combo.currentIndexChanged.connect(self._on_mic_state_changed)
+        self._add_row(
+            dev_body, "Estado del micrófono al iniciar",
+            "Encendido: inicia escuchando. Apagado: inicia silenciado. Recordar: usa el último estado.",
+            self._mic_state_combo,
+        )
+
         dev_hint = QLabel("El micrófono se aplica al reiniciar la escucha; la salida, al instante.")
         dev_hint.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; font-size: 11px; border: none;")
         dev_body.addWidget(dev_hint)
@@ -1182,6 +1200,10 @@ class SettingsModePanel(QWidget):
         name = self._out_combo.currentData() or ""
         app_settings.set("audio_output_device", name)
         self._send_playback("set_audio_output_device", {"name": name})
+
+    def _on_mic_state_changed(self, _idx: int) -> None:
+        state = self._mic_state_combo.currentData() or "on"
+        app_settings.set("mic_default_state", state)
 
     def _build_appearance_page(self) -> QWidget:
         w = QWidget()
