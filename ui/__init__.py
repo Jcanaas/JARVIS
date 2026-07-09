@@ -285,6 +285,13 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Ensure the Qt loop actually quits when the main window is closed,
         even if floating/overlay windows are still open."""
+        # Save mic state if remember mode is enabled
+        try:
+            from actions import app_settings
+            if app_settings.get("mic_default_state", "on") == "remember":
+                app_settings.set("mic_last_state", "off" if self._muted else "on")
+        except Exception:
+            pass
         # Reattach any detached YouTube video first so the shared mpv surface
         # isn't destroyed out from under the panel (that path can crash).
         try:
