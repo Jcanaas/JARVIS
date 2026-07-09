@@ -1134,7 +1134,7 @@ class MoviesModePanel(QWidget):
     _results_ready = pyqtSignal(list, str, str)
     _status_sig = pyqtSignal(str)
     _show_detail = pyqtSignal(object)
-    _torrents_found = pyqtSignal(list, object)  # (torrents, movie)
+    _torrents_found = pyqtSignal(list, object, int)  # (torrents, movie, episode)
     _stream_ready = pyqtSignal(str, object)  # (stream_url, movie)
     _pos_sig = pyqtSignal(float, float, bool)  # position, duration, playing
     _subtitle_ready = pyqtSignal(str, str)  # (srt_path, label)
@@ -1145,6 +1145,7 @@ class MoviesModePanel(QWidget):
         self._current_view = "grid"  # "grid" | "detail" | "player"
         self._detail_movie = None
         self._playing_movie = None
+        self._playing_episode = 0  # absolute episode number (0 for movies)
 
         # Playback backend + player state (mirrors the YouTube player).
         self._player = _VLCBackend() if HAS_VLC else None
@@ -1699,6 +1700,10 @@ class MoviesModePanel(QWidget):
                 except Exception as exc:
                     imdb = ""
                     errors.append(f"imdb_id: {exc}")
+                if imdb:
+                    # Persist it on the Movie so subtitle lookup (which runs
+                    # later, once playback starts) doesn't have to re-resolve it.
+                    movie.imdb_id = imdb
 
             if imdb:
                 self._status_sig.emit(
@@ -1744,11 +1749,11 @@ class MoviesModePanel(QWidget):
                 unique.append(t)
             unique.sort(key=lambda t: (getattr(t, "spanish", False), t.seeders), reverse=True)
 
-            self._torrents_found.emit(unique, movie)
+            self._torrents_found.emit(unique, movie, 0)
 
         self._run_async(work)
 
-    def _show_torrent_select(self, torrents: list, movie):
+    def _show_torrent_select(self, torrents: list, movie, episode: int = 0):
         """Show the torrent selection dialog (runs on the main thread)."""
         dialog = _TorrentSelectDialog(torrents, self)
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_torrent:
@@ -1763,6 +1768,7 @@ class MoviesModePanel(QWidget):
         # Switch to the player view immediately with a "loading" placeholder,
         # then start the stream on a worker thread.
         self._playing_movie = movie
+        self._playing_episode = episode
         self._current_view = "player"
         self._back_btn.setVisible(True)
         self._title.setText(f"▶ {movie.title}")
@@ -1900,18 +1906,31 @@ class MoviesModePanel(QWidget):
             self._player.set_subtitle_delay(self._player.get_subtitle_delay() + delta_us)
 
     def _fetch_online_subs(self, language: str):
-        """Search + download subtitles from OpenSubtitles on a worker thread."""
+        """Search + download subtitles via Stremio subtitle addons, keyed by
+        the same id used for torrents (Kitsu for anime, IMDb otherwise) — no
+        title-based search, so no title/language mismatches."""
         movie = self._playing_movie
         if movie is None:
             return
+        episode = getattr(self, "_playing_episode", 0)
         lang_name = {"es": "español", "en": "inglés"}.get(language, language)
         self._set_status(f"Buscando subtítulos en {lang_name}…")
 
         def work():
+            from actions import stremio_subs as subs
+            kitsu_id = getattr(movie, "kitsu_id", "")
+            imdb_id = getattr(movie, "imdb_id", "")
             try:
-                from actions import opensubtitles as osub
-                year = int(getattr(movie, "release_year", 0) or 0)
-                path = osub.fetch_subtitle(movie.title, language=language, year=year)
+                if kitsu_id:
+                    path = subs.fetch_subtitle_by_kitsu(
+                        kitsu_id, episode=episode, language=language)
+                elif imdb_id:
+                    kind = getattr(movie, "media_type", "movie")
+                    path = subs.fetch_subtitle_by_imdb(
+                        imdb_id, kind=kind, episode=episode, language=language)
+                else:
+                    raise subs.StremioSubsError(
+                        "Sin id (IMDb/Kitsu) para buscar subtítulos.")
                 self._subtitle_ready.emit(path, lang_name)
             except Exception as e:
                 self._status_sig.emit(f"Subtítulos: {e}")
@@ -2124,6 +2143,7 @@ class MoviesModePanel(QWidget):
         if self._player:
             self._player.stop()
         self._playing_movie = None
+        self._playing_episode = 0
         try:
             from actions import vlc_player as vp
             self._run_async(vp.stop_streaming)
@@ -3176,7 +3196,7 @@ class AnimeModePanel(MoviesModePanel):
                     file_idx=getattr(s, "file_idx", -1))
                 for s in streams
             ]
-            self._torrents_found.emit(torrents, anime)
+            self._torrents_found.emit(torrents, anime, episode)
 
         self._run_async(work)
 
