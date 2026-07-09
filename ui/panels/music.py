@@ -955,9 +955,11 @@ class MusicModePanelV2(QWidget):
         raw = data.get("thumb_b64") or ""
         if not raw:
             return None
-        cache_key = (raw[:64], size)
+        import hashlib
+        cache_key = (hashlib.sha256(raw.encode()).hexdigest()[:16], size)
         if cache_key in self._thumb_pixmap_cache:
-            return self._thumb_pixmap_cache[cache_key]
+            cached = self._thumb_pixmap_cache[cache_key]
+            return QPixmap(cached) if cached else None
         try:
             pix = QPixmap()
             pix.loadFromData(base64.b64decode(raw))
@@ -981,7 +983,7 @@ class MusicModePanelV2(QWidget):
                 painter.drawPixmap(0, 0, cropped)
                 painter.end()
                 self._thumb_pixmap_cache[cache_key] = result
-                return result
+                return QPixmap(result)
         except Exception:
             pass
         return None
