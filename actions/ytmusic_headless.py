@@ -30,6 +30,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from actions.paths import RESOURCE_DIR
+
 # ── music log ─────────────────────────────────────────────────────────────────
 _LOG_PREFIX = "\033[36m[MUSIC]\033[0m"  # cyan
 # Toggle music subsystem logging. Default: disabled to avoid verbose logs filling disk.
@@ -65,7 +67,10 @@ def set_music_logging(enabled: bool) -> str:
 
 # Two named-pipe slots for true simultaneous crossfade.
 # Playback alternates between slot 0 and slot 1 on each crossfade transition.
-_PIPE_PATHS  = [r"\\.\pipe\jarvis_mpv", r"\\.\pipe\jarvis_mpv2"]
+# Per-process names: two Jarvis instances (dev + installed) must not attach to
+# each other's mpv processes through a shared pipe.
+_PIPE_PATHS  = [rf"\\.\pipe\jarvis_mpv_{os.getpid()}",
+                rf"\\.\pipe\jarvis_mpv2_{os.getpid()}"]
 _PIPE_PATH   = _PIPE_PATHS[0]  # kept as alias for external code
 _MPV_EXE = "mpv"
 
@@ -116,7 +121,6 @@ _atexit.register(_cleanup_on_exit)
 # Try to locate mpv.exe in the workspace root or tools folder, prefer that over PATH
 def _locate_mpv() -> str:
     # workspace/resource root (handles PyInstaller frozen builds too)
-    from actions.paths import RESOURCE_DIR
     root = RESOURCE_DIR
     candidates = [
         root / 'mpv.exe',
@@ -142,6 +146,7 @@ _last_meta = {
     "position": 0,
     "playing": False,
     "_sampled_at": 0.0,
+    "_started": False,
 }
 _procs: list = [None, None]   # one subprocess per slot
 _active_slot: int = 0         # which slot is currently the "main" player
@@ -428,6 +433,7 @@ def _locate_ytdlp() -> Optional[str]:
     import shutil
 
     candidates = [
+        str(RESOURCE_DIR / "yt-dlp.exe"),  # bundled binary (frozen build)
         shutil.which("yt-dlp"),
         shutil.which("yt-dlp.exe"),
         str(Path(sys.executable).parent / "yt-dlp.exe"),
@@ -632,9 +638,13 @@ _YTDLP_EXTRACTOR_ARGS: list = []
 
 def _ytdlp_cmd(args: list) -> Optional[str]:
     """Run yt-dlp with given args; returns stdout on success, None on failure."""
-    import shutil
-    exe = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
-    bases = ([exe] if exe else []) + [[sys.executable, "-m", "yt_dlp"]]
+    exe = _locate_ytdlp()
+    bases = [exe] if exe else []
+    # `python -m yt_dlp` only works when sys.executable is a real interpreter.
+    # In the frozen build sys.executable IS Jarvis.exe, so "-m yt_dlp" would
+    # just relaunch the whole app instead of running yt-dlp.
+    if not getattr(sys, "frozen", False):
+        bases.append([sys.executable, "-m", "yt_dlp"])
     for base in bases:
         cmd = (base if isinstance(base, list) else [base]) + _YTDLP_EXTRACTOR_ARGS + args
         try:
@@ -800,6 +810,7 @@ def _reload_current_stream(vid: str, title: str, artists: str, bad_url: str = ""
             "position": 0,
             "playing": True,
             "_sampled_at": time.monotonic(),
+            "_started": False,
         })
 
 
@@ -835,6 +846,7 @@ def _play_video(vid: str, title: str, artists: str) -> str:
                 "position": 0,
                 "playing": True,
                 "_sampled_at": time.monotonic(),
+                "_started": False,
             })
         _ensure_autoplay_worker()
         _prefetch_next_tracks()
@@ -955,6 +967,7 @@ def _begin_crossfade_overlap(
             "position":    0,
             "playing":     True,
             "_sampled_at": time.monotonic(),
+            "_started":    True,
         })
 
     def _fade():
@@ -1001,6 +1014,7 @@ def _begin_crossfade_overlap(
                 "position":    0,
                 "playing":     True,
                 "_sampled_at": time.monotonic(),
+                "_started":    True,
             })
 
         _xfade_in_progress = False
@@ -1045,6 +1059,7 @@ def _ensure_autoplay_worker() -> None:
                             if pos is not None:
                                 _last_meta["position"] = float(pos)
                                 _last_meta["_sampled_at"] = time.monotonic()
+                                _last_meta["_started"] = True
                             if dur is not None:
                                 _last_meta["duration"] = float(dur)
                             if paused is not None:
@@ -1447,7 +1462,12 @@ def current() -> dict:
     # If the poller thread is alive it already keeps _last_meta fresh every ~0.8s
     if _autoplay_thread is not None and _autoplay_thread.is_alive():
         sampled_at = float(base.pop("_sampled_at", 0.0) or 0.0)
-        if base.get("playing") and sampled_at > 0:
+        started = base.pop("_started", False)
+        # Until mpv has reported a real time-pos for this track, keep position
+        # frozen instead of interpolating from wall-clock elapsed — otherwise
+        # the counter climbs during the yt-dlp resolve/buffer window and then
+        # snaps back down once the real (near-zero) position arrives.
+        if started and base.get("playing") and sampled_at > 0:
             elapsed = max(0.0, time.monotonic() - sampled_at)
             duration = float(base.get("duration") or 0.0)
             position = float(base.get("position") or 0.0) + elapsed
@@ -1462,6 +1482,7 @@ def current() -> dict:
             if pos is not None:
                 _last_meta["position"] = float(pos)
                 _last_meta["_sampled_at"] = time.monotonic()
+                _last_meta["_started"] = True
                 base["position"] = _last_meta["position"]
             if paused is not None:
                 _last_meta["playing"] = not bool(paused)
@@ -1470,4 +1491,5 @@ def current() -> dict:
                 _last_meta["duration"] = float(dur)
                 base["duration"] = _last_meta["duration"]
     base.pop("_sampled_at", None)
+    base.pop("_started", None)
     return base
