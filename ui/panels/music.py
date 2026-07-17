@@ -106,8 +106,13 @@ class MusicModePanelV2(QWidget):
         self.filter_row.setVisible(False)
         root.addWidget(self.filter_row)
 
-        body = QHBoxLayout()
+        # The now-playing card lives beside the library on desktop, but a fixed
+        # side column becomes unusable before the panel itself is very narrow.
+        # A directional box layout lets it become a compact, full-width card on
+        # smaller windows instead of disappearing.
+        body = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         body.setSpacing(10)
+        self._body_layout = body
         root.addLayout(body, stretch=1)
 
         left = QWidget()
@@ -228,10 +233,11 @@ class MusicModePanelV2(QWidget):
         self.details_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.details_content = QWidget()
         self.details_content.setObjectName("NowPlayingContent")
-        details_content_layout = QVBoxLayout(self.details_content)
-        details_content_layout.setContentsMargins(0, 0, 0, 0)
-        details_content_layout.setSpacing(12)
-        details_content_layout.addWidget(self.detail_cover)
+        self.details_content_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom)
+        self.details_content.setLayout(self.details_content_layout)
+        self.details_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.details_content_layout.setSpacing(12)
+        self.details_content_layout.addWidget(self.detail_cover)
         self.details = QLabel()
         self.details.setOpenExternalLinks(False)
         self.details.setWordWrap(True)
@@ -239,8 +245,8 @@ class MusicModePanelV2(QWidget):
         self.details.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         self.details.setObjectName("NowPlayingDetails")
         self.details.linkActivated.connect(self._on_details_link)
-        details_content_layout.addWidget(self.details)
-        details_content_layout.addStretch()
+        self.details_content_layout.addWidget(self.details)
+        self.details_content_layout.addStretch()
         self.details_scroll.setWidget(self.details_content)
         details_layout.addWidget(self.details_scroll, stretch=1)
         self.details_panel.setMinimumWidth(310)
@@ -1103,8 +1109,10 @@ class MusicModePanelV2(QWidget):
             self.detail_cover.setPixmap(QPixmap())
             self.detail_cover.setText("♪")
             return
-        max_w = max(260, min(520, self.detail_cover.width() or 320))
-        max_h = max(260, min(360, self.detail_cover.maximumHeight() or 340))
+        compact = bool(getattr(self, "_details_compact_state", False))
+        min_size = 120 if compact else 260
+        max_w = max(min_size, min(520, self.detail_cover.width() or 320))
+        max_h = max(min_size, min(360, self.detail_cover.height() or 340))
         scaled = pix.scaled(
             max_w,
             max_h,
@@ -1880,17 +1888,65 @@ class MusicModePanelV2(QWidget):
         if cb:
             threading.Thread(target=cb, args=(action, params or {}), daemon=True).start()
 
-    _DETAILS_MIN_WIDTH = 760
+    _DETAILS_COMPACT_WIDTH = 860
     _HEADER_NARROW_WIDTH = 560
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._apply_details_responsive()
         self._update_details_visibility()
         self._apply_header_responsive()
 
     def _details_should_show(self) -> bool:
         data = self._now_playing_data if isinstance(self._now_playing_data, dict) else {}
-        return bool(data.get("title")) and self.width() >= self._DETAILS_MIN_WIDTH
+        return bool(data.get("title"))
+
+    def _apply_details_responsive(self):
+        """Keep now-playing useful at every practical panel width.
+
+        At desktop widths it is a persistent right rail.  Below the breakpoint
+        it moves below the library and turns into a short horizontal card, so
+        song and artist information remains available without squeezing either
+        the table or the album art.
+        """
+        compact = self.width() < self._DETAILS_COMPACT_WIDTH
+        if compact == getattr(self, "_details_compact_state", None):
+            return
+        self._details_compact_state = compact
+
+        if compact:
+            self._body_layout.setDirection(QBoxLayout.Direction.TopToBottom)
+            self._body_layout.setStretch(0, 1)
+            self._body_layout.setStretch(1, 0)
+            self.details_panel.setMinimumWidth(0)
+            self.details_panel.setMinimumHeight(174)
+            self.details_panel.setMaximumHeight(224)
+            self.details_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.details_content_layout.setDirection(QBoxLayout.Direction.LeftToRight)
+            self.details_content_layout.setStretch(0, 0)
+            self.details_content_layout.setStretch(1, 1)
+            self.detail_cover.setFixedSize(136, 136)
+        else:
+            self._body_layout.setDirection(QBoxLayout.Direction.LeftToRight)
+            self._body_layout.setStretch(0, 7)
+            self._body_layout.setStretch(1, 3)
+            self.details_panel.setMinimumWidth(310)
+            self.details_panel.setMinimumHeight(0)
+            self.details_panel.setMaximumHeight(16777215)
+            self.details_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            self.details_content_layout.setDirection(QBoxLayout.Direction.TopToBottom)
+            self.details_content_layout.setStretch(0, 0)
+            self.details_content_layout.setStretch(1, 0)
+            self.detail_cover.setMinimumHeight(260)
+            self.detail_cover.setMaximumHeight(360)
+            self.detail_cover.setMinimumWidth(0)
+            self.detail_cover.setMaximumWidth(16777215)
+            self.detail_cover.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # Re-scale the current artwork to its new container without waiting for
+        # a metadata refresh.
+        self._detail_render_fingerprint = ()
+        self._render_now_playing()
 
     def _update_details_visibility(self):
         try:
@@ -3121,6 +3177,8 @@ class _PanelControls(QWidget):
         bar_l.setSpacing(10)
 
         self.play_btn = _MediaBtn(_MediaBtn.PLAY)
+        self.back_btn = _icon_button("backward", "Retroceder 10 s", size=36, icon_size=18)
+        self.fwd_btn = _icon_button("forward", "Adelantar 10 s", size=36, icon_size=18)
         self.time_lbl = QLabel("0:00 / 0:00")
         self.time_lbl.setStyleSheet("color: #FFFFFF; font-size: 11px; background: transparent;")
         self.seek = _SeekSlider(Qt.Orientation.Horizontal)
@@ -3161,8 +3219,15 @@ class _PanelControls(QWidget):
         self.subs_btn.hide()
         self.float_btn = _icon_button("pip", "Vídeo flotante", size=36, icon_size=18)
         self.fullscreen_btn = _icon_button("fullscreen", "Pantalla completa", size=36, icon_size=18)
+        # White icons for video overlay buttons
+        for _name, _btn in (("backward", self.back_btn), ("forward", self.fwd_btn)):
+            _btn.setIcon(_line_icon(_name, "#FFFFFF", 18))
 
+        bar_l.addStretch()
+        bar_l.addWidget(self.back_btn)
         bar_l.addWidget(self.play_btn)
+        bar_l.addWidget(self.fwd_btn)
+        bar_l.addStretch()
         bar_l.addWidget(self.time_lbl)
         bar_l.addWidget(self.seek, stretch=1)
         bar_l.addWidget(self.vol_icon)
@@ -3236,6 +3301,8 @@ class _MusicFloatWindow(QWidget):
         self._duration = 0.0
         self._position = 0.0
         self._playing = False
+        self._ready = False
+        self._buffering = False
         self._user_dragging_slider = False
 
         self.setWindowFlags(
@@ -3387,7 +3454,13 @@ class _MusicFloatWindow(QWidget):
 
     # ---------------------------------------------------------------- progress
     def _tick(self):
-        if self._user_dragging_slider or not self._playing or self._duration <= 0:
+        if (
+            self._user_dragging_slider
+            or not self._playing
+            or not self._ready
+            or self._buffering
+            or self._duration <= 0
+        ):
             return
         self._position = min(self._duration, self._position + 0.25)
         pct = int((self._position / self._duration) * 100000)
@@ -3449,10 +3522,14 @@ class _MusicFloatWindow(QWidget):
         duration: float,
         playing: bool,
         thumb_pix: "QPixmap | None" = None,
+        ready: bool | None = None,
+        buffering: bool = False,
     ):
         self._duration = float(duration or 0)
         self._position = float(position or 0)
         self._playing = bool(playing)
+        self._ready = bool(playing) if ready is None else bool(ready)
+        self._buffering = bool(buffering)
 
         short = title[:32].rstrip() + "…" if len(title) > 33 else title
         self._title.setText(short or "— Ninguna canción —")
