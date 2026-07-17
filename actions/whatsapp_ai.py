@@ -33,6 +33,31 @@ def _message_line(message: dict[str, Any]) -> str:
     return f"{speaker}: {body}" if body else ""
 
 
+def translate_if_foreign(body: str, target_lang: str = "español") -> str:
+    """Translate incoming text if it isn't already in target_lang; else "".
+
+    Used to show an inline translation subtitle under foreign-language
+    messages. Cheap model, single short call — no conversation context needed.
+    """
+    from google import genai
+
+    text = " ".join(str(body or "").split())
+    if not text:
+        return ""
+    prompt = (
+        f"Si el siguiente texto de WhatsApp NO está ya en {target_lang}, tradúcelo "
+        f"al {target_lang} manteniendo el tono. Si ya está en {target_lang}, responde "
+        "exactamente con una cadena vacía. Devuelve únicamente la traducción o la "
+        f"cadena vacía, sin comillas ni explicación.\n\nTexto: {text}"
+    )
+    client = genai.Client(api_key=_api_key())
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+    )
+    return str(getattr(response, "text", "") or "").strip().strip('"')
+
+
 def generate_whatsapp_reply(
     chat_id: str,
     incoming_body: str = "",

@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import re
+from datetime import datetime
 import threading
 import json
 import os
@@ -9,6 +11,27 @@ import traceback
 import time
 from pathlib import Path
 from typing import Optional
+
+
+def _install_no_console_subprocess() -> None:
+    """Zero terminal windows: en Windows, cualquier subproceso lanzado desde
+    este proceso (yt-dlp, ffmpeg, schtasks, node, mpv...) hereda
+    CREATE_NO_WINDOW salvo que el llamador pase sus propios creationflags o
+    startupinfo. Solo suprime la consola — las apps GUI no se ven afectadas."""
+    if sys.platform != "win32":
+        return
+    import subprocess as _sp
+    _orig_init = _sp.Popen.__init__
+
+    def _no_window_init(self, *args, **kwargs):
+        if "creationflags" not in kwargs and "startupinfo" not in kwargs:
+            kwargs["creationflags"] = _sp.CREATE_NO_WINDOW
+        _orig_init(self, *args, **kwargs)
+
+    _sp.Popen.__init__ = _no_window_init
+
+
+_install_no_console_subprocess()
 
 
 def _install_safe_std_streams() -> None:
@@ -34,6 +57,41 @@ def _install_safe_std_streams() -> None:
 
 
 _install_safe_std_streams()
+
+
+def _install_crash_log() -> None:
+    """Log uncaught exceptions to a file instead of vanishing silently.
+
+    The frozen build runs windowed (no console), so an unhandled exception in
+    the main thread or a worker thread previously just disappeared — no
+    traceback anywhere, impossible to diagnose remotely. Most panel logic runs
+    via threading.Thread(...), so both hooks are needed.
+    """
+    try:
+        from actions.paths import LOGS_DIR
+    except Exception:
+        return
+    log_path = LOGS_DIR / "crash.log"
+
+    def _write(kind: str, exc_type, exc_value, tb):
+        try:
+            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                f.write(f"\n=== {kind} {datetime.now().isoformat()} ===\n")
+                traceback.print_exception(exc_type, exc_value, tb, file=f)
+        except Exception:
+            pass
+
+    def _excepthook(exc_type, exc_value, tb):
+        _write("MAIN THREAD", exc_type, exc_value, tb)
+
+    def _thread_excepthook(args):
+        _write(f"THREAD {args.thread.name}", args.exc_type, args.exc_value, args.exc_traceback)
+
+    sys.excepthook = _excepthook
+    threading.excepthook = _thread_excepthook
+
+
+_install_crash_log()
 
 
 def _silence_child_consoles() -> None:
@@ -82,12 +140,17 @@ from memory.conversation_history import (
 
 from actions.file_processor import file_processor
 from actions.flight_finder     import flight_finder
+from actions.cardtrader        import (
+    cardtrader_search_card, cardtrader_quote_deck, cardtrader_add_to_cart,
+    cardtrader_cart, cardtrader_catalog,
+)
 from actions.open_app          import open_app
 from actions.weather_report    import weather_action
 from actions.send_message      import send_message
 from actions.reminder          import reminder
 from actions.computer_settings import computer_settings
-from actions.screen_processor  import screen_process
+from actions.proactive         import ProactiveEngine
+from actions.screen_processor  import _capture_camera, _capture_screen
 from actions.youtube_video     import youtube_video
 from actions.desktop           import desktop_control
 from actions.browser_control   import browser_control
@@ -175,8 +238,12 @@ def _compute_fft_bins(samples_int16_flat, samplerate, n_bars: int = 64):
 # Keywords that identify Bluetooth headset mics (HFP profile).
 # Using them forces the headset into telephone-quality mode (8 kHz), which
 # degrades ALL audio output.  Prefer the built-in mic when available.
-_BT_MIC_KEYWORDS = ("bluetooth", "redmi", "airpod", "jabra", "sony", "bose",
-                    "sennheiser", "plantronics", "poly ", "beats")
+_BT_MIC_KEYWORDS = (
+    "bluetooth", "hands-free", "hands free", "headset", "ag audio", "hfp",
+    "manos libres", "auriculares con micrófono", "auriculares con microfono",
+    "redmi", "airpod", "jabra", "sony", "bose", "sennheiser",
+    "plantronics", "poly ", "beats",
+)
 
 def _pick_mic_device() -> Optional[int]:
     """Return the device index of the best non-Bluetooth input device.
@@ -289,6 +356,14 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
+def _get_config_flag(key: str, default: bool = False) -> bool:
+    try:
+        from actions import app_settings
+        return bool(app_settings.get(key, default))
+    except Exception:
+        return default
+
+
 def _load_system_prompt() -> str:
     try:
         return PROMPT_PATH.read_text(encoding="utf-8")
@@ -312,10 +387,19 @@ _ACTION_PROMISE_RE = re.compile(
 )
 _INTERNAL_TOOL_RECOVERY_MARKER = "[INTERNAL TOOL RECOVERY]"
 
-def _clean_transcript(text: str) -> str:    
+def _clean_transcript(text: str) -> str:
+    # NO .strip(): los chunks de transcripción de Gemini Live son deltas que
+    # pueden cortar una palabra por la mitad; quitar los espacios propios de
+    # cada chunk y re-unir con " " mete espacios dentro de palabras.
     text = _CTRL_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
-    return text.strip()
+    return text
+
+
+def _join_transcript(chunks: list) -> str:
+    # Los deltas ya traen su propio espaciado: concatenar tal cual y
+    # colapsar espacios repetidos al final.
+    return re.sub(r"\s+", " ", "".join(chunks)).strip()
 
 
 def _promised_action_without_tool(text: str) -> bool:
@@ -341,7 +425,8 @@ TOOL_DECLARATIONS = [
         "description": (
             "Opens any application on the computer. "
             "Use this whenever the user asks to open, launch, or start any app, "
-            "website, or program. Always call this tool — never just say you opened it."
+            "website, or program. Always call this tool — never just say you opened it. "
+            "EXCEPTION: to play music/songs never open a browser or YouTube Music — use the yt_music tool."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -356,12 +441,19 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "web_search",
-        "description": "Searches the web for any information.",
+        "description": (
+            "Searches the web for any information. Pick the right mode: "
+            "'news' for headlines/current events (parallel search, real articles), "
+            "'research' for deep detailed explanations, "
+            "'price' for product prices, "
+            "'compare' to compare items, "
+            "'search' (default) for everything else."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "query":  {"type": "STRING", "description": "Search query"},
-                "mode":   {"type": "STRING", "description": "search (default) or compare"},
+                "mode":   {"type": "STRING", "description": "search (default) | news | research | price | compare"},
                 "items":  {"type": "ARRAY", "items": {"type": "STRING"}, "description": "Items to compare"},
                 "aspect": {"type": "STRING", "description": "price | specs | reviews"}
             },
@@ -544,16 +636,16 @@ TOOL_DECLARATIONS = [
     {
         "name": "productivity_tools",
         "description": (
-            "Quick productivity summaries and searches. Use for recent/search WhatsApp messages, today's/next/free-busy calendar, "
-            "and concise Gmail inbox summaries. Actions: whatsapp_recent | whatsapp_search | calendar_today | calendar_next | "
-            "calendar_freebusy | email_summary."
+            "Quick productivity summaries and searches. Use for recent/search WhatsApp messages, digesting an unread-heavy "
+            "group chat, today's/next/free-busy calendar, and concise Gmail inbox summaries. Actions: whatsapp_recent | "
+            "whatsapp_search | whatsapp_group_digest | calendar_today | calendar_next | calendar_freebusy | email_summary."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "whatsapp_recent | whatsapp_search | calendar_today | calendar_next | calendar_freebusy | email_summary"},
+                "action": {"type": "STRING", "description": "whatsapp_recent | whatsapp_search | whatsapp_group_digest | calendar_today | calendar_next | calendar_freebusy | email_summary"},
                 "query": {"type": "STRING", "description": "Search text for whatsapp_search"},
-                "contact": {"type": "STRING", "description": "Optional WhatsApp contact for whatsapp_search"},
+                "contact": {"type": "STRING", "description": "WhatsApp contact or group name/chatId for whatsapp_search or whatsapp_group_digest"},
                 "to": {"type": "STRING", "description": "Alias for contact"},
                 "calendar_id": {"type": "STRING", "description": "Calendar ID, default primary"},
                 "label": {"type": "STRING", "description": "Gmail label, default INBOX"},
@@ -569,7 +661,9 @@ TOOL_DECLARATIONS = [
     {
         "name": "yt_music",
         "description": (
-            "YouTube Music via headless mpv. Use for: playing songs/artists/albums, "
+            "YouTube Music via the INTEGRATED headless player. MANDATORY for playing ANY song, artist, album or music: "
+            "NEVER open YouTube/YouTube Music in a browser or tab for music — always call this tool. "
+            "Use for: playing songs/artists/albums, "
             "controlling playback (pause, resume, next, previous, volume, shuffle), getting current song, "
             "searching music, lyrics, artist info, album tracklist, liked songs, history, liking a song, "
             "showing queue, listing user playlists, playing playlists/liked songs, listing all songs in a playlist, "
@@ -670,11 +764,13 @@ TOOL_DECLARATIONS = [
     {
         "name": "screen_process",
         "description": (
-            "Captures and analyzes the screen or webcam image. "
+            "Captures the screen or webcam image and sends it to YOU in the next message. "
             "MUST be called when user asks what is on screen, what you see, "
             "analyze my screen, look at camera, etc. "
             "You have NO visual ability without this tool. "
-            "After calling this tool, stay SILENT — the vision module speaks directly."
+            "After calling it, say ONE short natural sentence and wait — the actual image "
+            "arrives in the NEXT message; analyze it there and you can chain other tools "
+            "(browser_control, computer_settings, etc.) using what you saw."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -684,6 +780,14 @@ TOOL_DECLARATIONS = [
             },
             "required": ["text"]
         }
+    },
+    {
+        "name": "close_camera",
+        "description": (
+            "Closes the live camera view shown on screen. "
+            "Call when user says: close camera, stop camera, turn off camera, that's enough."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
     {
         "name": "computer_settings",
@@ -706,10 +810,15 @@ TOOL_DECLARATIONS = [
     {
         "name": "browser_control",
         "description": (
-            "Controls any web browser. Use for: opening websites, searching the web, "
-            "clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. "
+            "NEVER use this to play music or songs — music playback ALWAYS goes through the yt_music tool. "
+            "Controls a web browser for SINGLE, isolated actions: opening a website, searching the web, "
+            "one click, scrolling, a screenshot, going back/forward. "
             "Always pass the 'browser' parameter when the user specifies a browser (e.g. 'open in Edge', "
-            "'use Firefox', 'open Chrome'). Multiple browsers can run simultaneously."
+            "'use Firefox', 'open Chrome'). Multiple browsers can run simultaneously. "
+            "DO NOT use this for tasks that need several coordinated web steps to reach a goal "
+            "(posting on social media, filling out and submitting a form, logging in and doing something, "
+            "buying something online) — those go through agent_task instead, which can observe the page "
+            "and react, and which verifies the goal was actually achieved before reporting success."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -800,17 +909,39 @@ TOOL_DECLARATIONS = [
     {
         "name": "agent_task",
         "description": (
-            "Executes complex multi-step tasks requiring multiple different tools. "
-            "Examples: 'research X and save to file', 'find and organize files'. "
+            "Executes complex multi-step tasks requiring multiple different tools, OR any task "
+            "that requires interacting with a website across several steps to reach a goal. "
+            "Examples: 'research X and save to file', 'find and organize files', "
+            "'post X on LinkedIn', 'fill in this web form and submit it', 'log into site X and download Y'. "
+            "For web tasks, this observes the page as it goes and confirms the goal was actually "
+            "achieved before reporting success — use it instead of raw browser_control for anything "
+            "beyond a single click or a single page open. "
             "DO NOT use for single commands."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "goal":     {"type": "STRING", "description": "Complete description of what to accomplish"},
+                "goal":     {"type": "STRING", "description": "The FULL, specific instruction — do not shorten or genericize it. Include exact wording to post/type/search for, the target site/app, and any details the user gave (e.g. 'Post on LinkedIn: just shipped a new feature!', not 'Interact with LinkedIn')."},
                 "priority": {"type": "STRING", "description": "low | normal | high (default: normal)"}
             },
             "required": ["goal"]
+        }
+    },
+    {
+        "name": "agent_task_control",
+        "description": (
+            "Manages running agent_task background tasks. Use IMMEDIATELY when the user asks to "
+            "stop, cancel, or abort an ongoing task ('para', 'detente', 'cancela', 'déjalo', 'stop') "
+            "— action 'cancel_all' stops everything currently running or queued. "
+            "Use action 'status' when the user asks how a task is going."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":  {"type": "STRING", "description": "cancel_all | status"},
+                "task_id": {"type": "STRING", "description": "Optional task id for status (omit for all tasks)"},
+            },
+            "required": ["action"]
         }
     },
     {
@@ -875,6 +1006,89 @@ TOOL_DECLARATIONS = [
                 "save":        {"type": "BOOLEAN", "description": "Save results to Notepad"},
             },
             "required": ["origin", "destination", "date"]
+        }
+    },
+    {
+        "name": "cardtrader_search_card",
+        "description": (
+            "Busca una carta de Magic en CardTrader y devuelve las mejores ofertas. "
+            "Con all_versions=true compara todas las ediciones/printings de la carta por precio. "
+            "Prioriza ofertas CardTrader Zero (envio consolidado)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "name":         {"type": "STRING",  "description": "Nombre de la carta (ingles preferido)"},
+                "set_code":     {"type": "STRING",  "description": "Codigo de expansion para restringir, ej: cmr, 2x2"},
+                "all_versions": {"type": "BOOLEAN", "description": "true = comparar todas las ediciones por precio"},
+                "foil":         {"type": "BOOLEAN", "description": "true solo foil, false solo no-foil, omitir = indiferente"},
+                "language":     {"type": "STRING",  "description": "Idioma 2 letras: en, es, de, fr, it, jp, pt"},
+                "zero_only":    {"type": "BOOLEAN", "description": "Solo ofertas CardTrader Zero (default true)"},
+                "fast":         {"type": "BOOLEAN", "description": "true = revisar solo un tope de ediciones (mas rapido, no garantiza el minimo). Por defecto revisa todas"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "cardtrader_quote_deck",
+        "description": (
+            "Presupuesta un mazo pegado en texto plano formato Moxfield (lineas '4 Lightning Bolt' o "
+            "'1 Sol Ring (C21) 263'). Busca la mejor oferta de cada carta en CardTrader (CT Zero) "
+            "y devuelve total, desglose y cartas no encontradas. Guarda la cotizacion para poder "
+            "anadirla al carrito despues."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "deck_text":         {"type": "STRING",  "description": "Lista del mazo en texto plano"},
+                "min_condition":     {"type": "STRING",  "description": "Near Mint | Slightly Played | Moderately Played | Played | Heavily Played | Poor"},
+                "language":          {"type": "STRING",  "description": "Idioma preferido 2 letras"},
+                "zero_only":         {"type": "BOOLEAN", "description": "Solo CT Zero (default true)"},
+                "respect_printings": {"type": "BOOLEAN", "description": "true = respetar la edicion exacta del export; false = la mas barata (default)"},
+            },
+            "required": ["deck_text"]
+        }
+    },
+    {
+        "name": "cardtrader_add_to_cart",
+        "description": (
+            "Anade al carrito de CardTrader la ultima cotizacion de mazo completa, una carta concreta "
+            "de esa cotizacion, o un product_id concreto de una busqueda previa. Usa CardTrader Zero. "
+            "NUNCA finaliza la compra."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "scope":      {"type": "STRING",  "description": "last_quote (todo el mazo cotizado) | product (uno concreto)"},
+                "card_name":  {"type": "STRING",  "description": "Para anadir solo una carta de la ultima cotizacion"},
+                "product_id": {"type": "INTEGER", "description": "ID de producto concreto (de una busqueda previa)"},
+                "quantity":   {"type": "INTEGER", "description": "Cantidad (default 1)"},
+            },
+            "required": ["scope"]
+        }
+    },
+    {
+        "name": "cardtrader_cart",
+        "description": "Consulta o modifica el carrito de CardTrader: ver contenido con costes y fees, quitar productos o vaciarlo.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":     {"type": "STRING",  "description": "view | remove | clear"},
+                "product_id": {"type": "INTEGER", "description": "Producto a quitar (para remove)"},
+                "quantity":   {"type": "INTEGER", "description": "Cantidad a quitar (default 1)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "cardtrader_catalog",
+        "description": "Gestiona el catalogo local de cartas de CardTrader: estado, sincronizar sets nuevos o resincronizar todo.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "status | sync | full_resync"},
+            },
+            "required": ["action"]
         }
     },
     {
@@ -1027,6 +1241,8 @@ class JarvisLive:
         self._speaking_lock = threading.Lock()
         self._download_cancel_event = threading.Event()
         self.ui.on_text_command = self._on_text_command
+        self.ui.on_interrupt    = self._on_interrupt
+        self._interrupt_drop_audio = False  # tras ESC: descartar audio hasta fin de turno
         self._turn_done_event: asyncio.Event | None = None
         self._interaction_id = 0
         self._interaction_had_tool = False
@@ -1035,6 +1251,15 @@ class JarvisLive:
         self._internal_recovery_active = False
         self._tool_recovery_task: asyncio.Task | None = None
         self._latest_user_request = ""
+        self._briefing_sent = False  # el briefing de arranque dispara UNA vez por proceso
+        self._proactive        = ProactiveEngine()      # cooldown persiste entre reconexiones
+        self._last_user_speech = time.monotonic()       # actualizado con cada input del usuario
+        # Vision-in-main-session state (imagen inyectada en ESTA sesión Live)
+        self._pending_vision       = None    # (img_bytes, mime_type, question, angle)
+        self._vision_cam_active    = False   # cámara abierta → cerrar tras la respuesta
+        self._vision_close_pending = False   # tras inyectar; el próximo turn_complete cierra
+        self._vision_last_time     = 0.0     # guard de cooldown (cubre ventana de eco)
+        self._vision_busy          = False   # ciclo captura/inyección en vuelo
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -1044,7 +1269,30 @@ class JarvisLive:
             self._loop
         )
 
+    def _on_interrupt(self):
+        """Interrupción instantánea (ESC): corta el audio en <200 ms.
+
+        Llamado desde el hilo Qt — todo el trabajo se hace en el event loop."""
+        if not self._loop:
+            return
+        self._loop.call_soon_threadsafe(self._do_interrupt)
+
+    def _do_interrupt(self):
+        self._interrupt_drop_audio = True
+        drained = 0
+        try:
+            while True:
+                self.audio_in_queue.get_nowait()
+                drained += 1
+        except (asyncio.QueueEmpty, AttributeError):
+            pass
+        self.set_speaking(False)
+        self.ui.stop_speaking()
+        print(f"[JARVIS] ✋ Interrumpido por el usuario ({drained} chunks descartados)")
+        self.ui.write_log("SYS: Interrumpido (ESC).")
+
     def _begin_interaction(self):
+        self._interrupt_drop_audio = False
         self._interaction_id += 1
         self._interaction_had_tool = False
         self._interaction_recovery_sent = False
@@ -1105,6 +1353,124 @@ class JarvisLive:
                 self._internal_recovery_active = False
 
         self._tool_recovery_task = asyncio.create_task(recover())
+
+    async def _run_proactive_mode(self) -> None:
+        """
+        Tarea de fondo: si el usuario lleva mucho en silencio, pasa hora +
+        memoria a Gemini para que decida libremente si dice algo. Sin reglas
+        hardcodeadas — Gemini decide. Se activa con 'proactive_enabled'.
+        """
+        from actions import app_settings
+
+        while True:
+            await asyncio.sleep(60)   # evaluar una vez por minuto
+
+            if not self.session:
+                continue
+            if not _get_config_flag("proactive_enabled"):
+                continue
+
+            try:
+                interval_minutes = max(
+                    1, min(1440, int(app_settings.get("proactive_interval_minutes", 15)))
+                )
+            except (TypeError, ValueError):
+                interval_minutes = 15
+            interval_seconds = interval_minutes * 60
+            self._proactive.min_silence_secs = interval_seconds
+            self._proactive.check_cooldown = interval_seconds
+
+            with self._speaking_lock:
+                speaking = self._is_speaking
+            if speaking:
+                continue
+
+            if not self._proactive.should_trigger(self._last_user_speech):
+                continue
+
+            self._proactive.mark_triggered()
+
+            try:
+                memory = await asyncio.to_thread(load_memory)
+                prompt = self._proactive.build_prompt(
+                    memory,
+                    app_settings.get("proactive_prompt", ""),
+                )
+                await self.session.send_client_content(
+                    turns={"parts": [{"text": prompt}]},
+                    turn_complete=True,
+                )
+                self.ui.write_log("SYS: Check-in proactivo.")
+            except Exception as e:
+                print(f"[Proactive] ⚠️ {e}")
+
+    async def _send_startup_briefing(self) -> None:
+        """
+        Briefing en dos fases para respuesta percibida instantánea:
+          Fase 1 — saludo inmediato (sin tools, sin fetch) → habla en <2 s
+          Fase 2 — noticias buscadas en background, inyectadas tras el saludo
+        """
+        await asyncio.sleep(0.3)
+        if not self.session:
+            return
+
+        memory   = load_memory()
+        identity = memory.get("identity", {})
+
+        def _val(k: str) -> str:
+            e = identity.get(k, {})
+            return (e.get("value", "") if isinstance(e, dict) else str(e)).strip()
+
+        lang = _val("language") or "Spanish"
+        name = _val("name")
+
+        time_str = datetime.now().strftime("%H:%M")
+
+        lang_clause = f" Respond in {lang}."
+        name_clause = f" Address the user as {name}." if name else ""
+        p1 = (
+            f"Greet the user, mention it is {time_str}, and say you are fetching today's news headlines now. "
+            f"One short sentence only. Do not call any tools.{lang_clause}{name_clause}"
+        )
+
+        await self.session.send_client_content(
+            turns={"parts": [{"text": p1}]},
+            turn_complete=True,
+        )
+        self.ui.write_log("SYS: Briefing fase 1 (saludo) enviado.")
+
+        async def _guarded_news():
+            try:
+                await self._briefing_news_phase(lang)
+            except Exception as e:
+                print(f"[Briefing] Fase 2 error: {e}")
+                self.ui.write_log(f"SYS: Briefing noticias falló: {e}")
+        asyncio.create_task(_guarded_news())
+
+    async def _briefing_news_phase(self, lang: str) -> None:
+        """
+        Envía la fase 2 (noticias) ~1.5 s después de la fase 1 para que Gemini
+        trabaje en ella mientras el saludo aún se está reproduciendo.
+        """
+        lang_str = f" Respond in {lang}." if lang else ""
+
+        await asyncio.sleep(1.5)
+
+        if not self.session:
+            return
+
+        p2 = (
+            "[BRIEFING] Call web_search with mode='news' and query='top world news today' "
+            "to find actual recent news articles with real event headlines (not just website names). "
+            "After the search, say ONE specific news event from the results in one sentence, "
+            f"then offer to read more if the user wants.{lang_str}"
+        )
+
+        await self.session.send_client_content(
+            turns={"parts": [{"text": p2}]},
+            turn_complete=True,
+        )
+        self.ui.write_log("SYS: Briefing fase 2 (noticias) enviado.")
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
@@ -1240,6 +1606,24 @@ class JarvisLive:
                 response={"result": "ok", "silent": True}
             )
 
+        # Guard: la música SIEMPRE va por el reproductor integrado (yt_music),
+        # nunca por navegador. Si el modelo lo intenta, se rechaza y se le
+        # indica la herramienta correcta para que reintente.
+        if name in ("browser_control", "open_app"):
+            _target = " ".join(str(v) for v in args.values()).lower()
+            if "music.youtube.com" in _target or "youtube music" in _target:
+                print(f"[JARVIS] 🚫 {name} bloqueado para música; redirigiendo a yt_music")
+                if not self.ui.muted:
+                    self.ui.set_state("LISTENING")
+                return types.FunctionResponse(
+                    id=fc.id, name=name,
+                    response={"result": (
+                        "BLOCKED: music must play through the integrated player. "
+                        "Call the yt_music tool instead (action=play, query=<song/artist>). "
+                        "Never open YouTube Music in a browser."
+                    )}
+                )
+
         loop   = asyncio.get_event_loop()
         result = "Done."
 
@@ -1345,13 +1729,48 @@ class JarvisLive:
                     result = r or "Done."
 
             elif name == "screen_process":
-                threading.Thread(
-                    target=screen_process,
-                    kwargs={"parameters": args, "response": None,
-                            "session_memory": None},
-                    daemon=True
-                ).start()
-                result = "Vision module activated. Stay completely silent — vision module will speak directly."
+                _now = time.monotonic()
+                _cooldown = 4.0  # cubre la ventana de eco tras terminar de hablar
+                if self._vision_busy or (_now - self._vision_last_time) < _cooldown:
+                    _wait = max(0.0, _cooldown - (_now - self._vision_last_time))
+                    print(f"[Vision] ⏳ Cooldown activo ({_wait:.1f}s) — llamada duplicada ignorada")
+                    result = "Vision is still processing the previous request. Do NOT call this tool again."
+                else:
+                    self._vision_busy      = True
+                    self._vision_last_time = _now
+                    angle     = (args.get("angle") or "screen").lower()
+                    user_text = args.get("text") or "¿Qué ves?"
+                    try:
+                        if angle == "camera":
+                            img_b, mime_t = await loop.run_in_executor(None, _capture_camera)
+                            if hasattr(self.ui, "start_camera_stream"):
+                                self.ui.start_camera_stream()
+                            self._vision_cam_active = True
+                            print(f"[Vision] 📷 Cámara: {len(img_b):,} bytes")
+                            _stall = "cámara"
+                        else:
+                            img_b, mime_t = await loop.run_in_executor(None, _capture_screen)
+                            print(f"[Vision] 🖥️  Pantalla: {len(img_b):,} bytes")
+                            _stall = "pantalla"
+                        self._pending_vision = (img_b, mime_t, user_text, angle)
+                        result = (
+                            f"[VISION_ACTIVE] {_stall.capitalize()} capturada. "
+                            "Immediately say ONE short natural sentence in the user's language "
+                            f"(e.g. 'Echando un vistazo a tu {_stall}, sir'). "
+                            "Do NOT describe or guess content — the actual image arrives in the NEXT message."
+                        )
+                    except Exception as _ve:
+                        self._vision_busy = False
+                        print(f"[Vision] ❌ Captura fallida: {_ve}")
+                        result = f"Vision capture failed: {_ve}"
+
+            elif name == "close_camera":
+                if hasattr(self.ui, "stop_camera_stream"):
+                    self.ui.stop_camera_stream()
+                self._vision_cam_active    = False
+                self._vision_close_pending = False
+                self._vision_busy          = False
+                result = "Camera closed."
 
             elif name == "computer_settings":
                 r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None))
@@ -1375,6 +1794,23 @@ class JarvisLive:
                 priority = priority_map.get(args.get("priority", "normal").lower(), TaskPriority.NORMAL)
                 task_id  = get_queue().submit(goal=args.get("goal", ""), priority=priority, speak=self.speak)
                 result   = f"Task started (ID: {task_id})."
+
+            elif name == "agent_task_control":
+                from agent.task_queue import get_queue
+                _action = args.get("action", "").lower().strip()
+                if _action == "cancel_all":
+                    n = get_queue().cancel_all()
+                    result = (f"Cancelled {n} task(s)." if n
+                              else "No running or queued tasks to cancel.")
+                elif _action == "status":
+                    _tid = args.get("task_id", "").strip()
+                    if _tid:
+                        st = get_queue().get_status(_tid)
+                        result = str(st) if st else f"No task with id {_tid}."
+                    else:
+                        result = str(get_queue().get_all_statuses())
+                else:
+                    result = f"Unknown agent_task_control action: '{_action}'"
 
             elif name == "web_search":
                 r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args))
@@ -1407,6 +1843,26 @@ class JarvisLive:
 
             elif name == "flight_finder":
                 r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args))
+                result = r or "Done."
+
+            elif name == "cardtrader_search_card":
+                r = await loop.run_in_executor(None, lambda: cardtrader_search_card(parameters=args))
+                result = r or "Done."
+
+            elif name == "cardtrader_quote_deck":
+                r = await loop.run_in_executor(None, lambda: cardtrader_quote_deck(parameters=args))
+                result = r or "Done."
+
+            elif name == "cardtrader_add_to_cart":
+                r = await loop.run_in_executor(None, lambda: cardtrader_add_to_cart(parameters=args))
+                result = r or "Done."
+
+            elif name == "cardtrader_cart":
+                r = await loop.run_in_executor(None, lambda: cardtrader_cart(parameters=args))
+                result = r or "Done."
+
+            elif name == "cardtrader_catalog":
+                r = await loop.run_in_executor(None, lambda: cardtrader_catalog(parameters=args))
                 result = r or "Done."
 
             elif name == "google_calendar":
@@ -1935,7 +2391,11 @@ class JarvisLive:
         # button. When a mic shows up we (re)open the stream automatically.
         announced = None  # last availability we reported to the UI
         while True:
-            has_mic = _has_input_device()
+            # In automatic mode, None means there is no *safe* microphone. Do
+            # not fall through to PortAudio's default because that default can
+            # be a generic alias for a Bluetooth HFP endpoint.
+            mic_device = _resolve_input_device()
+            has_mic = mic_device is not None
             if has_mic != announced:
                 announced = has_mic
                 try:
@@ -1945,11 +2405,15 @@ class JarvisLive:
             if not has_mic:
                 await asyncio.sleep(1.5)
                 continue
+            # Closing the stream while muted is important on Bluetooth: merely
+            # discarding callback samples keeps HFP/Hands-Free active and lowers
+            # the quality of every sound played through the headset.
+            if self.ui.muted:
+                await asyncio.sleep(0.25)
+                continue
             try:
-                mic_device = _resolve_input_device()
-                if mic_device is not None:
-                    import sounddevice as _sd
-                    print(f"[JARVIS] 🎤 Using mic: {_sd.query_devices(mic_device)['name']}")
+                import sounddevice as _sd
+                print(f"[JARVIS] 🎤 Using mic: {_sd.query_devices(mic_device)['name']}")
                 with sd.InputStream(
                     device=mic_device,
                     samplerate=SEND_SAMPLE_RATE,
@@ -1960,9 +2424,12 @@ class JarvisLive:
                 ):
                     print("[JARVIS] 🎤 Mic stream open")
                     while True:
-                        await asyncio.sleep(0.5)
-                        if not _has_input_device():
-                            print("[JARVIS] 🎤 Mic removed — idling")
+                        await asyncio.sleep(0.25)
+                        if self.ui.muted:
+                            print("[JARVIS] 🎤 Mic muted — stream closed")
+                            break
+                        if _resolve_input_device() != mic_device:
+                            print("[JARVIS] 🎤 Mic changed/removed — reopening")
                             break
             except Exception as e:
                 print(f"[JARVIS] ⚠️ Mic capture stopped: {e}")
@@ -1978,6 +2445,8 @@ class JarvisLive:
                 async for response in self.session.receive():
 
                     if response.data:
+                        if self._interrupt_drop_audio:
+                            continue  # usuario interrumpió: tirar el resto del turno
                         if self._turn_done_event and self._turn_done_event.is_set():
                             self._turn_done_event.clear()
                         self.audio_in_queue.put_nowait(response.data)
@@ -1992,19 +2461,22 @@ class JarvisLive:
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
-                            if txt:
-                                if not in_buf and not self._internal_recovery_active:
+                            if txt.strip():
+                                self._last_user_speech = time.monotonic()
+                                if not any(c.strip() for c in in_buf) and not self._internal_recovery_active:
                                     if self._text_interaction_pending:
                                         self._text_interaction_pending = False
                                     else:
                                         self._begin_interaction()
+                            if txt:
                                 in_buf.append(txt)
 
                         if sc.turn_complete:
+                            self._interrupt_drop_audio = False
                             if self._turn_done_event:
                                 self._turn_done_event.set()
 
-                            full_in = " ".join(in_buf).strip()
+                            full_in = _join_transcript(in_buf)
                             internal_input = _INTERNAL_TOOL_RECOVERY_MARKER in full_in
                             if full_in and not internal_input:
                                 self._latest_user_request = full_in
@@ -2013,7 +2485,7 @@ class JarvisLive:
                             in_buf = []
                             self._text_interaction_pending = False
 
-                            full_out = " ".join(out_buf).strip()
+                            full_out = _join_transcript(out_buf)
                             if full_out:
                                 self.ui.write_log(f"Jarvis: {full_out}")
                             out_buf = []
@@ -2027,6 +2499,37 @@ class JarvisLive:
 
                             if not internal_input:
                                 self._schedule_tool_recovery(full_out)
+
+                            # Inyección de visión: el modelo terminó el turno del
+                            # tool-response → ahora enviamos la imagen a ESTA sesión.
+                            if self._pending_vision and self.session:
+                                img_b, mime_t, question, angle = self._pending_vision
+                                self._pending_vision = None
+                                b64 = base64.b64encode(img_b).decode("ascii")
+                                print(f"[Vision] 📤 {len(img_b):,} bytes (angle={angle}) → sesión principal")
+                                await self.session.send_client_content(
+                                    turns={"parts": [
+                                        {"inline_data": {"mime_type": mime_t, "data": b64}},
+                                        {"text": question},
+                                    ]},
+                                    turn_complete=True,
+                                )
+                                if self._vision_cam_active:
+                                    # Cámara: seguir ocupados hasta que termine de hablar la respuesta
+                                    self._vision_cam_active    = False
+                                    self._vision_close_pending = True
+                                else:
+                                    # Solo pantalla: liberar ya el flag de ocupado
+                                    self._vision_busy = False
+                            elif self._vision_close_pending:
+                                # Este turn_complete ES la respuesta de visión — cerrar cámara
+                                self._vision_close_pending = False
+                                self._vision_busy = False
+                                if hasattr(self.ui, "stop_camera_stream"):
+                                    async def _cam_close():
+                                        await asyncio.sleep(2.0)
+                                        self.ui.stop_camera_stream()
+                                    asyncio.create_task(_cam_close())
 
                     if response.tool_call:
                         self._interaction_had_tool = True
@@ -2048,14 +2551,32 @@ class JarvisLive:
 
     async def _play_audio(self):
         print("[JARVIS] 🔊 Play started")
+        stream = None
+        last_write_at = 0.0
 
-        stream = sd.RawOutputStream(
-            samplerate=RECEIVE_SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=CHUNK_SIZE,
-        )
-        stream.start()
+        def _close_stream():
+            nonlocal stream
+            current, stream = stream, None
+            if current is None:
+                return
+            try:
+                current.stop()
+            except Exception:
+                pass
+            try:
+                current.close()
+            except Exception:
+                pass
+
+        def _open_stream():
+            opened = sd.RawOutputStream(
+                samplerate=RECEIVE_SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="int16",
+                blocksize=CHUNK_SIZE,
+            )
+            opened.start()
+            return opened
 
         try:
             while True:
@@ -2072,6 +2593,10 @@ class JarvisLive:
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
+                    if stream is not None and last_write_at and time.monotonic() - last_write_at > 2.0:
+                        # Release the endpoint between utterances so a Bluetooth
+                        # disconnect/default-device change is picked up next time.
+                        await asyncio.to_thread(_close_stream)
                     continue
                 self.set_speaking(True)
                 # alimentar amplitud del TTS al orbe
@@ -2081,14 +2606,27 @@ class JarvisLive:
                     self.ui.set_audio_bands(b, m, tr)
                 except Exception:
                     pass
-                await asyncio.to_thread(stream.write, chunk)
-        except Exception as e:
-            print(f"[JARVIS] ❌ Play: {e}")
-            raise
+                written = False
+                for attempt in range(2):
+                    try:
+                        if stream is None:
+                            stream = await asyncio.to_thread(_open_stream)
+                        await asyncio.to_thread(stream.write, chunk)
+                        last_write_at = time.monotonic()
+                        written = True
+                        break
+                    except Exception as e:
+                        print(f"[JARVIS] ⚠️ Audio output re-open ({attempt + 1}/2): {e}")
+                        await asyncio.to_thread(_close_stream)
+                        if attempt == 0:
+                            await asyncio.sleep(0.1)
+                if not written:
+                    # Do not tear down the Gemini session for a transient audio
+                    # hotplug failure; the next chunk will try the new default.
+                    print("[JARVIS] ⚠️ Audio chunk dropped; output unavailable")
         finally:
             self.set_speaking(False)
-            stream.stop()
-            stream.close()
+            await asyncio.to_thread(_close_stream)
 
     async def run(self):
         client = genai.Client(
@@ -2096,7 +2634,10 @@ class JarvisLive:
             http_options={"api_version": "v1beta"}
         )
 
+        backoff = 1.0  # reconexión con backoff exponencial: 1→2→4→8… cap 60 s
+
         while True:
+            connected_at = None
             try:
                 print("[JARVIS] 🔌 Connecting...")
                 if not self.ui.muted:
@@ -2113,6 +2654,23 @@ class JarvisLive:
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
 
+                    # Aislamiento por sesión: nada de visión sobrevive a una reconexión
+                    self._pending_vision       = None
+                    self._vision_cam_active    = False
+                    self._vision_close_pending = False
+                    self._vision_busy          = False
+                    self._vision_last_time     = 0.0
+
+                    # ...ni el estado de interacción/interrupción de la sesión anterior
+                    self._interrupt_drop_audio = False
+                    self._text_interaction_pending = False
+                    self._internal_recovery_active = False
+                    self._interaction_had_tool = False
+                    if self._tool_recovery_task and not self._tool_recovery_task.done():
+                        self._tool_recovery_task.cancel()
+                    self._tool_recovery_task = None
+
+                    connected_at = time.monotonic()
                     print("[JARVIS] ✅ Connected.")
                     if not self.ui.muted:
                         self.ui.set_state("LISTENING")
@@ -2123,16 +2681,33 @@ class JarvisLive:
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
 
+                    tg.create_task(self._run_proactive_mode())
+
+                    # Morning briefing — una vez por proceso, nunca en reconexiones
+                    if not self._briefing_sent and _get_config_flag("startup_briefing_enabled"):
+                        self._briefing_sent = True
+                        tg.create_task(self._send_startup_briefing())
+
             except Exception as e:
                 print(f"[JARVIS] ⚠️ {e}")
                 traceback.print_exc()
             self.set_speaking(False)
             if not self.ui.muted:
                 self.ui.set_state("THINKING")
-            print("[JARVIS] 🔄 Reconnecting in 3s...")
-            await asyncio.sleep(3)
+            # Conexión estable >60 s → resetear el backoff a 1 s
+            if connected_at is not None and (time.monotonic() - connected_at) > 60:
+                backoff = 1.0
+            print(f"[JARVIS] 🔄 Reconnecting in {backoff:g}s...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
 
 def main():
+    from actions.single_instance import is_already_running, focus_existing_window
+    if is_already_running():
+        print("[JARVIS] Ya hay una instancia en ejecución; la traigo al frente.")
+        focus_existing_window()
+        return
+
     from actions.whatsapp_bridge_process import start_bridge, stop_bridge
 
     bridge_started = start_bridge()
@@ -2145,7 +2720,17 @@ def main():
     # create WhatsApp manager early so it can poll messages; callback set later
     try:
         from actions.whatsapp_manager import WhatsAppManager
-        mgr = WhatsAppManager()
+
+        def _remind_unanswered(entry):
+            sender = entry.get('senderName') or entry.get('authorName') or entry.get('from') or ''
+            preview = (entry.get('body') or '')[:120]
+            ui.show_whatsapp_notification({
+                'title': f"Sin responder: {sender}",
+                'body': preview,
+                'chat_id': entry.get('from') or '',
+            })
+
+        mgr = WhatsAppManager(on_unanswered_reminder=_remind_unanswered)
         ui.whatsapp_manager = mgr
         try:
             ui._win.whatsapp_manager = mgr
@@ -2278,11 +2863,30 @@ def main():
                 print(f"[JARVIS] ⚠️ no se pudieron aplicar ajustes guardados: {_e}", flush=True)
 
             # --- loopback: capturar audio del sistema para el visualizador ---
-            _lb_stop  = threading.Event()
-            _lb_thread_ref = [None]
+            _lb_lock = threading.Lock()
+            _lb_state = {"thread": None, "stop": None, "last_start": 0.0}
 
-            def _loopback_worker():
+            def _selected_loopback_name() -> str:
+                explicit = os.getenv("JARVIS_LOOPBACK_DEVICE", "").strip()
+                if explicit:
+                    return explicit
+                try:
+                    selected = str(getattr(ymod, "_audio_device", "") or "")
+                    if not selected or not hasattr(ymod, "list_audio_output_devices"):
+                        return ""
+                    for item in ymod.list_audio_output_devices():
+                        if str(item.get("name") or "") == selected:
+                            return str(item.get("description") or "").strip()
+                except Exception:
+                    pass
+                return ""
+
+            def _loopback_worker(stop_event):
                 """Captura WASAPI loopback y alimenta el visualizador con el audio de música."""
+                # Device enumeration may invoke ``mpv --audio-device=help``.
+                # Keep that work off the playback poller so the progress sample
+                # and Bluetooth recovery loop never stall behind it.
+                preferred_name = _selected_loopback_name()
                 fft_lock = threading.Lock()
                 fft_ready = threading.Event()
                 fft_latest = [None]
@@ -2294,7 +2898,7 @@ def main():
                     fft_ready.set()
 
                 def _fft_worker():
-                    while not _lb_stop.is_set():
+                    while not stop_event.is_set():
                         if not fft_ready.wait(0.15):
                             continue
                         fft_ready.clear()
@@ -2325,7 +2929,22 @@ def main():
                     native_sr = int(dev_info.get('default_samplerate', 44100))
                     native_ch = max(1, min(2, int(dev_info.get('max_output_channels', 2))))
                     out_name = str(dev_info.get('name', '')).strip()
-                    pref_name = os.getenv("JARVIS_LOOPBACK_DEVICE", "").strip()
+                    pref_name = preferred_name
+                    if pref_name:
+                        devices = _sd.query_devices()
+                        pref_lower = pref_name.lower()
+                        for idx, candidate in enumerate(devices):
+                            candidate_name = str(candidate.get('name', '')).strip()
+                            if candidate.get('max_output_channels', 0) <= 0 or not candidate_name:
+                                continue
+                            candidate_lower = candidate_name.lower()
+                            if pref_lower in candidate_lower or candidate_lower in pref_lower:
+                                out_idx = idx
+                                dev_info = candidate
+                                native_sr = int(dev_info.get('default_samplerate', native_sr))
+                                native_ch = max(1, min(2, int(dev_info.get('max_output_channels', native_ch))))
+                                out_name = candidate_name
+                                break
                     loop_dev = out_idx
                     extra = None
 
@@ -2390,7 +3009,7 @@ def main():
 
                                 with loop_mic.recorder(samplerate=native_sr, channels=1, blocksize=2048) as rec:
                                     print("[JARVIS] 🎵 Loopback captura activa")
-                                    while not _lb_stop.is_set():
+                                    while not stop_event.is_set():
                                         frames = rec.record(numframes=2048)
                                         if frames is None:
                                             continue
@@ -2403,7 +3022,7 @@ def main():
                                 return
 
                     def _lb_cb(indata, frames, _t, _status):
-                        if _lb_stop.is_set():
+                        if stop_event.is_set():
                             raise _sd.CallbackStop()
                         ch = indata[:, 0] if indata.ndim > 1 else indata.flatten()
                         # el driver puede devolver float32 (-1..1) o int16
@@ -2426,20 +3045,60 @@ def main():
 
                     with _sd.InputStream(**stream_kwargs):
                         print("[JARVIS] 🎵 Loopback captura activa")
-                        while not _lb_stop.is_set():
+                        while not stop_event.is_set():
                             time.sleep(0.1)
                 except Exception as e:
                     print(f"[JARVIS] ⚠️ Loopback: {e}")
+                finally:
+                    stop_event.set()
+                    with _lb_lock:
+                        if _lb_state["thread"] is threading.current_thread():
+                            _lb_state["thread"] = None
+                            _lb_state["stop"] = None
 
             def _start_loopback():
-                _lb_stop.clear()
-                t = threading.Thread(target=_loopback_worker, daemon=True)
-                _lb_thread_ref[0] = t
+                with _lb_lock:
+                    current = _lb_state["thread"]
+                    if current is not None and current.is_alive():
+                        return
+                    now = time.monotonic()
+                    if now - float(_lb_state["last_start"] or 0.0) < 3.0:
+                        return
+                    stop_event = threading.Event()
+                    t = threading.Thread(
+                        target=_loopback_worker,
+                        args=(stop_event,),
+                        name="jarvis-loopback",
+                        daemon=True,
+                    )
+                    _lb_state.update({
+                        "thread": t,
+                        "stop": stop_event,
+                        "last_start": now,
+                    })
                 t.start()
 
             def _stop_loopback():
-                _lb_stop.set()
-                _lb_thread_ref[0] = None
+                with _lb_lock:
+                    thread = _lb_state["thread"]
+                    stop_event = _lb_state["stop"]
+                    if stop_event is not None:
+                        stop_event.set()
+                if (
+                    thread is not None
+                    and thread is not threading.current_thread()
+                    and thread.is_alive()
+                ):
+                    thread.join(timeout=1.0)
+                with _lb_lock:
+                    if _lb_state["thread"] is thread:
+                        _lb_state["thread"] = None
+                        _lb_state["stop"] = None
+
+            def _loopback_running() -> bool:
+                with _lb_lock:
+                    thread = _lb_state["thread"]
+                    return bool(thread is not None and thread.is_alive())
 
             def _handle_play_cmd(action, params):
                 try:
@@ -2641,6 +3300,9 @@ def main():
                             pos = float(info.get('position', 0) or 0) if info else 0.0
                             dur = float(info.get('duration', 0) or 0) if info else 0.0
                             playing = bool(info.get('playing', False)) if info else False
+                            ready = bool(info.get('ready', False)) if info else False
+                            buffering = bool(info.get('buffering', False)) if info else False
+                            playback_state = str(info.get('state') or '') if info else ''
                             video_id = str(info.get('videoId') or '') if info else ''
                             if video_id and video_id != _last_like_video[0]:
                                 _last_like_video[0] = video_id
@@ -2658,6 +3320,9 @@ def main():
                                 playing,
                                 video_id,
                                 _last_like_state[0],
+                                ready,
+                                buffering,
+                                playback_state,
                             )
                         else:
                             ui.update_playback('', '', 0, 0, False)
@@ -2669,11 +3334,15 @@ def main():
                             viz_on = bool(_appcfg.get('ui_show_visualizer', True))
                         except Exception:
                             viz_on = True
-                        ui.set_music_playing(playing and viz_on)
-                        want_loop = playing and viz_on
-                        if want_loop and not _was_playing[0]:
+                        progressing = (
+                            playing and ready and not buffering
+                            and playback_state == 'playing'
+                        ) if _HEADLESS else playing
+                        ui.set_music_playing(progressing and viz_on)
+                        want_loop = progressing and viz_on
+                        if want_loop and not _loopback_running():
                             _start_loopback()
-                        elif not want_loop and _was_playing[0]:
+                        elif not want_loop and (_was_playing[0] or _loopback_running()):
                             _stop_loopback()
                             ui.set_fft_bins([0.0] * 64)
                         _was_playing[0] = want_loop

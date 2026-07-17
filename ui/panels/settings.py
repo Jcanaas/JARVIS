@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 from pathlib import Path
 from ..whatsapp import WhatsAppRuleDialog
 import threading
@@ -33,6 +34,7 @@ class SettingsModePanel(QWidget):
         ("Anime",      "anime"),
         ("Gmail",      "empty"),
         ("Drive",      "empty"),
+        ("APIs",       "apis"),
         ("General",    "profile"),
         ("Apariencia", "appearance"),
         ("Inicio",     "startup"),
@@ -101,6 +103,7 @@ class SettingsModePanel(QWidget):
             "youtube": self._build_youtube_page,
             "whatsapp": self._build_whatsapp_page,
             "anime": self._build_anime_page,
+            "apis": self._build_apis_page,
             "appearance": self._build_appearance_page,
             "startup": self._build_startup_page,
             "profile": self._build_profile_page,
@@ -518,6 +521,176 @@ class SettingsModePanel(QWidget):
         rl.addWidget(v, 1)
         body.addWidget(row)
 
+    # -- API keys ----------------------------------------------------------
+    # (json key, título, descripción). Se leen/escriben en api_keys.json del
+    # directorio de config del usuario (%LOCALAPPDATA%\Jarvis\config).
+    _API_KEYS = [
+        ("gemini_api_key",    "Gemini (Google AI)",
+         "Motor de voz e inteligencia de Jarvis — aistudio.google.com/apikey"),
+        ("tmdb_api_key",      "TMDB",
+         "Metadatos de películas y series — themoviedb.org (gratis)"),
+        ("mal_client_id",     "MyAnimeList",
+         "client_id para el modo Anime — myanimelist.net/apiconfig"),
+        ("cardtrader_jwt",    "CardTrader",
+         "Token JWT del modo CardTrader — cardtrader.com (perfil → API)"),
+        ("ytmusic_app_token", "YouTube Music",
+         "Token de la app para YouTube Music"),
+    ]
+
+    _API_DOT_ON  = "color: #7CE38B; background: transparent; font-size: 11px; border: none;"
+    _API_DOT_OFF = "color: rgba(255,255,255,0.22); background: transparent; font-size: 11px; border: none;"
+
+    def _api_lineedit_qss(self) -> str:
+        return f"""
+            QLineEdit {{
+                background: rgba(10,12,26,0.85); color: {C.TEXT};
+                border: 1px solid rgba(182,196,255,0.22); border-radius: 9px;
+                padding: 5px 10px; font-size: 12px;
+            }}
+            QLineEdit:focus {{ border-color: rgba(182,196,255,0.45); }}
+        """
+
+    def _load_api_config(self) -> dict:
+        try:
+            return json.loads(config_path("api_keys.json").read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _build_apis_page(self) -> QWidget:
+        w = QWidget()
+        w.setStyleSheet("QWidget { border: none; background: transparent; }")
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(14)
+
+        self._api_edits: dict[str, QLineEdit] = {}
+        self._api_dots: dict[str, QLabel] = {}
+        cfg = self._load_api_config()
+
+        card, body = self._make_card("CLAVES DE API")
+        for i, (key, title, desc) in enumerate(self._API_KEYS):
+            value = str(cfg.get(key) or "")
+
+            box = QWidget()
+            box.setStyleSheet("QWidget { background: transparent; border: none; }")
+            h = QHBoxLayout(box)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(8)
+
+            dot = QLabel("●")
+            dot.setStyleSheet(self._API_DOT_ON if value else self._API_DOT_OFF)
+            h.addWidget(dot)
+
+            edit = QLineEdit()
+            edit.setText(value)
+            edit.setEchoMode(QLineEdit.EchoMode.Password)
+            edit.setPlaceholderText("No configurada")
+            edit.setFixedWidth(250)
+            edit.setStyleSheet(self._api_lineedit_qss())
+            h.addWidget(edit)
+
+            eye = QPushButton("👁")
+            eye.setCheckable(True)
+            eye.setCursor(Qt.CursorShape.PointingHandCursor)
+            eye.setFixedSize(30, 30)
+            eye.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgba(255,255,255,0.03); color: {C.TEXT_MED};
+                    border: 1px solid rgba(182,196,255,0.15); border-radius: 9px;
+                    font-size: 13px;
+                }}
+                QPushButton:checked {{ color: {C.PRI}; border-color: rgba(182,196,255,0.45); }}
+            """)
+            eye.toggled.connect(
+                lambda on, e=edit: e.setEchoMode(
+                    QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+                )
+            )
+            h.addWidget(eye)
+
+            self._api_edits[key] = edit
+            self._api_dots[key] = dot
+            self._add_row(body, title, desc, box, first=(i == 0))
+        l.addWidget(card)
+
+        # Guardar + estado
+        save_row = QWidget()
+        save_row.setStyleSheet("QWidget { background: transparent; border: none; }")
+        sl = QHBoxLayout(save_row)
+        sl.setContentsMargins(2, 0, 2, 0)
+        sl.setSpacing(12)
+        self._api_status = QLabel("")
+        self._api_status.setStyleSheet(
+            f"color: {C.TEXT_MED}; background: transparent; font-size: 11px; border: none;"
+        )
+        sl.addWidget(self._api_status, 1)
+        save_btn = QPushButton("Guardar cambios")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setFixedHeight(32)
+        save_btn.setStyleSheet(self._settings_button_qss())
+        save_btn.clicked.connect(self._save_api_keys)
+        sl.addWidget(save_btn, 0)
+        l.addWidget(save_row)
+
+        # Google OAuth (credencial compartida Gmail/Drive/Calendar)
+        gcard, gbody = self._make_card("GOOGLE · GMAIL / DRIVE / CALENDAR")
+        creds_ok = config_path("google_credentials.json").is_file()
+        state = QLabel("Configurado" if creds_ok else "Falta google_credentials.json")
+        state.setStyleSheet(
+            ("color: #7CE38B;" if creds_ok else "color: #FFB4A2;")
+            + " background: transparent; font-size: 12px; font-weight: 700; border: none;"
+        )
+        self._add_row(
+            gbody, "Credencial OAuth",
+            "Cliente OAuth para Gmail, Drive y Calendar. Los tokens de sesión se "
+            "crean al iniciar sesión desde cada modo.",
+            state, first=True,
+        )
+        folder_btn = QPushButton("Abrir carpeta de configuración")
+        folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        folder_btn.setFixedHeight(30)
+        folder_btn.setStyleSheet(self._settings_button_qss())
+        folder_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(config_path("api_keys.json").parent))
+            )
+        )
+        self._add_row(
+            gbody, "Archivos de configuración",
+            "api_keys.json, google_credentials.json y tokens viven aquí.",
+            folder_btn,
+        )
+        l.addWidget(gcard)
+
+        note = QLabel("Los cambios en las claves se aplican al reiniciar Jarvis.")
+        note.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; font-size: 11px; border: none;"
+        )
+        l.addWidget(note)
+        l.addStretch(1)
+        return w
+
+    def _save_api_keys(self) -> None:
+        path = config_path("api_keys.json")
+        cfg = self._load_api_config()
+        for key, edit in self._api_edits.items():
+            val = edit.text().strip()
+            if val:
+                cfg[key] = val
+            else:
+                cfg.pop(key, None)   # campo vaciado = clave eliminada
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:
+            self._api_status.setText(f"Error al guardar: {exc}")
+            return
+        for key, dot in self._api_dots.items():
+            dot.setStyleSheet(self._API_DOT_ON if cfg.get(key) else self._API_DOT_OFF)
+        self._api_status.setText("✔ Guardado — reinicia Jarvis para aplicar los cambios.")
+
     def _build_music_page(self) -> QWidget:
         # Seed from the live music panel; fall back to the persisted settings.
         self._cf_enabled = bool(app_settings.get("crossfade_enabled", False))
@@ -529,7 +702,6 @@ class SettingsModePanel(QWidget):
             self._cf_secs = int(getattr(mp, "_cf_secs", self._cf_secs))
 
         self._autoplay = bool(app_settings.get("music_autoplay", True))
-        self._def_volume = int(app_settings.get("music_default_volume", 100))
         self._audio_quality = str(app_settings.get("music_audio_quality", "m4a"))
         self._disable_ducking = bool(app_settings.get("music_disable_ducking", True))
 
@@ -591,22 +763,6 @@ class SettingsModePanel(QWidget):
             body2, "Reproducción automática",
             "Continúa con la siguiente canción al terminar.",
             self._autoplay_switch, first=True,
-        )
-
-        self._vol_spin = QSpinBox()
-        self._vol_spin.setRange(0, 100)
-        self._vol_spin.setValue(self._def_volume)
-        self._vol_spin.setSuffix(" %")
-        self._vol_spin.setFixedSize(86, 32)
-        self._vol_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
-        self._vol_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._vol_spin.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._vol_spin.setStyleSheet(self._spin_qss())
-        self._vol_spin.valueChanged.connect(self._on_def_volume)
-        self._add_row(
-            body2, "Volumen por defecto",
-            "Volumen con el que arranca la reproducción.",
-            self._vol_spin,
         )
 
         self._quality_combo = QComboBox()
@@ -854,6 +1010,7 @@ class SettingsModePanel(QWidget):
             sld.setRange(-12, 12)
             sld.setValue(int(gains[i]))
             sld.setFixedHeight(150)
+            sld.setFixedWidth(28)  # room for the handle's -6px overhang; else it gets clipped by the widget's own rect
             sld.setCursor(Qt.CursorShape.PointingHandCursor)
             sld.setStyleSheet(self._eq_slider_qss())
             sld.valueChanged.connect(lambda v, idx=i: self._on_eq_slider(idx, v))
@@ -1047,6 +1204,38 @@ class SettingsModePanel(QWidget):
 
         l.addWidget(card)
 
+        # ── Form autofill card ───────────────────────────────────────────
+        # Non-sensitive data only (see agent/browser_agent.py's allowlist);
+        # never passwords, cards, or IDs.
+        autofill_card, autofill_body = self._make_card("AUTORRELLENO DE FORMULARIOS")
+        autofill_desc = QLabel(
+            "Datos que JARVIS puede usar para rellenar formularios web repetitivos "
+            "(nunca contraseñas, tarjetas o documentos de identidad)."
+        )
+        autofill_desc.setWordWrap(True)
+        autofill_desc.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; font-size: 11px; border: none;")
+        autofill_body.addWidget(autofill_desc)
+
+        form_profile = app_settings.get("form_profile", {}) or {}
+        self._autofill_edits: dict[str, QLineEdit] = {}
+        for key, label in (
+            ("name", "Nombre completo"), ("email", "Email"), ("phone", "Teléfono"),
+            ("address", "Dirección"), ("city", "Ciudad"),
+            ("postal_code", "Código postal"), ("country", "País"),
+        ):
+            edit = QLineEdit()
+            edit.setText(str(form_profile.get(key, "") or ""))
+            edit.setMinimumWidth(220)
+            edit.textChanged.connect(self._on_autofill_changed)
+            self._autofill_edits[key] = edit
+            self._add_row(autofill_body, label, "", edit, first=(key == "name"))
+
+        self._autofill_save_timer = QTimer(self)
+        self._autofill_save_timer.setSingleShot(True)
+        self._autofill_save_timer.setInterval(600)
+        self._autofill_save_timer.timeout.connect(self._save_autofill_profile)
+        l.addWidget(autofill_card)
+
         # ── Audio devices card ───────────────────────────────────────────
         dev_card, dev_body = self._make_card("DISPOSITIVOS DE AUDIO")
 
@@ -1074,7 +1263,14 @@ class SettingsModePanel(QWidget):
         self._out_combo = QComboBox()
         for d in self._list_output_devices():
             self._out_combo.addItem(d.get("description", d.get("name", "")), d.get("name", ""))
-        oi = self._out_combo.findData(str(app_settings.get("audio_output_device", "")))
+        saved_output = str(app_settings.get("audio_output_device", "") or "")
+        oi = self._out_combo.findData(saved_output)
+        if oi < 0:
+            # A re-paired Bluetooth endpoint usually gets a new WASAPI GUID.
+            # Do not display "Automático" while silently retaining a dead GUID.
+            app_settings.set("audio_output_device", "")
+            saved_output = ""
+            oi = self._out_combo.findData("")
         self._out_combo.setCurrentIndex(oi if oi >= 0 else 0)
         self._out_combo.setFixedHeight(32)
         self._out_combo.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1299,6 +1495,74 @@ class SettingsModePanel(QWidget):
             self._space_combo,
         )
 
+        self._briefing_switch = ToggleSwitch(bool(app_settings.get("startup_briefing_enabled", False)))
+        self._briefing_switch.toggled.connect(
+            lambda v: app_settings.set("startup_briefing_enabled", bool(v))
+        )
+        self._add_row(
+            body, "Briefing matinal",
+            "Al conectar, JARVIS saluda, dice la hora y busca los titulares del día.",
+            self._briefing_switch,
+        )
+
+        self._proactive_switch = ToggleSwitch(bool(app_settings.get("proactive_enabled", False)))
+        self._proactive_switch.toggled.connect(
+            lambda v: app_settings.set("proactive_enabled", bool(v))
+        )
+        self._add_row(
+            body, "Modo proactivo",
+            "JARVIS puede actuar por iniciativa propia según la hora, tu contexto y tus indicaciones.",
+            self._proactive_switch,
+        )
+
+        self._proactive_interval = QSpinBox()
+        self._proactive_interval.setRange(1, 1440)
+        self._proactive_interval.setValue(
+            int(app_settings.get("proactive_interval_minutes", 15) or 15)
+        )
+        self._proactive_interval.setSuffix(" min")
+        self._proactive_interval.setFixedSize(108, 34)
+        self._proactive_interval.setStyleSheet(self._spin_qss())
+        self._proactive_interval.valueChanged.connect(
+            lambda value: app_settings.set("proactive_interval_minutes", int(value))
+        )
+        self._add_row(
+            body, "Frecuencia",
+            "Tiempo de silencio entre cada comprobación proactiva.",
+            self._proactive_interval,
+        )
+
+        self._proactive_prompt = QTextEdit()
+        self._proactive_prompt.setPlainText(str(app_settings.get("proactive_prompt", "") or ""))
+        self._proactive_prompt.setPlaceholderText(
+            "Ej.: Recuérdame hacer pausas, revisa mis objetivos y avísame si hay algo importante pendiente."
+        )
+        self._proactive_prompt.setAcceptRichText(False)
+        self._proactive_prompt.setFixedHeight(96)
+        self._proactive_prompt.setMinimumWidth(320)
+        self._proactive_prompt.setStyleSheet(f"""
+            QTextEdit {{
+                background: rgba(10,12,26,0.85); color: {C.TEXT};
+                border: 1px solid rgba(182,196,255,0.22); border-radius: 9px;
+                padding: 8px 10px; font-size: 12px;
+            }}
+            QTextEdit:focus {{ border-color: rgba(182,196,255,0.55); }}
+        """)
+        self._proactive_prompt_timer = QTimer(self)
+        self._proactive_prompt_timer.setSingleShot(True)
+        self._proactive_prompt_timer.setInterval(400)
+        self._proactive_prompt_timer.timeout.connect(
+            lambda: app_settings.set(
+                "proactive_prompt", self._proactive_prompt.toPlainText().strip()
+            )
+        )
+        self._proactive_prompt.textChanged.connect(self._proactive_prompt_timer.start)
+        self._add_row(
+            body, "Indicaciones",
+            "Describe qué quieres que JARVIS tenga en cuenta o haga cuando se active.",
+            self._proactive_prompt,
+        )
+
         l.addWidget(card)
         l.addStretch(1)
         return w
@@ -1342,6 +1606,15 @@ class SettingsModePanel(QWidget):
                     forget(key, "identity")
             except Exception:
                 pass
+
+    def _on_autofill_changed(self) -> None:
+        if hasattr(self, "_autofill_save_timer"):
+            self._autofill_save_timer.start()
+
+    def _save_autofill_profile(self) -> None:
+        profile = {key: edit.text().strip() for key, edit in self._autofill_edits.items()}
+        profile = {k: v for k, v in profile.items() if v}
+        app_settings.set("form_profile", profile)
 
     def _on_wa_notifications(self, checked: bool) -> None:
         app_settings.set("whatsapp_notifications", bool(checked))
@@ -1402,10 +1675,6 @@ class SettingsModePanel(QWidget):
         app_settings.set("music_autoplay", checked)
         self._send_playback("set_autoplay", {"enabled": checked})
 
-    def _on_def_volume(self, val: int) -> None:
-        app_settings.set("music_default_volume", int(val))
-        self._send_playback("volume", {"level": int(val)})
-
     def _on_quality(self, _idx: int) -> None:
         q = self._quality_combo.currentData() or "m4a"
         app_settings.set("music_audio_quality", q)
@@ -1449,7 +1718,7 @@ class WhatsAppToast(QWidget):
         self._on_open  = on_open
         self._on_closed = on_closed
         self._closing  = False
-        self._anim: QPropertyAnimation | None = None
+        self._anim: HiFpsAnimation | None = None
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -1606,7 +1875,7 @@ class WhatsAppToast(QWidget):
         self.setWindowOpacity(0.0)
         self.show()
         self.raise_()
-        self._anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._anim = HiFpsAnimation(self, setter=self.setWindowOpacity)
         self._anim.setDuration(220)
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
@@ -1620,7 +1889,7 @@ class WhatsAppToast(QWidget):
             self._timer.stop()
         except Exception:
             pass
-        self._anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._anim = HiFpsAnimation(self, setter=self.setWindowOpacity)
         self._anim.setDuration(220)
         self._anim.setStartValue(self.windowOpacity())
         self._anim.setEndValue(0.0)

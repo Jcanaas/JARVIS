@@ -358,6 +358,12 @@ def _line_icon(name: str, color: str = C.TEXT_DIM, size: int = 20) -> QIcon:
 			tri = QPainterPath()
 			tri.moveTo(20 - off, 6); tri.lineTo(13 - off, 12); tri.lineTo(20 - off, 18)
 			tri.closeSubpath(); p.drawPath(tri)
+	elif name == "tune":
+		# Three slider rails with offset knobs (color-adjust / filters).
+		line(4, 7, 20, 7); line(4, 12, 20, 12); line(4, 17, 20, 17)
+		p.setBrush(qcol(color))
+		for _kx, _ky in ((9, 7), (15, 12), (7, 17)):
+			p.drawEllipse(QRectF(_kx - 2, _ky - 2, 4, 4))
 	elif name == "fullscreen_exit":
 		line(8, 4, 8, 8); line(8, 8, 4, 8)
 		line(16, 4, 16, 8); line(16, 8, 20, 8)

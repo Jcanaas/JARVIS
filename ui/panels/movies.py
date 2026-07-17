@@ -711,6 +711,9 @@ class _MovieCard(QWidget):
         self.clicked.emit(self.movie)
 
 
+_MIN_HEALTHY_SEEDERS = 5  # below this, warn and prefer an alternative release
+
+
 class _TorrentSelectDialog(QDialog):
     """Dialog to select a torrent from a list of search results."""
 
@@ -747,19 +750,37 @@ class _TorrentSelectDialog(QDialog):
         lay.addWidget(self._list)
 
         # Keep the incoming order (already sorted by seeders); don't re-sort.
-        for t in torrents:
+        healthy_row = None
+        for i, t in enumerate(torrents):
             size_str = t.size if t.size else ""
             provider = getattr(t, "provider", "") or "torrent"
             is_es = getattr(t, "spanish", False)
+            is_healthy = t.seeders >= _MIN_HEALTHY_SEEDERS
+            if is_healthy and healthy_row is None:
+                healthy_row = i
             # Text label (not just a flag emoji, which Qt may not render on
             # Windows) so Spanish vs. original is unmistakable.
             lang = "[ESPAÑOL]" if is_es else "[ORIGINAL/VO]"
-            meta = f"📤 {t.seeders} seeders   {size_str}   ·  {provider}"
+            warn = "" if is_healthy else "⚠ "
+            meta = f"📤 {warn}{t.seeders} seeders   {size_str}   ·  {provider}"
             item = QListWidgetItem(f"{lang}  {t.title}\n{meta}")
             item.setData(Qt.ItemDataRole.UserRole, t)
             # Colour Spanish results green, others dimmer, so the list scans fast.
-            item.setForeground(QColor("#4ADE80") if is_es else QColor(C.TEXT_DIM))
+            # Low-seeder releases get a dim red tint regardless of language so
+            # the risk of a stalled download is visible at a glance.
+            if is_healthy:
+                item.setForeground(QColor("#4ADE80") if is_es else QColor(C.TEXT_DIM))
+            else:
+                item.setForeground(QColor("#F87171"))
             self._list.addItem(item)
+
+        # Default the selection to the first healthy release instead of just
+        # the top of the list, so double-click/Enter doesn't hand the user a
+        # release that will stall for lack of seeders.
+        if healthy_row is not None:
+            self._list.setCurrentRow(healthy_row)
+        elif torrents:
+            self._list.setCurrentRow(0)
 
         # Buttons
         btn_lay = QHBoxLayout()

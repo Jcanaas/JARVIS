@@ -29,7 +29,10 @@ from actions.paths import RESOURCE_DIR, config_path
 BASE_DIR         = RESOURCE_DIR
 CREDENTIALS_FILE = config_path("google_credentials.json")
 
-_PIPE_PATH = r"\\.\pipe\jarvis_mpv_video"
+# Per-process pipe name: two Jarvis instances (e.g. dev + installed) must not
+# talk to each other's mpv — a stale mpv on a shared pipe ends up orphaned as
+# an unclosable borderless window.
+_PIPE_PATH = rf"\\.\pipe\jarvis_mpv_video_{os.getpid()}"
 
 
 def _locate_mpv() -> str:
@@ -45,6 +48,7 @@ def _locate_mpv() -> str:
 
 def _locate_ytdlp() -> Optional[str]:
     for candidate in (
+        str(BASE_DIR / "yt-dlp.exe"),   # bundled binary (RESOURCE_DIR, frozen build)
         shutil.which("yt-dlp"),
         shutil.which("yt-dlp.exe"),
         str(Path(sys.executable).parent / "yt-dlp.exe"),

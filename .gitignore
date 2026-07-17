@@ -4,6 +4,13 @@ config/google_credentials.json
 config/google_token.json
 config/youtube_token.json
 config/ytmusic_oauth.json
+config/cardtrader_catalog.db
+config/cardtrader_catalog.db-wal
+config/cardtrader_catalog.db-shm
+config/cardtrader_last_quote.json
+
+# === Generated tool caches (not source) ===
+graphify-out/
 
 # === Personal memory / conversation data ===
 memory/conversation_history.json
@@ -35,6 +42,7 @@ mpv.exe
 mpv.com
 mpv.com.manifest
 d3dcompiler_43.dll
+yt-dlp.exe
 mpv/
 7z/
 mpv_log.txt
@@ -55,6 +63,7 @@ build/work/
 build/pyinstaller.log
 build/smoke_*.log
 node/
+vlc/
 *.spec.bak
 
 # === Logs ===

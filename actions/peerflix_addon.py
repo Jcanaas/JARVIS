@@ -30,6 +30,10 @@ _TRACKERS = [
     "udp://tracker.openbittorrent.com:6969/announce",
     "udp://exodus.desync.com:6969/announce",
     "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.tiny-vps.com:6969/announce",
+    "udp://tracker.moeking.me:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
 ]
 
 _SPANISH_RE = re.compile(r"castellano|español|espanol|🇪🇸|latino", re.IGNORECASE)

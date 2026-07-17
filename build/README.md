@@ -22,11 +22,19 @@ Pasos que ejecuta:
 1. Instala PyInstaller si falta.
 2. `npm install --omit=dev` en `whatsapp_bridge/` si no hay `node_modules`.
 3. Descarga un **Node.js portable** a `node/` (se empaqueta con la app).
-4. Congela la app con `build/jarvis.spec` → `dist/Jarvis/`.
-5. Copia el Node portable dentro de `dist/Jarvis/_internal/node/`.
-6. Compila el instalador con Inno Setup → `dist/installer/Jarvis-Setup-*.exe`.
+4. Descarga el **runtime de VLC** (libvlc + plugins) a `vlc/` para la
+   reproducción de vídeo (python-vlc), sin exigir VLC instalado al usuario.
+5. Congela la app con `build/jarvis.spec` → `dist/Jarvis/`.
+6. Copia el Node portable dentro de `dist/Jarvis/_internal/node/` y el VLC
+   dentro de `dist/Jarvis/_internal/vlc/`.
+7. Compila el instalador con Inno Setup → `dist/installer/Jarvis-Setup-*.exe`.
 
-Flags útiles: `-SkipNode`, `-SkipInstaller`, `-NodeVersion 20.18.1`.
+Flags útiles: `-SkipNode`, `-SkipVlc`, `-SkipInstaller`, `-NodeVersion 20.18.1`,
+`-VlcVersion 3.0.21`.
+
+> ⚠️ El spec empaqueta `config/api_keys.json` (Gemini, TMDB, MAL…) para que la
+> app funcione nada más instalarse. No distribuyas el instalador públicamente
+> con claves reales dentro; se pueden editar luego en Ajustes → APIs.
 
 ## Artefactos
 

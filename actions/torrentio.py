@@ -28,7 +28,7 @@ _TIMEOUT = 12
 
 # Spanish-focused providers (the whole point of adding Torrentio here) plus the
 # big international ones so we still get high-seed English releases.
-_PROVIDERS = "mejortorrent,wolfmax4k,cinecalidad,elitetorrent,yts,eztv,thepiratebay,1337x"
+_PROVIDERS = "mejortorrent,wolfmax4k,cinecalidad,elitetorrent,yts,eztv,thepiratebay,1337x,torrentgalaxy,magnetdl,besttorrents"
 _ANIME_PROVIDERS = "nyaa,eztv,1337x"
 
 _TRACKERS = [
@@ -37,6 +37,10 @@ _TRACKERS = [
     "udp://tracker.openbittorrent.com:6969/announce",
     "udp://exodus.desync.com:6969/announce",
     "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.tiny-vps.com:6969/announce",
+    "udp://tracker.moeking.me:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
 ]
 
 # Torrentio tags language with a flag emoji, which is reliable; "dual" alone is

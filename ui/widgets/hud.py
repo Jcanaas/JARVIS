@@ -9,7 +9,7 @@ import time
 
 import psutil
 from PyQt6.QtCore import (
-    QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, QTimer, pyqtProperty,
+    QEasingCurve, QPointF, QRectF, Qt, QTimer, pyqtProperty,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
@@ -17,6 +17,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 from ..theme import C, FONT_UI, qcol
+from .anim import ANIM_INTERVAL_MS, HiFpsAnimation
 
 
 def _set_windows_app_id() -> None:
@@ -241,10 +242,11 @@ class HudCanvas(QWidget):
         self._bar_phases  = [random.uniform(0, 2 * math.pi) for _ in range(_N)]
         self._rot_angle   = 0.0
 
+        self._last_step_t = 0.0
         self._tmr = QTimer(self)
         self._tmr.setTimerType(Qt.TimerType.PreciseTimer)
         self._tmr.timeout.connect(self._step)
-        self._tmr.start(33)
+        self._tmr.start(ANIM_INTERVAL_MS)
 
     def burst(self):
         """Onda expansiva puntual — feedback al enviar una orden."""
@@ -269,8 +271,14 @@ class HudCanvas(QWidget):
             self._face_px = None
 
     def _step(self):
-        self._tick += 1
         now = time.time()
+        # Velocidades originales calibradas a tick de 33 ms; k reescala cada
+        # incremento al intervalo real para que subir fps no acelere nada.
+        dt = (now - self._last_step_t) if self._last_step_t else 0.033
+        self._last_step_t = now
+        k = max(0.05, min(3.0, dt / 0.033))
+        _f = lambda a: 1.0 - (1.0 - a) ** k
+        self._tick += k
         with self._audio_data_lock:
             pending_fft = self._pending_fft
             pending_bands = self._pending_bands
@@ -296,12 +304,12 @@ class HudCanvas(QWidget):
             self._last_audio_t = now
         elif now - self._last_audio_t < 0.18:
             # 180ms de hold + decaimiento suave tras el audio
-            self._scale += (1.0  - self._scale) * 0.22
-            self._halo  += (55.0 - self._halo)  * 0.22
+            self._scale += (1.0  - self._scale) * _f(0.22)
+            self._halo  += (55.0 - self._halo)  * _f(0.22)
         elif _active:
             # hablando/música sin nivel detectable: pulso suave
-            self._scale += (1.015 - self._scale) * 0.14
-            self._halo  += (70.0  - self._halo)  * 0.14
+            self._scale += (1.015 - self._scale) * _f(0.14)
+            self._halo  += (70.0  - self._halo)  * _f(0.14)
         else:
             # reposo total: respiración mínima y estable
             breath = math.sin(self._tick * 0.012) * 0.003
@@ -310,27 +318,27 @@ class HudCanvas(QWidget):
 
         speeds = [1.3, -0.9, 2.0] if self.speaking else ([0.9, -0.65, 1.4] if self.music_playing else [0.55, -0.35, 0.9])
         for i, spd in enumerate(speeds):
-            self._rings[i] = (self._rings[i] + spd) % 360
+            self._rings[i] = (self._rings[i] + spd * k) % 360
 
-        self._scan  = (self._scan  + (3.0 if self.speaking else (2.0 if self.music_playing else 1.3))) % 360
-        self._scan2 = (self._scan2 + (-2.0 if self.speaking else (-1.4 if self.music_playing else -0.75))) % 360
+        self._scan  = (self._scan  + (3.0 if self.speaking else (2.0 if self.music_playing else 1.3)) * k) % 360
+        self._scan2 = (self._scan2 + (-2.0 if self.speaking else (-1.4 if self.music_playing else -0.75)) * k) % 360
         rot_spd = 1.8 if (self.speaking or self.music_playing) else (0.9 if _al > 0.02 else 0.25)
-        self._rot_angle = (self._rot_angle + rot_spd) % 360
+        self._rot_angle = (self._rot_angle + rot_spd * k) % 360
         # decay de barras FFT cada tick (en-place para no perder escrituras del hilo de audio)
-        _decay = 0.84
+        _decay = 0.84 ** k
         for _i in range(len(self._bar_heights)):
             self._bar_heights[_i] *= _decay
 
         fw  = min(self.width(), self.height())
         lim = fw * 0.74
-        spd = 4.2 if self.speaking else (3.2 if self.music_playing else 2.0)
+        spd = (4.2 if self.speaking else (3.2 if self.music_playing else 2.0)) * k
         self._pulses = [r + spd for r in self._pulses if r + spd < lim]
         # los golpes de bajo emiten pulsos extra
         _emit = 0.12 if self._bass > 0.35 else (0.07 if self.speaking else (0.05 if self.music_playing else 0.025))
-        if len(self._pulses) < 5 and random.random() < _emit:
+        if len(self._pulses) < 5 and random.random() < _emit * k:
             self._pulses.append(0.0)
 
-        if (self.speaking or self.music_playing) and random.random() < (0.28 if self.speaking else 0.1):
+        if (self.speaking or self.music_playing) and random.random() < (0.28 if self.speaking else 0.1) * k:
             cx, cy = self.width() / 2, self.height() / 2
             ang = random.uniform(0, 2 * math.pi)
             r_s = fw * 0.28
@@ -339,12 +347,13 @@ class HudCanvas(QWidget):
                 math.cos(ang) * random.uniform(0.9, 2.4),
                 math.sin(ang) * random.uniform(0.9, 2.4) - 0.4, 1.0,
             ])
+        _damp = 0.97 ** k
         self._particles = [
-            [p[0]+p[2], p[1]+p[3], p[2]*0.97, p[3]*0.97, p[4]-0.028]
+            [p[0]+p[2]*k, p[1]+p[3]*k, p[2]*_damp, p[3]*_damp, p[4]-0.028*k]
             for p in self._particles if p[4] > 0
         ]
 
-        self._blink_tick += 1
+        self._blink_tick += k
         if self._blink_tick >= 38:
             self._blink = not self._blink
             self._blink_tick = 0
@@ -659,7 +668,7 @@ class MetricBar(QWidget):
             return
         anim = getattr(self, "_anim", None)
         if anim is None:
-            anim = QPropertyAnimation(self, b"barValue", self)
+            anim = HiFpsAnimation(self, setter=self._set_bar_value)
             anim.setDuration(360)
             anim.setEasingCurve(QEasingCurve.Type.OutCubic)
             self._anim = anim

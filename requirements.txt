@@ -28,3 +28,6 @@ python-pptx
 pyqt6
 soundcard
 python-vlc
+pdfplumber
+python-docx
+syncedlyrics

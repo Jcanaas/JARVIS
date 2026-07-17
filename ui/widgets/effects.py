@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEasingCurve, QEvent, QObject, QPropertyAnimation
+from PyQt6.QtCore import QEasingCurve, QEvent, QObject
 from PyQt6.QtGui import QPainter, QPixmap
 from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
 from ..theme import qcol
+from .anim import HiFpsAnimation
 
 
 _ANIM_DUR = 240
@@ -23,7 +24,7 @@ class HoverGlow(QObject):
 		eff.setColor(qcol(color or "#6E8EFF", 255))
 		w.setGraphicsEffect(eff)
 		self._eff = eff
-		self._anim = QPropertyAnimation(eff, b"blurRadius", self)
+		self._anim = HiFpsAnimation(self, setter=eff.setBlurRadius)
 		self._anim.setDuration(_HOVER_DUR)
 		self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 		w.installEventFilter(self)
@@ -52,13 +53,13 @@ def pulse_glow(w: QWidget, color: str | None = None, radius: int = 78):
 		eff.setBlurRadius(0.0)
 		w.setGraphicsEffect(eff)
 	eff.setColor(qcol(color or "#7C9AFF", 255))
-	anim = QPropertyAnimation(eff, b"blurRadius", w)
+	anim = HiFpsAnimation(w, setter=eff.setBlurRadius)
 	anim.setDuration(550)
 	anim.setKeyValueAt(0.0, eff.blurRadius())
 	anim.setKeyValueAt(0.25, float(radius))
 	anim.setKeyValueAt(1.0, 0.0)
 	anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-	anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+	anim.start(delete_when_stopped=True)
 
 
 class _SnapshotVeil(QWidget):

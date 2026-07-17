@@ -403,21 +403,22 @@ def show_gcal_auth_pending_dialog() -> None:
         )
 
         dlg = QDialog()
-        dlg.setWindowTitle("Google Calendar — Authorization")
+        dlg.setWindowTitle("Google — Autorización")
         dlg.setModal(False)
         dlg.resize(420, 180)
         dlg.setStyleSheet(_BASE_STYLE)
 
         layout = QVBoxLayout(dlg)
 
-        title = QLabel("Authorizing Google Calendar…")
+        title = QLabel("Conectando tu cuenta de Google…")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size:15px; font-weight:bold; margin:14px 0 6px 0;")
         layout.addWidget(title)
 
         msg = QLabel(
-            "A browser window will open for you to grant access.\n"
-            "Complete the authorization and return here."
+            "Se abrirá una pestaña del navegador para conceder acceso\n"
+            "(Calendar, Gmail, Drive y YouTube). Un solo inicio de sesión\n"
+            "vale para todo; este aviso se cierra solo al terminar."
         )
         msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
         msg.setWordWrap(True)
@@ -446,6 +447,21 @@ def show_gcal_auth_pending_dialog() -> None:
         dlg.activateWindow()
 
     _schedule_and_wait(_create, timeout=5.0)
+
+
+def close_gcal_auth_pending_dialog() -> None:
+    """Close the Google authorization notice if it is currently visible."""
+
+    def _close():
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        dlg = getattr(app, "_gcal_auth_dlg", None) if app else None
+        if dlg is not None:
+            dlg.close()
+            app._gcal_auth_dlg = None
+
+    _schedule_and_wait(_close, timeout=5.0)
 
 
 # ---------------------------------------------------------------------------

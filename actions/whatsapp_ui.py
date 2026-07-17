@@ -2476,6 +2476,20 @@ class WhatsAppWindow(QWidget):
             # igual que los cuerpos de texto.
             self._message_text_labels.append(transcript_label)
 
+        translation = str(msg.get("translation") or "").strip()
+        if translation:
+            translation_label = QLabel(f"🌐 {translation}")
+            translation_label.setWordWrap(True)
+            translation_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            translation_label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+            translation_label.setAlignment(Qt.AlignmentFlag.AlignRight if from_me else Qt.AlignmentFlag.AlignLeft)
+            translation_label.setStyleSheet(f"color: {TEXT_DIM}; font-size: 12px; font-style: italic; background: transparent; margin-top: 4px;")
+            translation_w = self._message_text_width(translation_label, translation, bubble_w)
+            translation_label.setMinimumWidth(translation_w)
+            translation_label.setMaximumWidth(translation_w)
+            lay.addWidget(translation_label)
+            self._message_text_labels.append(translation_label)
+
         if msg.get("hasMedia") or msg.get("mediaUrl"):
             self._add_media_widget(lay, msg)
 

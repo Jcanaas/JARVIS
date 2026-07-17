@@ -8,7 +8,59 @@ from ..theme import *
 from ..icons import *
 from .buttons import _MediaBtn
 
-__all__ = ["_CornerGrip", "_FloatOverlay", "_DetachWindow"]
+__all__ = ["_CornerGrip", "_FloatOverlay", "_DetachWindow", "CameraLiveWidget"]
+
+
+class _ClickSlider(QSlider):
+    """QSlider that jumps to the clicked position instead of only stepping.
+
+    Plain QSlider only supports dragging the handle or paging by one step
+    per click on the groove. The fullscreen overlay's seek/volume bars used
+    plain QSlider, so clicking anywhere on the bar (like the movies/youtube
+    seek bar does) silently did nothing — this mirrors the working _SeekSlider
+    pattern used elsewhere (movies.py/music.py/youtube.py).
+    """
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self.setTracking(True)
+
+    def _value_from_pos(self, pos):
+        span = max(1, self.width() - 1) if self.orientation() == Qt.Orientation.Horizontal else max(1, self.height() - 1)
+        coord = max(0, min(pos.x() if self.orientation() == Qt.Orientation.Horizontal else pos.y(), span))
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        inverted = self.invertedAppearance() ^ rtl
+        if inverted:
+            coord = span - coord
+        value = self.minimum() + (self.maximum() - self.minimum()) * (coord / span)
+        return int(round(value))
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(True)
+            self.setValue(self._value_from_pos(e.position().toPoint()))
+            self.sliderPressed.emit()
+            self.sliderMoved.emit(self.value())
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self.isSliderDown() and (e.buttons() & Qt.MouseButton.LeftButton):
+            self.setValue(self._value_from_pos(e.position().toPoint()))
+            self.sliderMoved.emit(self.value())
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.isSliderDown():
+            self.setValue(self._value_from_pos(e.position().toPoint()))
+            self.setSliderDown(False)
+            self.sliderReleased.emit()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
 
 
 class _CornerGrip(QWidget):
@@ -95,13 +147,14 @@ class _FloatOverlay(QWidget):
         text_col = QVBoxLayout()
         text_col.setSpacing(0)
         self._title = QLabel("")
-        self._title.setStyleSheet("color: #FFFFFF; font-size: 12px; font-weight: 800; background: transparent;")
+        self._title.setStyleSheet("color: #FFFFFF; font-size: 14px; font-weight: 800; background: transparent;")
         self._artist = QLabel("")
-        self._artist.setStyleSheet("color: rgba(255,255,255,0.82); font-size: 10px; background: transparent;")
+        self._artist.setStyleSheet("color: rgba(255,255,255,0.82); font-size: 11px; background: transparent;")
         text_col.addWidget(self._title)
         text_col.addWidget(self._artist)
         top_l.addLayout(text_col, 1)
         self._restore = _icon_button("close", "Cerrar", size=30, icon_size=16)
+        self._restore.setIcon(_line_icon("close", "#FFFFFF", 16))
         self._restore.clicked.connect(lambda: self._cb.get("restore", lambda: None)())
         top_l.addWidget(self._restore, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -116,6 +169,7 @@ class _FloatOverlay(QWidget):
         self.volume: "QSlider | None" = None
         self.subs_btn: "QPushButton | None" = None
         self.audio_btn: "QPushButton | None" = None
+        self.filters_btn: "QPushButton | None" = None
         if self._show_extra:
             self._seekrow = QWidget(self)
             self._seekrow.setStyleSheet(
@@ -127,7 +181,7 @@ class _FloatOverlay(QWidget):
             sr_l.setSpacing(10)
             self.time_lbl = QLabel("0:00 / 0:00")
             self.time_lbl.setStyleSheet("color:#FFFFFF; font-size:11px; background:transparent;")
-            self.seek = QSlider(Qt.Orientation.Horizontal)
+            self.seek = _ClickSlider(Qt.Orientation.Horizontal)
             self.seek.setRange(0, 1000)
             self.seek.setCursor(Qt.CursorShape.PointingHandCursor)
             self.seek.setStyleSheet(
@@ -154,10 +208,12 @@ class _FloatOverlay(QWidget):
         self._prev.setToolTip("Vídeo anterior")
         self._prev.clicked.connect(lambda: self._cb.get("prev", lambda: None)())
         self._rwd = _icon_button("backward", "Retroceder 10 s", size=40, icon_size=18)
+        self._rwd.setIcon(_line_icon("backward", "#FFFFFF", 18))
         self._rwd.clicked.connect(lambda: self._cb.get("rewind", lambda: None)())
         self._play = _MediaBtn(_MediaBtn.PLAY)
         self._play.clicked.connect(lambda: self._cb.get("toggle", lambda: None)())
         self._fwd = _icon_button("forward", "Adelantar 10 s", size=40, icon_size=18)
+        self._fwd.setIcon(_line_icon("forward", "#FFFFFF", 18))
         self._fwd.clicked.connect(lambda: self._cb.get("forward", lambda: None)())
         self._next = _MediaBtn(_MediaBtn.NEXT)
         self._next.setToolTip("Vídeo siguiente")
@@ -170,7 +226,7 @@ class _FloatOverlay(QWidget):
         bot_l.addStretch()
 
         if self._show_extra:
-            self.volume = QSlider(Qt.Orientation.Horizontal)
+            self.volume = _ClickSlider(Qt.Orientation.Horizontal)
             self.volume.setRange(0, 100)
             self.volume.setValue(90)
             self.volume.setFixedWidth(88)
@@ -183,6 +239,7 @@ class _FloatOverlay(QWidget):
             self.volume.valueChanged.connect(
                 lambda v: self._cb.get("volume_changed", lambda _v: None)(v))
             self.audio_btn = _icon_button("audio", "Pista de audio", size=36, icon_size=18)
+            self.audio_btn.setIcon(_line_icon("audio", "#FFFFFF", 18))
             self.audio_btn.clicked.connect(lambda: self._cb.get("audio", lambda: None)())
             self.subs_btn = QPushButton("CC")
             self.subs_btn.setToolTip("Subtítulos")
@@ -194,10 +251,14 @@ class _FloatOverlay(QWidget):
                 "QPushButton:hover { color:#B6C4FF; }"
             )
             self.subs_btn.clicked.connect(lambda: self._cb.get("subs", lambda: None)())
+            self.filters_btn = _icon_button("tune", "Filtros de color", size=36, icon_size=18)
+            self.filters_btn.setIcon(_line_icon("tune", "#FFFFFF", 18))
+            self.filters_btn.clicked.connect(lambda: self._cb.get("filters", lambda: None)())
             bot_l.addWidget(self.volume)
             bot_l.addSpacing(4)
             bot_l.addWidget(self.audio_btn)
             bot_l.addWidget(self.subs_btn)
+            bot_l.addWidget(self.filters_btn)
 
         self._grip = _CornerGrip(self) if self._resizable else None
 
@@ -207,6 +268,13 @@ class _FloatOverlay(QWidget):
         if self._grip is not None:
             self._grip.setVisible(True)
             self._grip.raise_()
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(QApplication.doubleClickInterval())
+        self._click_timer.timeout.connect(lambda: self._cb.get("toggle", lambda: None)())
+
+        self._last_cursor = None
+        self._idle_ms = 0
         self._hover_timer = QTimer(self)
         self._hover_timer.setInterval(220)
         self._hover_timer.timeout.connect(self._check_hover)
@@ -266,9 +334,31 @@ class _FloatOverlay(QWidget):
             self._grip.raise_()
 
     def _check_hover(self):
-        inside = self.frameGeometry().contains(QCursor.pos())
-        if inside != self._top.isVisible():
-            self._set_controls_visible(inside)
+        # In fullscreen the overlay covers the whole screen, so a plain
+        # "cursor inside" check kept the gradient bands ("shadow") and the
+        # controls permanently visible. Require recent cursor movement (or
+        # hovering one of the control strips) and fade out after ~2.5 s idle.
+        pos = QCursor.pos()
+        inside = self.frameGeometry().contains(pos)
+        moved = self._last_cursor is None or pos != self._last_cursor
+        self._last_cursor = pos
+        if not inside:
+            visible = False
+            self._idle_ms = 0
+        elif moved:
+            visible = True
+            self._idle_ms = 0
+        else:
+            self._idle_ms += self._hover_timer.interval()
+            lp = self.mapFromGlobal(pos)
+            over_controls = self._top.isVisible() and (
+                self._top.geometry().contains(lp)
+                or self._bottom.geometry().contains(lp)
+                or (self._seekrow is not None and self._seekrow.geometry().contains(lp))
+            )
+            visible = over_controls or self._idle_ms < 2500
+        if visible != self._top.isVisible():
+            self._set_controls_visible(visible)
 
     def set_meta(self, title: str, artist: str):
         title = str(title or "")
@@ -285,6 +375,19 @@ class _FloatOverlay(QWidget):
             self._drag = event.globalPosition().toPoint()
             self._origin = self.pos()
             event.accept()
+        elif event.button() == Qt.MouseButton.LeftButton:
+            # Fullscreen: click on the video toggles play/pause (debounced so
+            # a double-click, which exits fullscreen, doesn't also toggle).
+            self._click_timer.start()
+            event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if not self._draggable and event.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.stop()
+            self._cb.get("restore", lambda: None)()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._drag is not None and (event.buttons() & Qt.MouseButton.LeftButton):
@@ -322,3 +425,83 @@ class _DetachWindow(QWidget):
         except Exception:
             pass
         super().closeEvent(event)
+
+
+class CameraLiveWidget(QWidget):
+    """Vista en vivo de la webcam — pequeño flotante en la esquina del HUD
+    mientras la tool de visión tiene la cámara activa. Sondea frames con un
+    QTimer sobre el mismo cv2.VideoCapture que usa screen_processor."""
+
+    _POLL_MS = 33  # ~30 fps, tope real de la webcam; más rápido solo quema CPU
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(220, 165)
+        self.setStyleSheet("""
+            QWidget#CamCard {
+                background: #060912;
+                border: 2px solid rgba(122, 162, 255, 0.55);
+                border-radius: 10px;
+            }
+        """)
+        self.setObjectName("CamCard")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        self._label = QLabel()
+        self._label.setScaledContents(True)
+        self._label.setStyleSheet("border-radius: 6px; background: #000;")
+        lay.addWidget(self._label)
+
+        self._cap = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._poll_frame)
+        self.hide()
+
+    def start(self) -> bool:
+        try:
+            import cv2
+            from actions.screen_processor import _cv2_backend, _get_camera_index
+        except Exception as e:
+            print(f"[Vision] ⚠️  Camera live view unavailable: {e}")
+            return False
+
+        index   = _get_camera_index()
+        backend = _cv2_backend()
+        cap = cv2.VideoCapture(index, backend)
+        if not cap.isOpened():
+            cap.release()
+            return False
+
+        self._cap = cap
+        self._timer.start(self._POLL_MS)
+        self.show()
+        self.raise_()
+        return True
+
+    def stop(self) -> None:
+        self._timer.stop()
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
+        self.hide()
+
+    def _poll_frame(self) -> None:
+        if self._cap is None:
+            return
+        ret, frame = self._cap.read()
+        if not ret or frame is None:
+            return
+        import cv2
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb = np_ascontiguous(rgb)
+        h, w, ch = rgb.shape
+        img = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+        self._label.setPixmap(QPixmap.fromImage(img))
+
+
+def np_ascontiguous(arr):
+    import numpy as np
+    return np.ascontiguousarray(arr)

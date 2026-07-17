@@ -3177,8 +3177,6 @@ class _PanelControls(QWidget):
         bar_l.setSpacing(10)
 
         self.play_btn = _MediaBtn(_MediaBtn.PLAY)
-        self.back_btn = _icon_button("backward", "Retroceder 10 s", size=36, icon_size=18)
-        self.fwd_btn = _icon_button("forward", "Adelantar 10 s", size=36, icon_size=18)
         self.time_lbl = QLabel("0:00 / 0:00")
         self.time_lbl.setStyleSheet("color: #FFFFFF; font-size: 11px; background: transparent;")
         self.seek = _SeekSlider(Qt.Orientation.Horizontal)
@@ -3219,15 +3217,8 @@ class _PanelControls(QWidget):
         self.subs_btn.hide()
         self.float_btn = _icon_button("pip", "Vídeo flotante", size=36, icon_size=18)
         self.fullscreen_btn = _icon_button("fullscreen", "Pantalla completa", size=36, icon_size=18)
-        # White icons for video overlay buttons
-        for _name, _btn in (("backward", self.back_btn), ("forward", self.fwd_btn)):
-            _btn.setIcon(_line_icon(_name, "#FFFFFF", 18))
 
-        bar_l.addStretch()
-        bar_l.addWidget(self.back_btn)
         bar_l.addWidget(self.play_btn)
-        bar_l.addWidget(self.fwd_btn)
-        bar_l.addStretch()
         bar_l.addWidget(self.time_lbl)
         bar_l.addWidget(self.seek, stretch=1)
         bar_l.addWidget(self.vol_icon)

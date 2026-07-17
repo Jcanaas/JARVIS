@@ -25,6 +25,12 @@ _DEFAULTS: dict = {
     "crossfade_on_skip": False,
     "whatsapp_notifications": True,
     "whatsapp_notification_duration_s": 7,
+    "proactive_enabled": False,
+    "proactive_interval_minutes": 15,
+    "proactive_prompt": "",
+    # Non-sensitive autofill data for repetitive web forms (name/email/address/
+    # phone only — never passwords, cards, or IDs; see agent/browser_agent.py).
+    "form_profile": {},
 }
 
 

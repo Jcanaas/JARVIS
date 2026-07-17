@@ -11,7 +11,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from actions.paths import resource
+from actions.paths import find_node, resource
 
 _TIMEOUT = 12  # search.mjs self-caps at ~8s; this leaves margin for startup
 _SEARCH_SCRIPT = resource("actions", "vendor", "torlink", "search.mjs")
@@ -50,8 +50,8 @@ class Torrent:
 
 
 def _locate_node() -> str:
-    """Find the Node.js executable in PATH."""
-    node = shutil.which("node")
+    """Find the Node.js executable (bundled runtime first, then PATH)."""
+    node = find_node()
     if node:
         return node
     raise TorrentSearchError(

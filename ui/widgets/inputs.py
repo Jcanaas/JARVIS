@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import *
 
 from ..theme import C, qcol, _scrollbar_qss
 from .glyphs import _SearchSvgIcon, _FilterIcon
+from .anim import HiFpsAnimation
 
 class _InputMask(QWidget):
     def __init__(self, parent=None):
@@ -193,18 +194,18 @@ class SearchGlowInput(QFrame):
             self._filter_icon.raise_()
         self._search_icon.raise_()
 
-        self._angle_anim = QVariantAnimation(self)
+        self._angle_anim = HiFpsAnimation(self)
         self._angle_anim.setStartValue(0.0)
         self._angle_anim.setEndValue(1.0)
         self._angle_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._angle_anim.valueChanged.connect(self._apply_angle_progress)
 
-        self._blue_anim = QVariantAnimation(self)
+        self._blue_anim = HiFpsAnimation(self)
         self._blue_anim.setDuration(2000)
         self._blue_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._blue_anim.valueChanged.connect(self._set_blue_opacity)
 
-        self._pulse_anim = QVariantAnimation(self)
+        self._pulse_anim = HiFpsAnimation(self)
         self._pulse_anim.setStartValue(0.0)
         self._pulse_anim.setEndValue(1.0)
         self._pulse_anim.setDuration(1200)
@@ -212,7 +213,7 @@ class SearchGlowInput(QFrame):
         self._pulse_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._pulse_anim.valueChanged.connect(self._set_pulse)
 
-        self._spin_anim = QVariantAnimation(self)
+        self._spin_anim = HiFpsAnimation(self)
         self._spin_anim.setStartValue(0.0)
         self._spin_anim.setEndValue(360.0)
         self._spin_anim.setDuration(4000)

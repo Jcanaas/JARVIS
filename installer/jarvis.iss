@@ -28,7 +28,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Per-machine install (Program Files); writable data goes to LocalAppData.
 PrivilegesRequired=admin
-SetupIconFile=mpv-icon.ico
+SetupIconFile=jarvis-icon.ico
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"

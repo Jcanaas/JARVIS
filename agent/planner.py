@@ -23,6 +23,13 @@ ABSOLUTE RULES:
 - NEVER reference previous step results in parameters. Every step is independent.
 - Use web_search for ANY information retrieval, research, or current data.
 - Use file_controller to save content to disk.
+- For ANY task that requires interacting with a website across multiple steps to reach a goal
+  (posting on social media, filling in and submitting a form, logging in and doing something,
+  buying something, any multi-click web flow), use a SINGLE browser_goal step with the complete
+  goal — do NOT plan individual go_to/click/type steps for it. browser_goal watches the page as
+  it goes and reacts to what's actually there.
+- Only use browser_control (go_to/search) for opening a page or a plain web search as one step
+  in a larger non-web plan (e.g. open a reference page before writing a file).
 - Max 5 steps. Use the minimum steps needed.
 
 AVAILABLE TOOLS AND THEIR PARAMETERS:
@@ -43,12 +50,19 @@ game_updater
   app_id: string (optional)
   shutdown_when_done: boolean (optional)
 
+browser_goal
+  goal: string (required) — the complete web objective in natural language, e.g.
+        "Post 'Hello world' on LinkedIn" or "Fill in the contact form on example.com with
+        name John and message Hi and submit it". Use ONE step for the whole web task.
+  browser: string (optional) — chrome | edge | firefox | opera | operagx | brave | vivaldi | safari
+  investigate: boolean (optional) — set true ONLY when the user explicitly asks to see/review
+        each step (e.g. "investígalo paso a paso", "muéstrame cada paso", "quiero ver el
+        progreso"). Saves a screenshot checkpoint per step instead of only the final result.
+
 browser_control
-  action: "go_to" | "search" | "click" | "type" | "scroll" | "get_text" | "press" | "close" (required)
+  action: "go_to" | "search" (required) — single-shot page open or web search only
   url: string (for go_to)
   query: string (for search)
-  text: string (for click/type)
-  direction: "up" | "down" (for scroll)
 
 file_controller
   action: "write" | "create_file" | "read" | "list" | "delete" | "move" | "copy" | "find" | "disk_usage" (required)
@@ -212,8 +226,40 @@ def create_plan(goal: str, context: str = "") -> dict:
         return _fallback_plan(goal)
 
 
+_BROWSER_GOAL_KEYWORDS = (
+    "linkedin", "facebook", "instagram", "twitter", " x.com", "tiktok",
+    "post", "publica", "publicar", "sube", "subir", "comparte", "compartir",
+    "form", "formulario", "submit", "enviar el formulario", "rellena",
+    "fill in", "fill out", "log in", "log into", "login", "inicia sesión",
+    "iniciar sesión", "compra", "buy", "checkout", "carrito", "sign up",
+    "sign in", "regístrate", "registrarme",
+)
+
+
 def _fallback_plan(goal: str) -> dict:
+    """
+    Used whenever the planning LLM call itself fails (quota exhausted,
+    empty/unparseable response, network error) — no model call available
+    to decide the tool, so fall back on a keyword heuristic instead of
+    blindly defaulting everything to web_search. Web-interaction goals
+    (posting, forms, logins, purchases) still need to reach the browser
+    agent even when the planner is down.
+    """
     print("[Planner] 🔄 Fallback plan")
+    goal_lower = f" {goal.lower()} "
+    if any(kw in goal_lower for kw in _BROWSER_GOAL_KEYWORDS):
+        return {
+            "goal": goal,
+            "steps": [
+                {
+                    "step": 1,
+                    "tool": "browser_goal",
+                    "description": f"Accomplish in the browser: {goal}",
+                    "parameters": {"goal": goal},
+                    "critical": True
+                }
+            ]
+        }
     return {
         "goal": goal,
         "steps": [

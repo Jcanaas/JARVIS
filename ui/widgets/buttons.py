@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, pyqtProperty, pyqtSignal
+from PyQt6.QtCore import QEasingCurve, QRectF, Qt, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QBrush, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QPushButton, QWidget
 
 from ..theme import C, qcol
+from .anim import HiFpsAnimation
 
 
 class _MediaBtn(QPushButton):
@@ -131,7 +132,7 @@ class ToggleSwitch(QWidget):
         self._pos = 1.0 if self._checked else 0.0
         self.setFixedSize(46, 26)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._anim = QPropertyAnimation(self, b"knob", self)
+        self._anim = HiFpsAnimation(self, setter=self._set_knob)
         self._anim.setDuration(150)
         self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
 

@@ -12,7 +12,7 @@ import subprocess
 import threading
 from typing import Optional
 
-from actions.paths import resource
+from actions.paths import find_node, resource
 
 _STREAM_SCRIPT = resource("actions", "vendor", "webtorrent-stream", "stream.mjs")
 _READY_TIMEOUT = 50  # seconds to wait for the URL line (metadata + peers)
@@ -26,8 +26,8 @@ _stream_process: Optional[subprocess.Popen] = None
 
 
 def _locate_node() -> str:
-    """Find the Node.js executable in PATH."""
-    node = shutil.which("node")
+    """Find the Node.js executable (bundled runtime first, then PATH)."""
+    node = find_node()
     if node:
         return node
     raise VLCPlayerError(

@@ -93,7 +93,7 @@ CAPABILITY_SECTIONS = [
     (
         "Web, navegador y busqueda",
         [
-            "Buscar informacion en la web.",
+            "Buscar informacion en la web (modos: general, noticias con articulos reales, investigacion a fondo, precios, comparativas).",
             "Comparar productos, specs, precios o reviews.",
             "Hacer una busqueda web resumida.",
             "Abrir webs en navegador.",
@@ -121,9 +121,21 @@ CAPABILITY_SECTIONS = [
         ],
     ),
     (
+        "Cartas Magic (CardTrader)",
+        [
+            "Buscar el mejor precio de una carta de Magic, priorizando CardTrader Zero.",
+            "Comparar todas las ediciones/versiones de una carta por precio.",
+            "Presupuestar un mazo pegado en texto plano (formato Moxfield).",
+            "Anadir al carrito de CardTrader la ultima cotizacion o una carta concreta.",
+            "Ver, quitar articulos o vaciar el carrito de CardTrader.",
+            "Sincronizar el catalogo local de cartas.",
+        ],
+    ),
+    (
         "Vision, escritorio y automatizacion",
         [
-            "Analizar pantalla o camara cuando preguntas que se ve.",
+            "Ver tu pantalla o camara en la misma conversacion y actuar sobre lo que ve (encadenar navegador, apps, clicks).",
+            "Mostrar vista en vivo de la camara mientras la analiza y cerrarla cuando se lo pidas.",
             "Controlar el escritorio: wallpaper, organizar, limpiar, listar y estadisticas.",
             "Ejecutar tareas multi-paso con agent_task cuando una accion simple no basta.",
             "Crear, editar, explicar, ejecutar o construir codigo.",

@@ -25,7 +25,7 @@ def main_window(app):
     return ui._win
 
 
-MODES = ["normal", "gmail", "drive", "music", "youtube", "movies", "calendar", "settings"]
+MODES = ["normal", "gmail", "drive", "music", "youtube", "movies", "tv", "calendar", "settings"]
 
 
 @pytest.mark.parametrize("mode", MODES)

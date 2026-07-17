@@ -300,6 +300,55 @@ async function searchSubsplease(query) {
   return out;
 }
 
+// --- FitGirl Repacks (games) -------------------------------------------------
+// Games are the only category that can run code, so — mirroring torlink upstream's
+// own policy — they come from FitGirl alone, a repacker with a long trusted track
+// record. The search feed mixes real repack posts with daily "Updates Digest"
+// summaries (no download content, just a list of games updated that day); those
+// are filtered out by category/title. Magnet lives in <content:encoded>, HTML-entity
+// escaped (&#038; etc.) — unescapeEntities() already handles that.
+const FITGIRL_HOME = "https://fitgirl-repacks.site";
+const UPDATES_DIGEST_RE = /^Updates Digest for /i;
+
+function feedUrl(base, query, page) {
+  const q = (query || "").trim();
+  const url = q
+    ? `${base}/?s=${encodeURIComponent(q)}&feed=rss2`
+    : `${base}/feed/`;
+  if (page <= 1) return url;
+  return `${url}${q ? "&" : "?"}paged=${page}`;
+}
+
+async function searchFitgirl(query) {
+  const res = await fetchWithRetries(feedUrl(FITGIRL_HOME, query, 1), {}, 1);
+  const text = await res.text();
+  const out = [];
+  for (const block of text.split("<item>").slice(1)) {
+    const title = unescapeEntities(
+      (block.match(/<title>(.*?)<\/title>/i)?.[1] || "").trim(),
+    );
+    if (!title || UPDATES_DIGEST_RE.test(title)) continue;
+    if (/<category><!\[CDATA\[Updates Digest\]\]><\/category>/i.test(block)) continue;
+    const magnetMatch = block.match(/href="(magnet:\?xt=urn:btih:[^"]+)"/i);
+    if (!magnetMatch) continue;
+    const magnet = unescapeEntities(magnetMatch[1]);
+    const infoHash = magnet.match(/urn:btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
+    if (!infoHash) continue;
+    const pubDate = block.match(/<pubDate>(.*?)<\/pubDate>/i)?.[1] || "";
+    out.push({
+      name: title,
+      infoHash,
+      source: "fitgirl",
+      sizeBytes: 0,
+      seeders: 0,
+      leechers: 0,
+      magnet,
+      added: pubDate ? Math.floor(new Date(pubDate).getTime() / 1000) : 0,
+    });
+  }
+  return out;
+}
+
 // --- 1337x (movies + tv) ---------------------------------------------------
 const X1337_HOSTS = ["1337x.to", "1337x.st", "x1337x.ws", "1337xx.to"];
 const STOP = new Set(["the", "a", "an", "of", "and", "or", "to"]);
@@ -421,7 +470,9 @@ async function main() {
   }
 
   let sources;
-  if (kind === "anime") {
+  if (kind === "game") {
+    sources = [searchFitgirl(query)];
+  } else if (kind === "anime") {
     // Mirror torlink's Anime source group (Nyaa + SubsPlease) so results match,
     // plus extra Nyaa passes and 1337x Anime for broader coverage.
     // Nyaa is the dominant anime tracker; SubsPlease is a dedicated release
@@ -442,7 +493,7 @@ async function main() {
   // When Spanish is requested (non-anime), add extra passes with a
   // "castellano" hint — Castilian releases tag the title and don't surface on
   // a plain (English) query.
-  if (spanish && kind !== "anime") {
+  if (spanish && kind !== "anime" && kind !== "game") {
     const esQuery = `${query} castellano`;
     sources.push(searchX1337(esQuery, kind === "tv" ? "tv" : "movie"));
     sources.push(searchPirateBay(esQuery, kind === "tv" ? "tv" : "movie"));
@@ -476,7 +527,9 @@ async function main() {
   }
 
   // Rank: when Spanish is requested, Castilian releases first, then by seeders.
+  // FitGirl (games) reports no seeders at all, so rank by publish date instead.
   unique.sort((a, b) => {
+    if (kind === "game") return (b.added || 0) - (a.added || 0);
     if (spanish && a.spanish !== b.spanish) return a.spanish ? -1 : 1;
     return b.seeders - a.seeders;
   });
