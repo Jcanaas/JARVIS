@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QTextEdit, QPushButton, QLabel, QMessageBox, QSizePolicy, QScrollArea, QFrame,
     QAbstractItemView, QLineEdit, QFileDialog, QStackedWidget, QSlider,
-    QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
+    QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QMenu, QDialog,
 )
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 
@@ -28,6 +28,7 @@ from .whatsapp import (
     list_recent_chats, get_contact_name, get_conversation, get_message_acks,
     get_profile_picture_url,
     mark_chat_read, media_url, resolve_contact, send_whatsapp, send_whatsapp_media,
+    edit_whatsapp_message,
     _bridge_qr_status,
 )
 from .whatsapp_manager import WhatsAppManager
@@ -77,16 +78,17 @@ class _ElidedLabel(QLabel):
 
 def _fade_in(w: QWidget, duration: int = 200):
     """Aparición suave de un widget nuevo (burbujas de mensaje)."""
+    from ui.widgets.anim import HiFpsAnimation  # local: evita import circular actions<->ui
     eff = QGraphicsOpacityEffect(w)
     eff.setOpacity(0.0)
     w.setGraphicsEffect(eff)
-    anim = QPropertyAnimation(eff, b"opacity", w)
+    anim = HiFpsAnimation(w, setter=eff.setOpacity)
     anim.setDuration(duration)
     anim.setStartValue(0.0)
     anim.setEndValue(1.0)
     anim.setEasingCurve(QEasingCurve.Type.OutCubic)
     anim.finished.connect(lambda: w.setGraphicsEffect(None))
-    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+    anim.start(delete_when_stopped=True)
 
 
 def _pulse_glow(w: QWidget, color: str = "#7C9AFF", radius: int = 70):
@@ -100,13 +102,14 @@ def _pulse_glow(w: QWidget, color: str = "#7C9AFF", radius: int = 70):
     col = QColor(color)
     col.setAlpha(255)
     eff.setColor(col)
-    anim = QPropertyAnimation(eff, b"blurRadius", w)
+    from ui.widgets.anim import HiFpsAnimation  # local: evita import circular actions<->ui
+    anim = HiFpsAnimation(w, setter=eff.setBlurRadius)
     anim.setDuration(550)
     anim.setKeyValueAt(0.0, eff.blurRadius())
     anim.setKeyValueAt(0.25, float(radius))
     anim.setKeyValueAt(1.0, 0.0)
     anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+    anim.start(delete_when_stopped=True)
 
 
 def _wa_icon(name: str, color: str = TEXT_DIM, size: int = 20) -> QIcon:
@@ -190,6 +193,7 @@ def _wa_icon_button(name: str, tooltip: str, size: int = 38, accent: bool = Fals
 class _SendTextEdit(QTextEdit):
     send_requested = pyqtSignal()
     files_pasted = pyqtSignal(list)
+    escape_requested = pyqtSignal()
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -198,6 +202,10 @@ class _SendTextEdit(QTextEdit):
         multiline = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         if enter and not multiline:
             self.send_requested.emit()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape:
+            self.escape_requested.emit()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -308,6 +316,59 @@ class _WaSpinner(QWidget):
         p.setPen(QPen(QColor("#7C9AFF"), 4, Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap))
         p.drawArc(rect, -self._angle * 16, 100 * 16)
+
+
+class _ImageViewer(QDialog):
+    """Visor de imágenes in-app: overlay oscuro sobre la ventana, sin navegador.
+
+    Escala la imagen para caber en la ventana anfitriona conservando la
+    proporción. Se cierra con Esc o con un clic en cualquier punto.
+    """
+
+    def __init__(self, pixmap: QPixmap, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setStyleSheet("QDialog { background: rgba(4, 6, 12, 0.96); }")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        host = parent.window() if parent is not None else None
+        if host is not None:
+            geo = host.geometry()
+        else:
+            geo = QApplication.primaryScreen().availableGeometry()
+        self.setGeometry(geo)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 28, 28, 16)
+        lay.setSpacing(8)
+
+        img = QLabel()
+        img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        img.setStyleSheet("background: transparent;")
+        avail_w = max(100, geo.width() - 56)
+        avail_h = max(100, geo.height() - 72)
+        if pixmap.width() > avail_w or pixmap.height() > avail_h:
+            pixmap = pixmap.scaled(
+                avail_w, avail_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        img.setPixmap(pixmap)
+        lay.addWidget(img, 1)
+
+        hint = QLabel("Clic o Esc para cerrar")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet(
+            f"color: {TEXT_MED}; font-size: 11px; background: transparent;"
+        )
+        lay.addWidget(hint)
+
+    def mousePressEvent(self, _event):
+        self.close()
 
 
 def _fmt_audio_time(ms: int) -> str:
@@ -488,6 +549,8 @@ class WhatsAppWindow(QWidget):
     suggestion_ready = pyqtSignal(str, str, str)
     transcription_ready = pyqtSignal(str, str, str)
     incoming_message = pyqtSignal(dict)
+    incoming_edit = pyqtSignal(dict)
+    edit_finished = pyqtSignal(str, str, str, str)
     bridge_state = pyqtSignal(dict)
 
     def __init__(self, manager=None, contact: str = "", embedded: bool = False, parent=None):
@@ -520,9 +583,14 @@ class WhatsAppWindow(QWidget):
         self._more_prev_max = 0
         self._render_scroll_mode = "bottom"
         self._message_bubbles: list[QFrame] = []
+        self._message_bubbles_by_id: dict[str, QFrame] = {}
         self._message_text_labels: list[QLabel] = []
+        self._message_text_labels_by_id: dict[str, QLabel] = {}
         self._message_meta_labels: dict[str, QLabel] = {}
         self._message_ack_indicators: dict[str, _AckIndicator] = {}
+        # Composer state: reply-to (quote) or edit-in-place. Mutually exclusive.
+        self._reply_to: dict | None = None
+        self._edit_target_id: str | None = None
         self._media_preview_labels: dict[str, list[QLabel]] = {}
         self._media_preview_cache: dict[str, bytes] = {}
         self._media_preview_loading: set[str] = set()
@@ -631,6 +699,8 @@ class WhatsAppWindow(QWidget):
         self.suggestion_ready.connect(self._apply_suggested_reply)
         self.transcription_ready.connect(self._apply_transcription)
         self.incoming_message.connect(self._handle_incoming_message)
+        self.incoming_edit.connect(self._handle_incoming_edit)
+        self.edit_finished.connect(self._apply_edit_result)
         self.bridge_state.connect(self._apply_bridge_state)
         # Polls the bridge while WhatsApp is unlinked so the in-panel QR stays
         # fresh and we auto-advance to the chat list once the phone connects.
@@ -675,6 +745,23 @@ class WhatsAppWindow(QWidget):
             _listener_ref = self._mgr_listener
             self.destroyed.connect(
                 lambda *_: _mgr_ref.remove_message_listener(_listener_ref)
+            )
+
+        self._mgr_edit_listener = None
+        if self.chat_mode and hasattr(self.mgr, "add_edit_listener"):
+            def _emit_edit(entry):
+                if getattr(self, "_closing", False):
+                    return
+                try:
+                    self.incoming_edit.emit(dict(entry or {}))
+                except RuntimeError:
+                    pass  # widget already destroyed
+            self._mgr_edit_listener = _emit_edit
+            self.mgr.add_edit_listener(self._mgr_edit_listener)
+            _mgr_ref2 = self.mgr
+            _edit_listener_ref = self._mgr_edit_listener
+            self.destroyed.connect(
+                lambda *_: _mgr_ref2.remove_edit_listener(_edit_listener_ref)
             )
 
         self.list_widget = QListWidget()
@@ -745,7 +832,44 @@ class WhatsAppWindow(QWidget):
         self.reply_edit = _SendTextEdit()
         self.reply_edit.send_requested.connect(self.send_reply)
         self.reply_edit.files_pasted.connect(self._send_pasted_files)
+        self.reply_edit.escape_requested.connect(self._cancel_composer_context)
         self.reply_edit.setPlaceholderText('Escribe un mensaje' if self.chat_mode else 'Escribe la respuesta aqui...')
+
+        # Banner shown above the composer when replying to (quoting) a message
+        # or editing one in place. Hidden by default.
+        self.composer_banner = QFrame()
+        self.composer_banner.setVisible(False)
+        self.composer_banner.setStyleSheet("""
+            QFrame {
+                background: rgba(182, 196, 255, 0.08);
+                border-top: 1px solid rgba(182, 196, 255, 0.14);
+            }
+        """)
+        banner_lay = QHBoxLayout(self.composer_banner)
+        banner_lay.setContentsMargins(16, 6, 16, 6)
+        banner_lay.setSpacing(8)
+        self.composer_banner_bar = QFrame()
+        self.composer_banner_bar.setFixedWidth(3)
+        self.composer_banner_bar.setStyleSheet(f"background: {PRI}; border-radius: 1px;")
+        banner_lay.addWidget(self.composer_banner_bar)
+        banner_text_box = QVBoxLayout()
+        banner_text_box.setSpacing(0)
+        self.composer_banner_title = QLabel("")
+        self.composer_banner_title.setStyleSheet(f"color: {PRI}; font-size: 11px; font-weight: 700; background: transparent;")
+        self.composer_banner_body = QLabel("")
+        self.composer_banner_body.setStyleSheet(f"color: {TEXT_MED}; font-size: 11px; background: transparent;")
+        banner_text_box.addWidget(self.composer_banner_title)
+        banner_text_box.addWidget(self.composer_banner_body)
+        banner_lay.addLayout(banner_text_box, 1)
+        self.composer_banner_close = QPushButton("✕")
+        self.composer_banner_close.setFixedSize(22, 22)
+        self.composer_banner_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.composer_banner_close.setStyleSheet("""
+            QPushButton { background: transparent; border: none; color: #94A3B8; font-weight: 700; }
+            QPushButton:hover { color: #F8FAFC; }
+        """)
+        self.composer_banner_close.clicked.connect(self._cancel_composer_context)
+        banner_lay.addWidget(self.composer_banner_close)
         if self.chat_mode:
             self.reply_edit.setMinimumHeight(42)
             self.reply_edit.setMaximumHeight(50)
@@ -764,9 +888,6 @@ class WhatsAppWindow(QWidget):
                 }}
             """)
 
-        self.refresh_btn = QPushButton('Refrescar')
-        self.refresh_btn.clicked.connect(self.load_pending)
-        self.refresh_btn.setVisible(not self.embedded)
         self.close_btn = QPushButton('Cerrar modo')
         self.close_btn.clicked.connect(self.close_requested.emit)
         self.close_btn.setVisible(self.embedded and bool(self.contact))
@@ -787,7 +908,6 @@ class WhatsAppWindow(QWidget):
         self._rec_buf = None
 
         btn_row = QHBoxLayout()
-        btn_row.addWidget(self.refresh_btn)
         btn_row.addWidget(self.close_btn)
         if not self.contact:
             btn_row.addWidget(self.prepare_btn)
@@ -885,32 +1005,27 @@ class WhatsAppWindow(QWidget):
             top_lay.addWidget(self.header_avatar)
             top_lay.addLayout(title_box, 1)
             top_lay.addStretch()
-            privacy = QLabel("CIFRADO")
-            privacy.setStyleSheet("""
-                color: rgba(74, 222, 128, 0.82);
-                background: rgba(52, 211, 153, 0.08);
-                border: 1px solid rgba(52, 211, 153, 0.16);
-                border-radius: 6px;
-                padding: 4px 8px;
-                font-size: 9px;
-                font-weight: 800;
-            """)
-            top_lay.addWidget(privacy)
             chat_col.addWidget(top_bar)
             chat_col.addWidget(self.chat_scroll, 1)
 
             input_bar = QFrame()
             input_bar.setObjectName("WaInputBar")
-            input_bar.setFixedHeight(70)
+            input_bar.setMinimumHeight(70)
             input_bar.setStyleSheet("""
                 QFrame#WaInputBar {
                     background: rgba(9, 24, 35, 0.98);
                     border-top: 1px solid rgba(182, 196, 255, 0.12);
                 }
             """)
-            input_lay = QHBoxLayout(input_bar)
+            input_bar_col = QVBoxLayout(input_bar)
+            input_bar_col.setContentsMargins(0, 0, 0, 0)
+            input_bar_col.setSpacing(0)
+            input_bar_col.addWidget(self.composer_banner)
+            input_row = QFrame()
+            input_lay = QHBoxLayout(input_row)
             input_lay.setContentsMargins(16, 10, 16, 10)
             input_lay.setSpacing(10)
+            input_bar_col.addWidget(input_row)
             self.voice_btn.setText("")
             self.voice_btn.setIcon(_wa_icon("mic", TEXT_DIM, 19))
             self.voice_btn.setIconSize(QSize(19, 19))
@@ -1206,11 +1321,17 @@ class WhatsAppWindow(QWidget):
             self.bridge_state.emit({"ready": True})
 
             try:
+                # Readiness was already confirmed above (bridge_qr_status). Do
+                # NOT raise on unready here: with raise_on_unready=True a 503 from
+                # /chats (e.g. getChats throwing on a detached WhatsApp Web frame)
+                # raises before list_recent_chats can fall back to deriving the
+                # chat list from the /messages buffer — leaving the panel empty
+                # even though messages are arriving. False lets that fallback run.
                 chats = list_recent_chats(
                     300,
                     timeout=12,
                     include_pictures=False,
-                    raise_on_unready=True,
+                    raise_on_unready=False,
                 )
                 # Chats that still have locally-tracked pending (un-announced) messages.
                 pending_ids = {
@@ -1273,6 +1394,7 @@ class WhatsAppWindow(QWidget):
                     or old.get("timestamp") != new.get("timestamp")
                     or old.get("unread") != new.get("unread")
                     or old.get("name") != new.get("name")
+                    or old.get("ack") != new.get("ack")
                 ):
                     changed = True
                     break
@@ -1639,12 +1761,21 @@ class WhatsAppWindow(QWidget):
         name_lbl = _ElidedLabel(name)
         name_lbl.setStyleSheet(f"color: {TEXT}; font-weight: 700; font-size: 13px;")
         name_lbl.setToolTip(name)
+        preview_row = QHBoxLayout()
+        preview_row.setContentsMargins(0, 0, 0, 0)
+        preview_row.setSpacing(4)
+        # Checkmarks only make sense for our own last message — WhatsApp never
+        # reports delivery/read state for messages we received.
+        if bool(chat.get("fromMe")) and chat.get("ack") is not None:
+            ack_dot = _AckIndicator(chat.get("ack"))
+            preview_row.addWidget(ack_dot, alignment=Qt.AlignmentFlag.AlignVCenter)
         preview_lbl = _ElidedLabel(preview or "Sin mensajes")
         preview_lbl.setStyleSheet(f"color: {TEXT_MED}; font-size: 11px;")
         if preview:
             preview_lbl.setToolTip(preview)
+        preview_row.addWidget(preview_lbl, 1)
         text_col.addWidget(name_lbl)
-        text_col.addWidget(preview_lbl)
+        text_col.addLayout(preview_row)
 
         right_col = QVBoxLayout()
         right_col.setSpacing(2)
@@ -1958,6 +2089,12 @@ class WhatsAppWindow(QWidget):
             except Exception:
                 pass
             self._mgr_listener = None
+        if self._mgr_edit_listener is not None and hasattr(self.mgr, "remove_edit_listener"):
+            try:
+                self.mgr.remove_edit_listener(self._mgr_edit_listener)
+            except Exception:
+                pass
+            self._mgr_edit_listener = None
         super().closeEvent(event)
 
     def _open_chat(self, chat_id: str, refresh: bool = True):
@@ -2034,10 +2171,13 @@ class WhatsAppWindow(QWidget):
         self._audio_players.clear()
         self._transcribe_widgets.clear()
         self._message_bubbles.clear()
+        self._message_bubbles_by_id.clear()
         self._message_text_labels.clear()
+        self._message_text_labels_by_id.clear()
         self._message_meta_labels.clear()
         self._message_ack_indicators.clear()
         self._media_preview_labels.clear()
+        self._cancel_composer_context()
         while self.chat_layout.count():
             item = self.chat_layout.takeAt(0)
             widget = item.widget()
@@ -2198,36 +2338,85 @@ class WhatsAppWindow(QWidget):
         if msg.get("_sep"):
             self._add_day_separator(str(msg.get("_sep")))
             return
+
+        msg_type_raw = str(msg.get("type") or "").lower()
+        is_system = msg_type_raw in ("gp2",)
+
         row = QHBoxLayout()
         row.setContentsMargins(10, 2, 10, 2)
         row.setSpacing(10)
-        if from_me:
+        if from_me and not is_system:
             row.addStretch()
 
         bubble = QFrame()
-        bubble.setObjectName("msgOut" if from_me else "msgIn")
-        bubble_w = self._bubble_max_width()
+        if is_system:
+            bubble.setObjectName("msgSystem")
+            bubble_w = self._bubble_max_width() * 0.7
+            bubble.setMaximumWidth(int(bubble_w))
+            bubble.setStyleSheet(f"""
+                QFrame#msgSystem {{
+                    background: rgba(100, 116, 139, 0.20);
+                    border: none;
+                    border-radius: 6px;
+                }}
+            """)
+        else:
+            bubble.setObjectName("msgOut" if from_me else "msgIn")
+            bubble_w = self._bubble_max_width()
+            bubble.setStyleSheet(f"""
+                QFrame#msgOut {{
+                    background: rgba(22, 91, 151, 0.76);
+                    border: 1px solid rgba(182, 196, 255, 0.13);
+                    border-radius: 10px;
+                }}
+                QFrame#msgIn {{
+                    background: rgba(16, 31, 43, 0.98);
+                    border: 1px solid rgba(255, 255, 255, 0.055);
+                    border-radius: 10px;
+                }}
+            """)
         bubble.setMinimumWidth(0)
-        bubble.setMaximumWidth(bubble_w)
         bubble.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
-        bubble.setStyleSheet(f"""
-            QFrame#msgOut {{
-                background: rgba(22, 91, 151, 0.76);
-                border: 1px solid rgba(182, 196, 255, 0.13);
-                border-radius: 10px;
-            }}
-            QFrame#msgIn {{
-                background: rgba(16, 31, 43, 0.98);
-                border: 1px solid rgba(255, 255, 255, 0.055);
-                border-radius: 10px;
-            }}
-        """)
         lay = QVBoxLayout(bubble)
         lay.setContentsMargins(13, 9, 11, 7)
         lay.setSpacing(6)
 
+        quoted = msg.get("quoted")
+        if isinstance(quoted, dict) and quoted.get("id"):
+            quoted_id = str(quoted["id"])
+            quote_frame = QFrame()
+            quote_frame.setCursor(Qt.CursorShape.PointingHandCursor)
+            quote_frame.setStyleSheet("""
+                QFrame { background: rgba(255, 255, 255, 0.06); border-radius: 4px; }
+            """)
+            quote_outer = QHBoxLayout(quote_frame)
+            quote_outer.setContentsMargins(0, 0, 8, 0)
+            quote_outer.setSpacing(8)
+            # A single dedicated bar widget (not a CSS border-left) — Qt renders
+            # border-left on a QFrame containing wrapped multi-line QLabels
+            # unreliably (it can appear to split per row). A fixed-width filled
+            # widget always renders as one continuous bar.
+            quote_bar = QFrame()
+            quote_bar.setFixedWidth(3)
+            quote_bar.setStyleSheet(f"background: {PRI}; border-radius: 0px;")
+            quote_outer.addWidget(quote_bar)
+            quote_lay = QVBoxLayout()
+            quote_lay.setContentsMargins(0, 4, 0, 4)
+            quote_lay.setSpacing(1)
+            quote_who = "Tú" if quoted.get("fromMe") else (quoted.get("senderName") or who)
+            quote_title = QLabel(str(quote_who or ""))
+            quote_title.setStyleSheet(f"color: {PRI}; font-size: 11px; font-weight: 700; background: transparent;")
+            quote_lay.addWidget(quote_title)
+            quote_body_text = quoted.get("body") or f"[{quoted.get('type') or 'mensaje'}]"
+            quote_body = QLabel(quote_body_text[:150])
+            quote_body.setWordWrap(True)
+            quote_body.setStyleSheet(f"color: {TEXT_MED}; font-size: 11px; background: transparent;")
+            quote_lay.addWidget(quote_body)
+            quote_outer.addLayout(quote_lay, 1)
+            quote_frame.mousePressEvent = lambda _ev, mid=quoted_id: self._scroll_to_message(mid)
+            lay.addWidget(quote_frame)
+
         has_media = bool(msg.get("hasMedia") or msg.get("mediaUrl"))
-        msg_type_raw = str(msg.get("type") or "").lower()
         body = self._format_mentions((msg.get("body") or "").strip(), msg)
         # The bridge fills media messages with a placeholder body like "[nota de
         # voz]" / "[imagen]". When we render the actual media widget below, hide
@@ -2255,32 +2444,51 @@ class WhatsAppWindow(QWidget):
             text = QLabel(body)
             text.setWordWrap(True)
             text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            text.setAlignment(Qt.AlignmentFlag.AlignRight if from_me else Qt.AlignmentFlag.AlignLeft)
-            text.setStyleSheet(f"color: {TEXT}; font-size: 13px; font-weight: 430; background: transparent;")
+            text.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+            if is_system:
+                text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                text.setStyleSheet(f"color: {TEXT_MED}; font-size: 11px; font-weight: 400; background: transparent;")
+            else:
+                text.setAlignment(Qt.AlignmentFlag.AlignRight if from_me else Qt.AlignmentFlag.AlignLeft)
+                text.setStyleSheet(f"color: {TEXT}; font-size: 13px; font-weight: 430; background: transparent;")
             text_w = self._message_text_width(text, body, bubble_w)
             text.setMinimumWidth(text_w)
             text.setMaximumWidth(text_w)
             lay.addWidget(text)
             self._message_text_labels.append(text)
+            message_id_for_text = str(msg.get("id") or "").strip()
+            if message_id_for_text:
+                self._message_text_labels_by_id[message_id_for_text] = text
 
         # Show audio transcription if available (transcription already set above)
         if transcription:
             transcript_label = QLabel(f"📝 {transcription}")
             transcript_label.setWordWrap(True)
             transcript_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            transcript_label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             transcript_label.setAlignment(Qt.AlignmentFlag.AlignRight if from_me else Qt.AlignmentFlag.AlignLeft)
             transcript_label.setStyleSheet(f"color: {TEXT_DIM}; font-size: 12px; font-style: italic; background: transparent; margin-top: 4px;")
             transcript_w = self._message_text_width(transcript_label, transcription, bubble_w)
             transcript_label.setMinimumWidth(transcript_w)
             transcript_label.setMaximumWidth(transcript_w)
             lay.addWidget(transcript_label)
+            # Regístralo para que _update_bubble_widths lo re-mida en resize,
+            # igual que los cuerpos de texto.
+            self._message_text_labels.append(transcript_label)
 
         if msg.get("hasMedia") or msg.get("mediaUrl"):
             self._add_media_widget(lay, msg)
 
         if not body and not (msg.get("hasMedia") or msg.get("mediaUrl")):
-            text = QLabel(f"[{msg.get('type', 'mensaje')}]")
-            text.setStyleSheet(f"color: {TEXT_DIM};")
+            type_label = msg.get('type', 'mensaje')
+            if type_label == 'gp2':
+                type_label = 'Actualización del grupo'
+            text = QLabel(f"[{type_label}]")
+            if is_system:
+                text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                text.setStyleSheet(f"color: {TEXT_MED}; font-size: 11px;")
+            else:
+                text.setStyleSheet(f"color: {TEXT_DIM};")
             lay.addWidget(text)
 
         failed = bool(msg.get("_failed"))
@@ -2290,6 +2498,8 @@ class WhatsAppWindow(QWidget):
             meta_text = self._fmt_ts(msg.get('timestamp'))
         if not from_me and who and getattr(self, "_current_is_group", False):
             meta_text = f"{who} · {meta_text}" if meta_text else who
+        if msg.get("edited"):
+            meta_text = f"{meta_text} · editado" if meta_text else "editado"
         meta_row = QHBoxLayout()
         meta_row.setContentsMargins(0, 0, 0, 0)
         meta_row.setSpacing(4)
@@ -2306,8 +2516,9 @@ class WhatsAppWindow(QWidget):
         """)
         meta_row.addWidget(meta)
         message_id = str(msg.get("id") or "").strip()
-        if from_me and message_id:
+        if message_id:
             self._message_meta_labels[message_id] = meta
+        if from_me and message_id:
             try:
                 ack_value = int(msg.get("ack"))
             except (TypeError, ValueError):
@@ -2318,7 +2529,9 @@ class WhatsAppWindow(QWidget):
         lay.addLayout(meta_row)
 
         row.addWidget(bubble)
-        if not from_me:
+        if is_system:
+            row.addStretch()
+        elif not from_me:
             row.addStretch()
         wrapper = QWidget()
         wrapper.setStyleSheet("background: transparent;")
@@ -2327,16 +2540,30 @@ class WhatsAppWindow(QWidget):
         if animate:
             _fade_in(wrapper)
         self._message_bubbles.append(bubble)
+        if message_id:
+            self._message_bubbles_by_id[message_id] = bubble
+
+        bubble.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        msg_snapshot = dict(msg)
+        bubble.customContextMenuRequested.connect(
+            lambda local_pos, m=msg_snapshot, b=bubble: self._show_message_context_menu(m, b.mapToGlobal(local_pos))
+        )
 
     def _bubble_max_width(self) -> int:
         try:
             viewport_w = int(self.chat_scroll.viewport().width() or 0)
         except Exception:
+            viewport_w = 0
+        if viewport_w <= 0:
             viewport_w = 900
-        return max(300, int(viewport_w * 0.58))
+        # 58% del viewport con mínimo de 300 (las miniaturas miden 260), pero
+        # nunca más ancho que el viewport menos los márgenes de fila (10+10):
+        # antes, en ventanas estrechas el mínimo desbordaba y cortaba burbujas.
+        return min(max(300, int(viewport_w * 0.58)), max(200, viewport_w - 40))
 
     def _message_text_width(self, label: QLabel, body: str, bubble_w: int) -> int:
-        max_w = max(80, int(bubble_w) - 22)
+        # Los márgenes internos de la burbuja suman 24px (13 izq + 11 der).
+        max_w = max(80, int(bubble_w) - 26)
         try:
             metrics = QFontMetrics(label.font())
             longest = max((metrics.horizontalAdvance(part) for part in str(body or "").splitlines()), default=0)
@@ -2414,6 +2641,18 @@ class WhatsAppWindow(QWidget):
     def _add_media_widget(self, lay: QVBoxLayout, msg: dict):
         url = media_url(msg.get("mediaUrl") or "")
         msg_type = str(msg.get("type") or "media").lower()
+        # Mensajes salientes optimistas (imagen pegada/adjunta): aún no hay
+        # mediaUrl del bridge, pero sí el archivo local — renderízalo directo.
+        local_path = str(msg.get("_localPath") or "")
+        if not url and local_path:
+            try:
+                local = Path(local_path)
+                if local.is_file():
+                    url = local.as_uri()
+                    if url not in self._media_preview_cache:
+                        self._media_preview_cache[url] = local.read_bytes()
+            except OSError:
+                url = ""
         if not url:
             label = QLabel(f"[{msg_type}] media no disponible")
             label.setStyleSheet(f"color: {TEXT_DIM};")
@@ -2443,6 +2682,18 @@ class WhatsAppWindow(QWidget):
             else:
                 self._load_media_preview(url, msg_type)
 
+            # Clic en la miniatura: imágenes se abren en el visor in-app;
+            # los vídeos siguen abriéndose fuera (no hay reproductor embebido).
+            preview.setCursor(Qt.CursorShape.PointingHandCursor)
+            if msg_type == "video":
+                preview.mousePressEvent = (
+                    lambda _ev, u=url: QDesktopServices.openUrl(QUrl(u))
+                )
+            else:
+                preview.mousePressEvent = (
+                    lambda _ev, u=url: self._open_media_viewer(u)
+                )
+
             # "Abrir" button — skip for stickers (they have no useful external URL)
             if msg_type != "sticker":
                 btn = QPushButton("Abrir")
@@ -2457,7 +2708,11 @@ class WhatsAppWindow(QWidget):
                     }
                     QPushButton:hover { color: #B6C4FF; background: rgba(182,196,255,0.08); }
                 """)
-                btn.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+                if msg_type == "video":
+                    btn.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+                else:
+                    btn.setToolTip("Ver imagen")
+                    btn.clicked.connect(lambda _=False, u=url: self._open_media_viewer(u))
                 lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignRight)
 
         elif msg_type in {"audio", "ptt"}:
@@ -2486,6 +2741,15 @@ class WhatsAppWindow(QWidget):
             """)
             btn.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
             lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+    def _open_media_viewer(self, url: str):
+        """Abre una imagen en el visor in-app; si no hay bytes, cae al navegador."""
+        raw = self._media_preview_cache.get(url)
+        pixmap = QPixmap()
+        if not raw or not pixmap.loadFromData(raw):
+            QDesktopServices.openUrl(QUrl(url))
+            return
+        _ImageViewer(pixmap, self).show()
 
     def _add_audio_widget(self, lay: QVBoxLayout, msg: dict, url: str):
         is_ptt = str(msg.get("type") or "").lower() == "ptt"
@@ -2712,10 +2976,11 @@ class WhatsAppWindow(QWidget):
             anim = getattr(self, "_scroll_anim", None)
             if anim is not None:
                 anim.stop()
-            anim = QPropertyAnimation(bar, b"value", self)
+            from ui.widgets.anim import HiFpsAnimation  # local: evita import circular actions<->ui
+            anim = HiFpsAnimation(self, setter=lambda v: bar.setValue(round(v)))
             anim.setDuration(240)
-            anim.setStartValue(bar.value())
-            anim.setEndValue(target)
+            anim.setStartValue(float(bar.value()))
+            anim.setEndValue(float(target))
             anim.setEasingCurve(QEasingCurve.Type.OutCubic)
             self._scroll_anim = anim
             anim.start()
@@ -2896,19 +3161,27 @@ class WhatsAppWindow(QWidget):
 
     def _send_media_file(self, path: str, to_id: str, caption: str = ""):
         filename = Path(path).name
-        label = caption or filename
+        is_image = Path(path).suffix.lower() in {
+            ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+        }
+        # Las imágenes (p. ej. capturas pegadas) se muestran como imagen desde
+        # el primer momento — antes salían como "📎 jarvis-paste-....png".
+        label = caption or ("Imagen" if is_image else filename)
         optimistic = {
             "id": f"local-{int(time.time() * 1000)}",
             "from": "me",
             "to": to_id,
             "chatId": to_id,
-            "body": f"\U0001F4CE {label}",
-            "type": "document",
+            "body": caption if is_image else f"\U0001F4CE {label}",
+            "type": "image" if is_image else "document",
             "fromMe": True,
             "direction": "out",
             "timestamp": int(time.time() * 1000),
             "_pending": True,
         }
+        if is_image:
+            optimistic["hasMedia"] = True
+            optimistic["_localPath"] = path
         cached, name = self._conversation_cache.get(to_id, ([], self.current_chat_name or to_id))
         cached = [dict(m) for m in cached] + [optimistic]
         self._conversation_cache[to_id] = (cached, name)
@@ -2919,7 +3192,8 @@ class WhatsAppWindow(QWidget):
             _pulse_glow(self.send_btn)
         except Exception:
             pass
-        self._update_chat_preview(to_id, f"\U0001F4CE {label}")
+        preview_text = f"\U0001F5BC️ {label}" if is_image else f"\U0001F4CE {label}"
+        self._update_chat_preview(to_id, preview_text)
 
         def worker():
             response = {}
@@ -2932,8 +3206,156 @@ class WhatsAppWindow(QWidget):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ------------------------------------------------------------------
+    # Reply-to (quote) and edit-in-place composer state
+    # ------------------------------------------------------------------
+    def _cancel_composer_context(self):
+        had_state = bool(self._reply_to or self._edit_target_id)
+        self._reply_to = None
+        if self._edit_target_id:
+            self._edit_target_id = None
+            self.reply_edit.clear()
+        self.composer_banner.setVisible(False)
+        if had_state:
+            self.reply_edit.setFocus()
+
+    def _show_composer_banner(self, title: str, body: str):
+        self.composer_banner_title.setText(title)
+        self.composer_banner_body.setText(body)
+        self.composer_banner.setVisible(True)
+
+    def _start_reply(self, msg: dict):
+        message_id = str(msg.get("id") or "").strip()
+        if not message_id or message_id.startswith("local-"):
+            return  # can't quote a message that hasn't been confirmed by the bridge yet
+        self._edit_target_id = None
+        from_me = bool(msg.get("fromMe"))
+        sender_name = "Tú" if from_me else (msg.get("senderName") or msg.get("authorName") or self.current_chat_name or "")
+        self._reply_to = {
+            "id": message_id,
+            "body": (msg.get("body") or "")[:200],
+            "fromMe": from_me,
+            "senderName": None if from_me else sender_name,
+            "type": msg.get("type") or "chat",
+        }
+        preview = self._reply_to["body"] or f"[{self._reply_to['type']}]"
+        self._show_composer_banner(f"Respondiendo a {sender_name or 'mensaje'}", preview)
+        self.reply_edit.setFocus()
+
+    def _start_edit(self, msg: dict):
+        message_id = str(msg.get("id") or "").strip()
+        if not message_id or message_id.startswith("local-") or not msg.get("fromMe"):
+            return
+        self._reply_to = None
+        self._edit_target_id = message_id
+        self.reply_edit.setPlainText(msg.get("body") or "")
+        cursor = self.reply_edit.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.reply_edit.setTextCursor(cursor)
+        self._show_composer_banner("Editando mensaje", "Enter para guardar, Esc para cancelar")
+        self.reply_edit.setFocus()
+
+    def _confirm_edit(self):
+        message_id = self._edit_target_id
+        chat_id = self.current_chat_id
+        if not message_id:
+            return
+        text = self.reply_edit.toPlainText().strip()
+        if not text:
+            return
+
+        def worker():
+            error = ""
+            try:
+                edit_whatsapp_message(message_id, text)
+            except Exception as exc:
+                error = str(exc)
+            self.edit_finished.emit(chat_id, message_id, text, error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_edit_result(self, chat_id: str, message_id: str, new_body: str, error: str):
+        if error:
+            QMessageBox.warning(self, "No se pudo editar", error)
+            return  # keep the edit banner + text so the user can retry or cancel
+        self._edit_target_id = None
+        self.reply_edit.clear()
+        self.composer_banner.setVisible(False)
+        self._apply_edit(chat_id, message_id, new_body)
+
+    def _handle_incoming_edit(self, entry: dict):
+        chat_id = str(entry.get("from") or "").strip()
+        message_id = str(entry.get("id") or "").strip()
+        if not chat_id or not message_id:
+            return
+        self._apply_edit(chat_id, message_id, entry.get("body") or "")
+
+    def _apply_edit(self, chat_id: str, message_id: str, new_body: str):
+        cached, name = self._conversation_cache.get(chat_id, (None, self.current_chat_name or chat_id))
+        if cached is not None:
+            updated = []
+            for raw in cached:
+                message = dict(raw)
+                if str(message.get("id") or "") == message_id:
+                    message["body"] = new_body
+                    message["edited"] = True
+                updated.append(message)
+            self._conversation_cache[chat_id] = (updated, name)
+        if chat_id != self.current_chat_id:
+            return
+        text_label = self._message_text_labels_by_id.get(message_id)
+        if text_label is not None:
+            try:
+                text_label.setText(self._format_mentions(new_body, {}))
+            except RuntimeError:
+                text_label = None
+        meta_label = self._message_meta_labels.get(message_id)
+        if meta_label is not None:
+            try:
+                current = meta_label.text()
+                if "editado" not in current:
+                    meta_label.setText(f"{current} · editado" if current else "editado")
+            except RuntimeError:
+                pass
+        if text_label is None:
+            # Bubble not tracked (older render) — fall back to a full reload.
+            self._apply_loaded_conversation(chat_id, {"messages": cached or [], "error": ""}, name)
+
+    def _show_message_context_menu(self, msg: dict, global_pos):
+        menu = QMenu(self)
+        message_id = str(msg.get("id") or "").strip()
+        can_act = bool(message_id) and not message_id.startswith("local-")
+        reply_action = menu.addAction("Responder")
+        reply_action.setEnabled(can_act)
+        edit_action = None
+        if msg.get("fromMe"):
+            edit_action = menu.addAction("Editar")
+            edit_action.setEnabled(can_act)
+        menu.addAction("Copiar texto")
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if chosen is reply_action:
+            self._start_reply(msg)
+        elif edit_action is not None and chosen is edit_action:
+            self._start_edit(msg)
+        elif chosen.text() == "Copiar texto":
+            QApplication.clipboard().setText(msg.get("body") or "")
+
+    def _scroll_to_message(self, message_id: str):
+        bubble = self._message_bubbles_by_id.get(message_id)
+        if bubble is None:
+            return
+        try:
+            self.chat_scroll.ensureWidgetVisible(bubble)
+        except RuntimeError:
+            pass
+
     def send_reply(self):
         if self.chat_mode:
+            if self._edit_target_id:
+                self._confirm_edit()
+                return
             text = self.reply_edit.toPlainText().strip()
             if not text:
                 return
@@ -2945,7 +3367,10 @@ class WhatsAppWindow(QWidget):
                 QMessageBox.warning(self, "Error", "El chat no tiene un identificador de WhatsApp válido.")
                 return
             to_id = target
+            quoted = self._reply_to
+            quoted_id = str(quoted.get("id") or "").strip() if quoted else ""
             self.reply_edit.clear()
+            self._cancel_composer_context()
             optimistic = {
                 "id": f"local-{int(time.time() * 1000)}",
                 "from": "me",
@@ -2956,6 +3381,7 @@ class WhatsAppWindow(QWidget):
                 "fromMe": True,
                 "direction": "out",
                 "timestamp": int(time.time() * 1000),
+                "quoted": quoted,
                 "_pending": True,
             }
             cached, name = self._conversation_cache.get(target, ([], self.current_chat_name or target))
@@ -2974,7 +3400,7 @@ class WhatsAppWindow(QWidget):
                 response = {}
                 error = ""
                 try:
-                    response = send_whatsapp(to=to_id, body=text)
+                    response = send_whatsapp(to=to_id, body=text, quoted_message_id=quoted_id or None)
                 except Exception as exc:
                     error = str(exc)
                 self.message_send_finished.emit(optimistic["id"], target, response, error)
