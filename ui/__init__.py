@@ -51,6 +51,8 @@ try:
     # `import vlc` can raise beyond ImportError: python-vlc loads libvlc.dll at
     # import time, so a missing/mismatched VLC app raises OSError/FileNotFoundError.
     # Catch broadly so Jarvis still starts and just disables playback.
+    from actions import vlc_runtime
+    vlc_runtime.setup()  # bundled VLC (RESOURCE_DIR/vlc) before libvlc loads
     import vlc
     HAS_VLC = True
 except Exception:
@@ -111,12 +113,19 @@ class MainWindow(QMainWindow):
     _playback_sig = pyqtSignal(dict)
     _playback_like_sig = pyqtSignal(str, bool, str)
     _download_sig = pyqtSignal(dict)
+    _downloads_changed_sig = pyqtSignal(list)  # DownloadManager snapshot → UI thread
     _whatsapp_chat_sig = pyqtSignal(str)
     _mic_avail_sig = pyqtSignal(bool)
     _toast_sig = pyqtSignal(str, int)
     _wa_notify_sig = pyqtSignal(dict)
     _wa_unread_sig = pyqtSignal(int)
     _wa_avatar_sig = pyqtSignal(object, object)
+    _camera_start_sig = pyqtSignal()
+    _camera_stop_sig  = pyqtSignal()
+    _karaoke_sig = pyqtSignal(str, tuple)
+    _translate_start_sig = pyqtSignal(str, float)
+    _translate_stop_sig  = pyqtSignal()
+    _translate_text_sig  = pyqtSignal(str)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -143,7 +152,11 @@ class MainWindow(QMainWindow):
         self._wa_avatar_cache: dict[str, bytes] = {}
         self._wa_unread_count = 0
         self._wa_unread_fetching = False
-        self._right_collapsed = True
+        # Persisted across restarts via app_settings ("right_panel_collapsed") —
+        # do NOT hardcode this back to True/False, it silently reverts the
+        # user's fold/unfold choice on every launch (regression fixed once already).
+        from actions import app_settings as _app_settings
+        self._right_collapsed = bool(_app_settings.get("right_panel_collapsed", False))
         self._current_file: str | None = None
         self._mode_combo: QComboBox | None = None
         self._mode_buttons: dict[str, QPushButton] = {}
@@ -159,8 +172,11 @@ class MainWindow(QMainWindow):
         self._youtube_panel: QWidget | None = None
         self._movies_panel: QWidget | None = None
         self._anime_panel: QWidget | None = None
+        self._tv_panel: QWidget | None = None
+        self._games_panel: QWidget | None = None
         self._calendar_panel: QWidget | None = None
         self._settings_panel: QWidget | None = None
+        self._cardtrader_panel: QWidget | None = None
 
         central = QWidget()
         central.setObjectName("AppRoot")
@@ -201,6 +217,10 @@ class MainWindow(QMainWindow):
         self._center_stack.addWidget(self.hud)
         body.addWidget(self._center_stack, stretch=5)
 
+        # Vista en vivo de cámara (visión F8) — flota sobre el HUD, oculta por defecto
+        self._camera_live = CameraLiveWidget(self._center_stack)
+        self._position_camera_live()
+
         self._right_panel = self._build_right_panel()
         body.addWidget(self._right_panel, stretch=0)
         self._apply_right_panel_visibility()
@@ -224,12 +244,29 @@ class MainWindow(QMainWindow):
         self._playback_sig.connect(self._apply_playback)
         self._playback_like_sig.connect(self._apply_playback_like)
         self._download_sig.connect(self._apply_download_state)
+        self._downloads_changed_sig.connect(self._downloads_list.render)
         self._whatsapp_chat_sig.connect(self._open_whatsapp)
         self._mic_avail_sig.connect(self._apply_mic_available)
         self._toast_sig.connect(self._show_toast)
         self._wa_notify_sig.connect(self._show_wa_notification)
         self._wa_unread_sig.connect(self._apply_wa_unread_badge)
         self._wa_avatar_sig.connect(self._apply_wa_toast_avatar)
+        self._camera_start_sig.connect(self.start_camera_stream)
+        self._camera_stop_sig.connect(self.stop_camera_stream)
+        self._karaoke_sig.connect(self._apply_karaoke_lyrics)
+        self._translate_start_sig.connect(self._start_screen_translate)
+        self._translate_stop_sig.connect(self._stop_screen_translate)
+        self._translate_text_sig.connect(self._apply_translate_text)
+
+        # Persistent downloads: the manager fires its listener on a worker
+        # thread, so bounce the snapshot onto the Qt thread via a signal. Then
+        # resume anything that was mid-download when the app last closed.
+        from actions.download_manager import get_manager as _get_dl_manager
+        self._dl_manager = _get_dl_manager()
+        self._dl_manager.add_listener(
+            lambda snapshot: self._downloads_changed_sig.emit(list(snapshot))
+        )
+        QTimer.singleShot(0, self._dl_manager.resume_interrupted)
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -242,6 +279,10 @@ class MainWindow(QMainWindow):
         sc_mute.activated.connect(self._toggle_mute)
         sc_full = QShortcut(QKeySequence("F11"), self)
         sc_full.activated.connect(self._toggle_fullscreen)
+        # Interrupción instantánea: ESC corta la voz de JARVIS al momento
+        self.interrupt_callback = None
+        sc_esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        sc_esc.activated.connect(self._fire_interrupt)
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -252,17 +293,22 @@ class MainWindow(QMainWindow):
         self._play_duration = 0
         self._play_position = 0
         self._play_playing = False
+        self._play_ready = False
+        self._play_buffering = False
+        self._play_state = "stopped"
         self._play_video_id = ""
         self._play_liked = False
         self._like_pending = False   # True while a set_like request is in flight
         self._play_position_anchor = 0.0
         self._play_position_anchor_ts = 0.0
         self._user_dragging = False   # True while user is dragging the seek slider
-        self._music_volume_level = 55
-        self._music_volume_restore = 55
+        self._music_volume_level = int(app_settings.get("music_default_volume", 100))
+        self._music_volume_restore = self._music_volume_level
         self._music_duck_target = 42
         self._music_duck_floor = 34
         self._music_duck_step = 2
+        self._translate_overlay: "_TranslateOverlayWindow | None" = None
+        self._translate_stop_flag: "threading.Event | None" = None
         self._music_duck_active = False
         self._music_duck_should_restore = False
         self._music_duck_timer = QTimer(self)
@@ -270,7 +316,7 @@ class MainWindow(QMainWindow):
         self._music_duck_timer.timeout.connect(self._step_music_duck)
         self._playback_anim_timer = QTimer(self)
         self._playback_anim_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._playback_anim_timer.setInterval(16)
+        self._playback_anim_timer.setInterval(6)  # ~180 fps; el tick es delta-time (anclado a monotonic)
         self._playback_anim_timer.timeout.connect(self._tick_playback_progress)
         self._playback_anim_timer.start()
         self._seek_timer = QTimer(self)
@@ -279,12 +325,21 @@ class MainWindow(QMainWindow):
         self.on_playback_command = None  # callback: fn(action, params)
         self._music_float: _MusicFloatWindow | None = None
 
+        # Do NOT remove/reorder: loads mic_default_state/mic_last_state from
+        # app_settings so mic startup config survives restart (regression risk).
         self._load_mic_state_from_config()
         self._apply_startup_settings()
 
     def closeEvent(self, event):
         """Ensure the Qt loop actually quits when the main window is closed,
         even if floating/overlay windows are still open."""
+        # Save mic state if remember mode is enabled
+        try:
+            from actions import app_settings
+            if app_settings.get("mic_default_state", "on") == "remember":
+                app_settings.set("mic_last_state", "off" if self._muted else "on")
+        except Exception:
+            pass
         # Reattach any detached YouTube video first so the shared mpv surface
         # isn't destroyed out from under the panel (that path can crash).
         try:
@@ -368,9 +423,36 @@ class MainWindow(QMainWindow):
         else:
             self.showFullScreen()
 
+    def _fire_interrupt(self):
+        cb = self.interrupt_callback
+        if cb:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def _position_camera_live(self):
+        margin = 14
+        w, h = self._camera_live.width(), self._camera_live.height()
+        self._camera_live.move(
+            self._center_stack.width() - w - margin,
+            self._center_stack.height() - h - margin,
+        )
+
+    def start_camera_stream(self):
+        self._position_camera_live()
+        self._camera_live.start()
+
+    def stop_camera_stream(self):
+        self._camera_live.stop()
+
     def _toggle_right_panel(self):
-        """Pliega/despliega el panel derecho (sesión, archivos y comando)."""
+        """Pliega/despliega el panel derecho (sesión, archivos y comando).
+        Persist choice — see comment on self._right_collapsed init, must
+        survive restart or the user's fold state resets every launch."""
         self._right_collapsed = not self._right_collapsed
+        from actions import app_settings
+        app_settings.set("right_panel_collapsed", self._right_collapsed)
         self._apply_right_panel_visibility()
         if self._right_collapsed:
             self._right_toggle_btn.setIcon(_line_icon("panel_open", C.TEXT_DIM, 18))
@@ -484,7 +566,7 @@ class MainWindow(QMainWindow):
     def _set_mode_combo(self, mode: str):
         self._active_mode = mode
         # Remember the last space so "Espacio inicial → Último usado" works.
-        if mode in ("Normal", "WhatsApp", "Gmail", "Drive", "Music", "YouTube", "Movies", "Anime", "Calendar"):
+        if mode in ("Normal", "WhatsApp", "Gmail", "Drive", "Music", "YouTube", "Movies", "Anime", "TV", "Games", "Calendar", "CardTrader"):
             try:
                 app_settings.set("last_space", mode)
             except Exception:
@@ -510,7 +592,10 @@ class MainWindow(QMainWindow):
             "YouTube": ("YouTube", "Vídeos y reproducción"),
             "Movies": ("Películas", "Streaming via torrents"),
             "Anime": ("Anime", "Manga y series japonesas"),
+            "TV": ("TV", "Canales en directo"),
+            "Games": ("Juegos", "SteamDB · FitGirl Repacks"),
             "Calendar": ("Calendario", "Google Calendar"),
+            "CardTrader": ("Cartas Magic", "CardTrader"),
             "Ajustes": ("Ajustes", "Configuración de la app"),
         }
         title, context = mode_copy.get(mode, (mode, "Espacio de trabajo"))
@@ -573,6 +658,18 @@ class MainWindow(QMainWindow):
         self._center_stack.setCurrentWidget(self._movies_panel)
         self._center_stack.setVisible(True)
 
+    def play_movie_from_assistant(self, query: str, kind: str = "movie"):
+        """Switch to Movies mode and hands-free play a title (AI assistant)."""
+        anime = (kind or "").lower() == "anime"
+        if anime:
+            self._show_anime_mode()
+            panel = self._anime_panel
+        else:
+            self._show_movies_mode()
+            panel = self._movies_panel
+        if panel is not None:
+            panel.assistant_play(query, "tv" if kind == "tv" else ("anime" if anime else "movie"))
+
     def _show_anime_mode(self):
         self._set_mode_combo("Anime")
         self._apply_right_panel_visibility()
@@ -582,6 +679,24 @@ class MainWindow(QMainWindow):
         self._center_stack.setCurrentWidget(self._anime_panel)
         self._center_stack.setVisible(True)
 
+    def _show_tv_mode(self):
+        self._set_mode_combo("TV")
+        self._apply_right_panel_visibility()
+        if self._tv_panel is None:
+            self._tv_panel = TVModePanel(parent=self)
+            self._center_stack.addWidget(self._tv_panel)
+        self._center_stack.setCurrentWidget(self._tv_panel)
+        self._center_stack.setVisible(True)
+
+    def _show_games_mode(self):
+        self._set_mode_combo("Games")
+        self._apply_right_panel_visibility()
+        if self._games_panel is None:
+            self._games_panel = GamesModePanel(parent=self)
+            self._center_stack.addWidget(self._games_panel)
+        self._center_stack.setCurrentWidget(self._games_panel)
+        self._center_stack.setVisible(True)
+
     def _show_calendar_mode(self):
         self._set_mode_combo("Calendar")
         self._apply_right_panel_visibility()
@@ -589,6 +704,15 @@ class MainWindow(QMainWindow):
             self._calendar_panel = CalendarModePanel(parent=self)
             self._center_stack.addWidget(self._calendar_panel)
         self._center_stack.setCurrentWidget(self._calendar_panel)
+        self._center_stack.setVisible(True)
+
+    def _show_cardtrader_mode(self):
+        self._set_mode_combo("CardTrader")
+        self._apply_right_panel_visibility()
+        if self._cardtrader_panel is None:
+            self._cardtrader_panel = CardTraderModePanel(parent=self)
+            self._center_stack.addWidget(self._cardtrader_panel)
+        self._center_stack.setCurrentWidget(self._cardtrader_panel)
         self._center_stack.setVisible(True)
 
     def _show_settings_mode(self):
@@ -621,8 +745,14 @@ class MainWindow(QMainWindow):
             self._show_movies_mode()
         elif mode == "Anime":
             self._show_anime_mode()
+        elif mode == "TV":
+            self._show_tv_mode()
+        elif mode == "Games":
+            self._show_games_mode()
         elif mode == "Calendar":
             self._show_calendar_mode()
+        elif mode == "CardTrader":
+            self._show_cardtrader_mode()
         elif mode == "Ajustes":
             self._show_settings_mode()
         else:
@@ -638,6 +768,8 @@ class MainWindow(QMainWindow):
                 (cw.height() - oh) // 2,
                 ow, oh,
             )
+        if hasattr(self, "_camera_live"):
+            self._position_camera_live()
 
     def _build_header(self) -> QWidget:
         w = QWidget()
@@ -779,13 +911,16 @@ class MainWindow(QMainWindow):
             {"mode": "Normal", "icon": "home", "label": "Inicio", "labelHasKeyword": ["I"], "hasBadge": False},
             {"mode": "WhatsApp", "icon": "chat", "label": "WhatsApp", "labelHasKeyword": ["W"], "hasBadge": True},
             {"mode": "Gmail", "icon": "mail", "label": "Correo", "labelHasKeyword": ["C"], "hasBadge": False},
-            {"mode": "Drive", "icon": "drive", "label": "Drive", "labelHasKeyword": ["D"], "hasBadge": False},
+            {"mode": "Drive", "icon": "drive_svg", "label": "Drive", "labelHasKeyword": ["D"], "hasBadge": False},
             {"mode": "Music", "icon": "music", "label": "Música", "labelHasKeyword": ["M"], "hasBadge": False},
             {"mode": "YouTube", "icon": "youtube", "label": "YouTube", "labelHasKeyword": ["Y"], "hasBadge": False},
             {"mode": "Movies", "icon": "film", "label": "Películas", "labelHasKeyword": ["P"], "hasBadge": False},
-            {"mode": "Anime", "icon": "tv", "label": "Anime", "labelHasKeyword": ["N"], "hasBadge": False},
-            {"mode": "Calendar", "icon": "calendar", "label": "Calendario", "labelHasKeyword": ["A"], "hasBadge": False},
-            {"mode": "Ajustes", "icon": "settings", "label": "Ajustes", "labelHasKeyword": ["J"], "hasBadge": False},
+            {"mode": "Anime", "icon": "anime", "label": "Anime", "labelHasKeyword": ["N"], "hasBadge": False},
+            {"mode": "TV", "icon": "tv", "label": "TV", "labelHasKeyword": ["T"], "hasBadge": False},
+            {"mode": "Games", "icon": "gamepad", "label": "Juegos", "labelHasKeyword": ["U"], "hasBadge": False},
+            {"mode": "Calendar", "icon": "calendar_svg", "label": "Calendario", "labelHasKeyword": ["A"], "hasBadge": False},
+            {"mode": "CardTrader", "icon": "corona", "label": "Cartas Magic", "labelHasKeyword": ["G"], "hasBadge": False},
+            {"mode": "Ajustes", "icon": "settings_svg", "label": "Ajustes", "labelHasKeyword": ["J"], "hasBadge": False},
         ]
         self._mode_icon_names = {item["mode"]: item["icon"] for item in nav_items}
         self._mode_shortcuts = {
@@ -901,6 +1036,16 @@ class MainWindow(QMainWindow):
         self._download_widget = DownloadWidget()
         self._download_widget.cancel_requested.connect(self._request_download_cancel)
         activity_layout.addWidget(self._download_widget)
+
+        # Persistent torrent downloads (games/movies/anime) — managed list with
+        # per-item progress + a three-dot menu, backed by DownloadManager.
+        self._downloads_list = DownloadsListWidget()
+        self._downloads_list.pause_requested.connect(self._on_download_pause)
+        self._downloads_list.resume_requested.connect(self._on_download_resume)
+        self._downloads_list.remove_requested.connect(self._on_download_remove)
+        self._downloads_list.open_requested.connect(self._on_download_open)
+        activity_layout.addWidget(self._downloads_list)
+
         lay.addWidget(activity, stretch=1)
 
         divider_one = QFrame()
@@ -1058,13 +1203,22 @@ class MainWindow(QMainWindow):
         self._pb_like = _LikeBtn()
         self._pb_like.setToolTip("Marcar como Me gusta")
         self._pb_like.setAccessibleName("Cambiar Me gusta de la canción")
+        self._pb_karaoke = _KaraokeToggleBtn()
+        self._pb_karaoke.setAccessibleName("Mostrar letra sincronizada")
+        self._pb_karaoke.clicked.connect(self._toggle_karaoke_float)
 
         ctrl = QHBoxLayout(); ctrl.setSpacing(8)
         ctrl.addWidget(self._pb_prev)
         ctrl.addWidget(self._pb_play)
         ctrl.addWidget(self._pb_next)
         ctrl.addWidget(self._pb_like)
+        ctrl.addWidget(self._pb_karaoke)
         lay.addLayout(ctrl)
+
+        self._karaoke_float: "_KaraokeFloatWindow | None" = None
+        self._karaoke_lines: tuple = ()
+        self._karaoke_key = ""          # track identity the loaded lines belong to
+        self._karaoke_searching = False
 
         # Track info + slider
         info = QVBoxLayout(); info.setSpacing(4)
@@ -1091,6 +1245,24 @@ class MainWindow(QMainWindow):
         self._time_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         lay.addWidget(self._time_lbl)
 
+        # Volume control
+        self._pb_vol_icon = QLabel()
+        self._pb_vol_icon.setPixmap(_line_icon("volume", C.TEXT_DIM, 16).pixmap(16, 16))
+        lay.addWidget(self._pb_vol_icon)
+        self._pb_volume = QSlider(Qt.Orientation.Horizontal)
+        self._pb_volume.setRange(0, 100)
+        self._pb_volume.setValue(int(app_settings.get("music_default_volume", 100)))
+        self._pb_volume.setFixedWidth(90)
+        self._pb_volume.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pb_volume.setToolTip("Volumen")
+        self._pb_volume.setStyleSheet(
+            "QSlider::groove:horizontal { height:4px; background:rgba(255,255,255,0.12); border-radius:2px; }"
+            "QSlider::sub-page:horizontal { background:#B6C4FF; border-radius:3px; }"
+            "QSlider::handle:horizontal { background:#DCE1FF; width:12px; height:12px; margin:-4px 0; border-radius:6px; }"
+            "QSlider::handle:horizontal:hover { background:#b6c4ff; }"
+        )
+        lay.addWidget(self._pb_volume)
+
         # Floating player button
         self._pb_float_btn = _icon_button("pip", "Reproductor flotante", size=34, icon_size=17)
         self._pb_float_btn.setToolTip("Abrir/cerrar reproductor flotante de música")
@@ -1105,8 +1277,13 @@ class MainWindow(QMainWindow):
         self._slider.sliderPressed.connect(lambda: setattr(self, '_user_dragging', True))
         self._slider.sliderMoved.connect(self._on_slider_moved)
         self._slider.sliderReleased.connect(self._on_seek)
+        self._pb_volume.valueChanged.connect(self._on_pb_volume_changed)
 
         return w
+
+    def _on_pb_volume_changed(self, value: int) -> None:
+        app_settings.set("music_default_volume", int(value))
+        self._set_music_volume(int(value))
 
     def _emit_playback_cmd(self, action: str, params: dict | None = None):
         if self.on_playback_command:
@@ -1190,12 +1367,22 @@ class MainWindow(QMainWindow):
             self._emit_playback_cmd('seek', {'position': pos})
 
     def _tick_playback_progress(self):
-        if self._user_dragging or not self._play_playing or not self._play_duration or self._play_duration <= 0:
+        if (
+            self._user_dragging
+            or not self._play_playing
+            or not self._play_ready
+            or self._play_buffering
+            or not self._play_duration
+            or self._play_duration <= 0
+        ):
             return
         if not self._play_title:
             return
 
-        anchor_pos = float(self._play_position_anchor or self._play_position or 0)
+        # 0.0 is a valid anchor (track start / seek-to-start). Using ``or`` here
+        # made every tick reuse the already interpolated position and add the
+        # full elapsed time again, producing quadratic progress.
+        anchor_pos = float(self._play_position_anchor)
         anchor_ts = float(self._play_position_anchor_ts or 0.0)
         if anchor_ts <= 0.0:
             anchor_ts = time.monotonic()
@@ -1255,12 +1442,24 @@ class MainWindow(QMainWindow):
         playing: bool,
         video_id: str = "",
         liked: bool | None = None,
+        ready: bool | None = None,
+        buffering: bool = False,
+        state: str = "",
     ):
         self._play_title = title
         self._play_artists = artists
         self._play_position = position
         self._play_duration = duration
         self._play_playing = playing
+        self._play_ready = bool(playing) if ready is None else bool(ready)
+        self._play_buffering = bool(buffering)
+        self._play_state = str(state or (
+            "loading" if playing and not self._play_ready
+            else "buffering" if playing and self._play_buffering
+            else "playing" if playing
+            else "paused" if self._play_ready
+            else "stopped"
+        ))
         if video_id and video_id != self._play_video_id:
             self._play_video_id = video_id
             self._play_liked = False
@@ -1281,7 +1480,38 @@ class MainWindow(QMainWindow):
         self._play_position_anchor = float(position or 0)
         self._play_position_anchor_ts = time.monotonic()
         txt = f"{title} — {artists}" if title else "— Ninguna canción —"
+        if title and self._play_state == "loading":
+            txt += "  ·  Cargando…"
+        elif title and self._play_state == "buffering":
+            txt += "  ·  Almacenando búfer…"
         self._track_lbl.setText(txt)
+        if self._karaoke_float is not None:
+            # Isolated: a karaoke failure (e.g. the float widget getting
+            # destroyed under us) must never break the playback bar update.
+            try:
+                # Key by title|artists, not videoId: some playback paths never
+                # report a videoId and the lyrics lookup only needs metadata.
+                key = f"{title}|{artists}" if title else ""
+                track_txt = f"{title} — {artists}" if title else ""
+                if not key:
+                    self._karaoke_float.update_line("", "(no hay música sonando)")
+                elif key != self._karaoke_key:
+                    self._karaoke_key = key
+                    self._karaoke_lines = ()
+                    self._karaoke_float.update_line(track_txt, "Buscando letra…")
+                    self._fetch_karaoke_lyrics(key, title, artists)
+                elif self._karaoke_lines:
+                    from actions.lyrics import current_line
+                    line = current_line(self._karaoke_lines, float(position or 0))
+                    self._karaoke_float.update_line(track_txt, line or "♪")
+                elif not self._karaoke_searching:
+                    self._karaoke_float.update_line(track_txt, "(no encontré letra sincronizada)")
+            except RuntimeError:
+                # Underlying C++ widget deleted — drop the stale reference.
+                self._karaoke_float = None
+                self._pb_karaoke.set_active(False)
+            except Exception:
+                pass
         if duration and duration > 0:
             if not self._user_dragging:
                 pct = int((position / duration) * 100000)
@@ -1295,7 +1525,11 @@ class MainWindow(QMainWindow):
             self._time_lbl.setText("--:-- / --:--")
         self._pb_play.set_shape(_MediaBtn.PAUSE if playing else _MediaBtn.PLAY)
         self._playback_bar.setVisible(bool(title))
-        self.hud.music_playing = playing and bool(title)
+        progressing = (
+            playing and self._play_ready and not self._play_buffering
+            and self._play_state == "playing"
+        )
+        self.hud.music_playing = progressing and bool(title)
         if self._music_panel is not None and hasattr(self._music_panel, "update_now_playing"):
             try:
                 self._music_panel.update_now_playing(title, artists, playing)
@@ -1306,9 +1540,95 @@ class MainWindow(QMainWindow):
                 self._music_float.update_state(
                     title, artists, position, duration, playing,
                     self._get_now_playing_thumb(),
+                    ready=self._play_ready,
+                    buffering=self._play_buffering,
                 )
             except Exception:
                 pass
+
+    def _toggle_karaoke_float(self) -> None:
+        """Show/hide the floating karaoke overlay. Fetches lyrics for the
+        currently playing track the moment it's turned on."""
+        if self._karaoke_float is not None:
+            self._karaoke_float.close()
+            self._karaoke_float = None
+            self._karaoke_lines = ()
+            self._karaoke_key = ""
+            self._pb_karaoke.set_active(False)
+            return
+
+        self._karaoke_float = _KaraokeFloatWindow(on_close=self._toggle_karaoke_float)
+        self._karaoke_float.show()
+        self._pb_karaoke.set_active(True)
+        if self._play_title:
+            self._karaoke_key = f"{self._play_title}|{self._play_artists}"
+            self._karaoke_float.update_line(
+                f"{self._play_title} — {self._play_artists}", "Buscando letra…")
+            self._fetch_karaoke_lyrics(self._karaoke_key, self._play_title, self._play_artists)
+        else:
+            self._karaoke_float.update_line("", "(no hay música sonando)")
+
+    def _fetch_karaoke_lyrics(self, key: str, title: str, artists: str) -> None:
+        """Look up synced lyrics for the new track on a worker thread (network
+        call) and marshal the result back to the UI thread via a signal."""
+        self._karaoke_lines = ()
+        self._karaoke_searching = True
+
+        def worker():
+            from actions.lyrics import get_synced_lyrics
+            try:
+                lines = get_synced_lyrics(title, artists)
+            except Exception:
+                lines = ()
+            self._karaoke_sig.emit(key, lines)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_karaoke_lyrics(self, key: str, lines: tuple) -> None:
+        # The track (or the overlay) may have changed while the lookup was in flight.
+        if self._karaoke_float is None or key != self._karaoke_key:
+            return
+        self._karaoke_searching = False
+        self._karaoke_lines = lines
+        if not lines:
+            track_txt = f"{self._play_title} — {self._play_artists}" if self._play_title else ""
+            self._karaoke_float.update_line(track_txt, "(no encontré letra sincronizada)")
+
+    def _start_screen_translate(self, target_lang: str, interval_secs: float) -> None:
+        """Open the OCR+translation overlay and start polling the screen on a
+        worker thread (translate_screen_text is a network call — never on
+        the Qt thread). Restarts cleanly if one was already running."""
+        if self._translate_overlay is not None:
+            self._stop_screen_translate()
+
+        overlay = _TranslateOverlayWindow(on_close=self._stop_screen_translate)
+        overlay.show()
+        self._translate_overlay = overlay
+        stop_flag = threading.Event()
+        self._translate_stop_flag = stop_flag
+
+        def worker():
+            from actions.screen_translator import translate_screen_text
+            while not stop_flag.is_set():
+                text = translate_screen_text(target_lang)
+                if stop_flag.is_set():
+                    return
+                self._translate_text_sig.emit(text)
+                stop_flag.wait(timeout=max(2.0, interval_secs))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_screen_translate(self) -> None:
+        if self._translate_stop_flag is not None:
+            self._translate_stop_flag.set()
+            self._translate_stop_flag = None
+        if self._translate_overlay is not None:
+            self._translate_overlay.close()
+            self._translate_overlay = None
+
+    def _apply_translate_text(self, text: str) -> None:
+        if self._translate_overlay is not None:
+            self._translate_overlay.update_text(text)
 
 
 
@@ -1342,8 +1662,14 @@ class MainWindow(QMainWindow):
         elif mic_state == "remember":
             self._muted = last_state == "off"
 
+        # Re-save mic_default_state to persist user choice even if file gets corrupted/reset
+        app_settings.set("mic_default_state", mic_state)
+
+        # Force state update regardless of what _apply_mic_available may have done
         self.hud.muted = self._muted
-        self._apply_state("MUTED" if self._muted else "LISTENING")
+        self.hud.state = "MUTED" if self._muted else "LISTENING"
+        self._apply_state(self.hud.state)
+        self._style_mute_btn()
 
     def _toggle_mute(self):
         if not self._mic_available:
@@ -1372,6 +1698,10 @@ class MainWindow(QMainWindow):
             return
         self._mic_available = available
         if not available:
+            # Save current state before forcing mute (in case mic reconnects)
+            from actions import app_settings
+            if app_settings.get("mic_default_state", "on") == "remember":
+                app_settings.set("mic_last_state", "off" if self._muted else "on")
             self._muted = True
             self.hud.muted = True
             self._mute_btn.setEnabled(False)
@@ -1380,9 +1710,16 @@ class MainWindow(QMainWindow):
             self._log.append_log("SYS: No microphone detected.")
         else:
             self._mute_btn.setEnabled(True)
-            self._muted = False
-            self.hud.muted = False
-            self._apply_state("LISTENING")
+            # Restore state based on mode when mic reconnects
+            from actions import app_settings
+            mic_default_state = app_settings.get("mic_default_state", "on")
+            if mic_default_state == "remember":
+                last_state = app_settings.get("mic_last_state", "on")
+                self._muted = last_state == "off"
+            else:
+                self._muted = mic_default_state == "off"
+            self.hud.muted = self._muted
+            self._apply_state("MUTED" if self._muted else "LISTENING")
             self._style_mute_btn()
             self._log.append_log("SYS: Microphone connected.")
 
@@ -1511,6 +1848,18 @@ class MainWindow(QMainWindow):
             except Exception:
                 continue
 
+    def _on_download_pause(self, download_id: str):
+        self._dl_manager.pause(download_id)
+
+    def _on_download_resume(self, download_id: str):
+        self._dl_manager.resume(download_id)
+
+    def _on_download_remove(self, download_id: str):
+        self._dl_manager.remove(download_id)
+
+    def _on_download_open(self, download_id: str):
+        self._dl_manager.open_folder(download_id)
+
     def _request_download_cancel(self):
         if callable(self.on_download_cancel):
             try:
@@ -1595,6 +1944,9 @@ class MainWindow(QMainWindow):
                 bool(info.get('playing', False)),
                 str(info.get('videoId') or info.get('video_id') or ''),
                 info.get('liked'),
+                info.get('ready'),
+                bool(info.get('buffering', False)),
+                str(info.get('state') or ''),
             )
         except Exception:
             pass
@@ -1665,6 +2017,14 @@ class JarvisUI:
             self._app.aboutToQuit.connect(_hl._cleanup_on_exit)
         except Exception:
             pass
+        # Stop the persistent WebTorrent streaming daemon (movies) on exit —
+        # it stays alive across plays for a warm DHT routing table, so it
+        # needs an explicit shutdown; nothing else kills it.
+        try:
+            from actions import vlc_player as _vp
+            self._app.aboutToQuit.connect(_vp.shutdown)
+        except Exception:
+            pass
         # Install cross-thread auth dialog poller (must run on main thread)
         try:
             from actions.auth_dialog import install_main_thread_poller
@@ -1719,6 +2079,9 @@ class JarvisUI:
         playing: bool,
         video_id: str = "",
         liked: bool | None = None,
+        ready: bool | None = None,
+        buffering: bool = False,
+        state: str = "",
     ):
         try:
             # Emit via MainWindow signal to ensure update happens on the GUI thread
@@ -1730,6 +2093,9 @@ class JarvisUI:
                 'playing': playing,
                 'videoId': video_id,
                 'liked': liked,
+                'ready': ready,
+                'buffering': buffering,
+                'state': state,
             })
         except Exception:
             pass
@@ -1782,9 +2148,51 @@ class JarvisUI:
         except Exception:
             pass
 
+    def start_camera_stream(self):
+        """Thread-safe: puede llamarse desde el hilo del asyncio loop de JarvisLive."""
+        try:
+            self._win._camera_start_sig.emit()
+        except Exception:
+            pass
+
+    def stop_camera_stream(self):
+        """Thread-safe: puede llamarse desde el hilo del asyncio loop de JarvisLive."""
+        try:
+            self._win._camera_stop_sig.emit()
+        except Exception:
+            pass
+
+    def start_screen_translate(self, target_lang: str = "es", interval_secs: float = 6.0):
+        """Thread-safe: puede llamarse desde el hilo del asyncio loop de JarvisLive."""
+        try:
+            self._win._translate_start_sig.emit(str(target_lang or "es"), float(interval_secs or 6.0))
+        except Exception:
+            pass
+
+    def stop_screen_translate(self):
+        """Thread-safe: puede llamarse desde el hilo del asyncio loop de JarvisLive."""
+        try:
+            self._win._translate_stop_sig.emit()
+        except Exception:
+            pass
+
+    def is_screen_translate_active(self) -> bool:
+        try:
+            return self._win._translate_overlay is not None
+        except Exception:
+            return False
+
     def wait_for_api_key(self):
         while not self._win._ready:
             time.sleep(0.1)
+
+    @property
+    def on_interrupt(self):
+        return self._win.interrupt_callback
+
+    @on_interrupt.setter
+    def on_interrupt(self, cb):
+        self._win.interrupt_callback = cb
 
     def start_speaking(self):
         self.set_state("SPEAKING")
@@ -1820,5 +2228,12 @@ class JarvisUI:
     def request_download_cancel(self):
         try:
             self._win._request_download_cancel()
+        except Exception:
+            pass
+
+    def play_movie(self, query: str, kind: str = "movie"):
+        """Switch to Movies/Anime mode and hands-free play a title (assistant)."""
+        try:
+            self._win.play_movie_from_assistant(query, kind)
         except Exception:
             pass

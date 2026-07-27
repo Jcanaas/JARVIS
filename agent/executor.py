@@ -169,7 +169,12 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
         print(f"[Executor] ⚠️ Translation failed: {e}")
         return content
 
-def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
+def _call_tool(
+    tool: str,
+    parameters: dict,
+    speak: Callable | None,
+    cancel_flag: threading.Event | None = None,
+) -> str:
 
     if tool == "open_app":
         from actions.open_app import open_app
@@ -183,7 +188,23 @@ def _call_tool(tool: str, parameters: dict, speak: Callable | None) -> str:
         return game_updater(parameters=parameters, speak=speak) or "Done."
     elif tool == "browser_control":
         from actions.browser_control import browser_control
-        return browser_control(parameters=parameters) or "Done."
+        result = browser_control(parameters=parameters) or "Done."
+        if isinstance(result, str) and result.startswith("ERROR:"):
+            raise RuntimeError(result[len("ERROR:"):].strip())
+        return result
+
+    elif tool == "browser_goal":
+        from agent.browser_agent import run_browser_goal
+        result = run_browser_goal(
+            goal=parameters.get("goal", ""),
+            browser=parameters.get("browser"),
+            speak=speak,
+            cancel_flag=cancel_flag,
+            investigate=bool(parameters.get("investigate", False)),
+        )
+        if isinstance(result, str) and result.startswith("ERROR:"):
+            raise RuntimeError(result[len("ERROR:"):].strip())
+        return result
 
     elif tool == "file_controller":
         from actions.file_controller import file_controller
@@ -283,6 +304,9 @@ class AgentExecutor:
                 desc     = step.get("description", "")
                 params   = step.get("parameters", {})
 
+                if tool in ("browser_control", "browser_goal"):
+                    step["critical"] = True
+
                 params = _inject_context(params, tool, step_results, goal=goal)
 
                 print(f"\n[Executor] ▶️ Step {step_num}: [{tool}] {desc}")
@@ -294,8 +318,8 @@ class AgentExecutor:
                     if cancel_flag and cancel_flag.is_set():
                         break
                     try:
-                        result = _call_tool(tool, params, speak)
-                        step_results[step_num] = result 
+                        result = _call_tool(tool, params, speak, cancel_flag)
+                        step_results[step_num] = result
                         completed_steps.append(step)
                         print(f"[Executor] ✅ Step {step_num} done: {str(result)[:100]}")
                         step_ok = True
@@ -328,16 +352,22 @@ class AgentExecutor:
                             if speak: speak(msg)
                             return msg
 
-                        else: 
+                        else:
                             fix_suggestion = recovery.get("fix_suggestion", "")
-                            if fix_suggestion and tool != "generated_code":
+                            # browser_control/browser_goal steps run against a live
+                            # Playwright session that generated code has no access to —
+                            # let those fall through to a full replan instead.
+                            if fix_suggestion and tool not in (
+                                "generated_code", "browser_control", "browser_goal"
+                            ):
                                 try:
                                     fixed_step = generate_fix(step, error_msg, fix_suggestion)
                                     if speak: speak("Trying an alternative approach, sir.")
                                     res = _call_tool(
                                         fixed_step["tool"],
                                         fixed_step["parameters"],
-                                        speak
+                                        speak,
+                                        cancel_flag
                                     )
                                     step_results[step_num] = res
                                     completed_steps.append(step)
@@ -360,10 +390,31 @@ class AgentExecutor:
                     break
 
             if success:
-                return self._summarize(goal, completed_steps, speak)
+                browser_steps = [s for s in steps if s.get("tool") in ("browser_control", "browser_goal")]
+                if browser_steps:
+                    verified, evidence = self._verify_browser_goal(goal)
+                    if not verified:
+                        print(f"[Executor] ❌ Goal verification failed: {evidence}")
+                        success      = False
+                        failed_step  = browser_steps[-1]
+                        failed_error = f"Goal does not appear accomplished: {evidence}"
+                    else:
+                        return self._summarize(goal, completed_steps, speak, evidence=evidence)
+                else:
+                    return self._summarize(goal, completed_steps, speak)
 
-            if replan_attempts >= self.MAX_REPLAN_ATTEMPTS:
-                msg = f"Task failed after {replan_attempts} replan attempts, sir."
+            # A failed browser_goal already burned a full reactive loop with its
+            # own retries inside — replanning it repeatedly means many more
+            # minutes of browsing with little chance of a different outcome.
+            max_replans = (
+                1 if (failed_step and failed_step.get("tool") == "browser_goal")
+                else self.MAX_REPLAN_ATTEMPTS
+            )
+            if replan_attempts >= max_replans:
+                msg = (
+                    f"Task failed after {replan_attempts} replan attempts, sir. "
+                    f"Last problem: [{failed_step.get('tool', '?')}] {failed_step.get('description', '')} — {failed_error[:200]}"
+                )
                 if speak: speak(msg)
                 return msg
 
@@ -372,17 +423,62 @@ class AgentExecutor:
             replan_attempts += 1
             plan = replan(goal, completed_steps, failed_step, failed_error)
 
-    def _summarize(self, goal: str, completed_steps: list, speak: Callable | None) -> str:
-        fallback = f"All done, sir. Completed {len(completed_steps)} steps for: {goal[:60]}."
+    def _verify_browser_goal(self, goal: str) -> tuple[bool, str]:
+        """
+        Checks the live browser state against the goal instead of trusting
+        step completion blindly. Returns (achieved, evidence).
+        On verification-infra failure, defaults to True so a broken
+        verifier doesn't block otherwise-working tasks.
+        """
+        try:
+            from actions.browser_control import browser_control
+
+            url  = browser_control(parameters={"action": "get_url"})
+            text = browser_control(parameters={"action": "get_text"})
+
+            if isinstance(url, str) and url.startswith("ERROR:"):
+                return False, url
+
+            if isinstance(text, str) and text.startswith("ERROR:"):
+                text = ""
+
+            from actions.genai_client import get_model
+            model = get_model("gemini-2.5-flash-lite")
+            prompt = (
+                f'Goal: "{goal}"\n'
+                f"Final browser URL: {url}\n"
+                f"Visible page text (truncated):\n{text[:3000]}\n\n"
+                "Did the browser actually accomplish this goal? Do NOT assume success "
+                "just because a relevant page loaded — look for concrete evidence "
+                "(a confirmation message, the posted/submitted content itself, an "
+                "order number, a success banner, etc). If the goal required posting, "
+                "submitting, buying, or sending something, that action must be "
+                "visibly confirmed on the page.\n\n"
+                'Return ONLY valid JSON: {"achieved": true or false, "evidence": "short reason"}'
+            )
+            response = model.generate_content(prompt)
+            out = response.text.strip()
+            out = re.sub(r"```(?:json)?", "", out).strip().rstrip("`").strip()
+            result = json.loads(out)
+            return bool(result.get("achieved")), str(result.get("evidence", ""))
+        except Exception as e:
+            print(f"[Executor] ⚠️ Goal verification unavailable, assuming success: {e}")
+            return True, "verification unavailable"
+
+    def _summarize(self, goal: str, completed_steps: list, speak: Callable | None,
+                    evidence: str = "") -> str:
+        fallback = f"Completed {len(completed_steps)} steps for: {goal[:60]}, sir."
         try:
             from actions.genai_client import get_model
             model = get_model("gemini-2.5-flash-lite")
             steps_str = "\n".join(f"- {s.get('description', '')}" for s in completed_steps)
             prompt    = (
                 f'User goal: "{goal}"\n'
-                f"Completed steps:\n{steps_str}\n\n"
-                "Write a single natural sentence summarizing what was accomplished. "
-                "Address the user as 'sir'. Be direct and positive."
+                f"Completed steps:\n{steps_str}\n"
+                + (f"Verification evidence: {evidence}\n" if evidence else "")
+                + "\nWrite a single natural sentence reporting what was actually accomplished, "
+                "based only on the evidence above. Address the user as 'sir'. "
+                "Do not claim anything that isn't supported by the evidence."
             )
             response = model.generate_content(prompt)
             summary  = response.text.strip()

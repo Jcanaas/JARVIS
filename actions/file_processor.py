@@ -528,6 +528,7 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
 
     if action == "transcribe":
         try:
+            from google.genai import types
             model   = _gemini_client()
             content = path.read_bytes()
             mime    = {
@@ -537,7 +538,7 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
             }.get(path.suffix.lstrip(".").lower(), "audio/mpeg")
             response = model.generate_content([
                 "Transcribe all speech in this audio file accurately.",
-                {"mime_type": mime, "data": content}
+                types.Part.from_bytes(data=content, mime_type=mime)
             ])
             result = response.text.strip()
             if params.get("save", True):

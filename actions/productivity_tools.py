@@ -71,6 +71,37 @@ def whatsapp_search(query: str, contact: str = "", limit: int = 20, days: int = 
     return matches[:max(1, int(limit or 20))]
 
 
+def whatsapp_group_digest(contact: str, limit: int = 60) -> dict:
+    """Return a group chat's recent messages so the assistant can summarize
+    what was missed, instead of the user reading every message (used for
+    groups with a lot of unread activity)."""
+    from actions import whatsapp
+
+    if not contact:
+        return {"error": "Falta el nombre o chatId del grupo."}
+    if not whatsapp.ensure_bridge_ready():
+        return {"error": "WhatsApp bridge no esta conectado."}
+
+    messages = whatsapp.get_conversation(contact, limit=max(10, int(limit or 60)))
+    if not messages:
+        return {"error": f"No se encontró el grupo '{contact}' o no tiene mensajes."}
+
+    unread = sum(1 for m in messages if not m.get("fromMe") and not m.get("ack"))
+    return {
+        "chat": contact,
+        "message_count": len(messages),
+        "unread_estimate": unread,
+        "messages": [
+            {
+                "from": m.get("senderName") or m.get("author") or m.get("from", ""),
+                "body": m.get("body", ""),
+                "timestamp": m.get("timestamp"),
+            }
+            for m in messages
+        ],
+    }
+
+
 def _calendar_service():
     from actions.google_calendar import _get_service
 
@@ -163,6 +194,11 @@ def productivity_tools(parameters: dict, speak=None):
             limit=int(params.get("limit") or 20),
             days=int(params.get("days") or 14),
         )
+    if action == "whatsapp_group_digest":
+        return whatsapp_group_digest(
+            contact=params.get("contact") or params.get("to") or "",
+            limit=int(params.get("limit") or 60),
+        )
     if action == "calendar_today":
         return calendar_today(calendar_id=params.get("calendar_id", "primary"))
     if action == "calendar_next":
@@ -177,6 +213,6 @@ def productivity_tools(parameters: dict, speak=None):
         )
 
     return (
-        "Accion desconocida. Usa whatsapp_recent, whatsapp_search, calendar_today, "
-        "calendar_next, calendar_freebusy o email_summary."
+        "Accion desconocida. Usa whatsapp_recent, whatsapp_search, whatsapp_group_digest, "
+        "calendar_today, calendar_next, calendar_freebusy o email_summary."
     )

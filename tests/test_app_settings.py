@@ -73,25 +73,21 @@ class AppSettingsTests(unittest.TestCase):
             self.assertEqual(result["custom_key"], "custom_value")
 
     def test_set_writes_to_file(self):
-        with patch("actions.app_settings._FILE") as mock_file, \
-             patch("actions.app_settings._lock"):
-            mock_file.parent.mkdir = MagicMock()
-            mock_file.write_text = MagicMock()
+        real_file = Path(self.temp_dir.name) / "app_settings.json"
+        with patch("actions.app_settings._FILE", real_file), \
+             patch("actions.app_settings._BACKUP_FILE", None):
             from actions import app_settings
             app_settings._cache = {}
 
             app_settings.set("my_key", "my_value")
 
-            mock_file.write_text.assert_called_once()
-            written = mock_file.write_text.call_args[0][0]
-            data = json.loads(written)
+            data = json.loads(real_file.read_text(encoding="utf-8"))
             self.assertEqual(data["my_key"], "my_value")
 
     def test_set_updates_cache(self):
-        with patch("actions.app_settings._FILE") as mock_file:
-            mock_file.read_text.side_effect = FileNotFoundError()
-            mock_file.parent.mkdir = MagicMock()
-            mock_file.write_text = MagicMock()
+        real_file = Path(self.temp_dir.name) / "app_settings.json"
+        with patch("actions.app_settings._FILE", real_file), \
+             patch("actions.app_settings._BACKUP_FILE", None):
             from actions import app_settings
             app_settings._cache = None
 
@@ -103,13 +99,26 @@ class AppSettingsTests(unittest.TestCase):
     def test_set_catches_io_errors_gracefully(self):
         with patch("actions.app_settings._FILE") as mock_file:
             mock_file.read_text.side_effect = FileNotFoundError()
-            mock_file.write_text.side_effect = IOError("disk full")
-            mock_file.parent.mkdir = MagicMock()
+            mock_file.parent.mkdir.side_effect = IOError("disk full")
             from actions import app_settings
             app_settings._cache = None
 
             # Should not raise
             app_settings.set("key", "value")
+
+    def test_set_recovers_from_corrupt_primary_via_backup(self):
+        real_file = Path(self.temp_dir.name) / "app_settings.json"
+        backup_file = Path(self.temp_dir.name) / "app_settings.json.bak"
+        backup_file.write_text(json.dumps({"kept_key": "kept_value"}), encoding="utf-8")
+        real_file.write_text("not json {{", encoding="utf-8")
+        with patch("actions.app_settings._FILE", real_file), \
+             patch("actions.app_settings._BACKUP_FILE", None):
+            from actions import app_settings
+            app_settings._cache = None
+
+            result = app_settings.get("kept_key")
+
+            self.assertEqual(result, "kept_value")
 
     def test_load_handles_invalid_json(self):
         with patch("actions.app_settings._FILE") as mock_file:

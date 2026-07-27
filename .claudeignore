@@ -1,0 +1,18 @@
+# Generated knowledge graph - don't cache as code changes
+graphify-out/
+graph.json
+
+# Build artifacts
+build/dist/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+
+# Dependencies
+venv/
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -145,6 +145,18 @@ def generate_fix(step: dict, error: str, fix_suggestion: str) -> dict:
 
     Returns a modified step dict.
     """
+    if step.get("tool") in ("browser_control", "browser_goal"):
+        # Generated code has no access to the live Playwright session —
+        # a code-based fix here would silently do nothing useful.
+        return {
+            "step":        step.get("step"),
+            "tool":        step.get("tool"),
+            "description": f"Retry (replan) for: {step.get('description')}",
+            "parameters":  step.get("parameters", {}),
+            "depends_on":  step.get("depends_on", []),
+            "critical":    step.get("critical", False),
+        }
+
     from actions.genai_client import get_model
 
     model = get_model("gemini-2.0-flash")

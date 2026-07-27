@@ -349,7 +349,7 @@ class WhatsAppToast(QWidget):
         self._on_open  = on_open
         self._on_closed = on_closed
         self._closing  = False
-        self._anim: QPropertyAnimation | None = None
+        self._anim: HiFpsAnimation | None = None
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -506,7 +506,7 @@ class WhatsAppToast(QWidget):
         self.setWindowOpacity(0.0)
         self.show()
         self.raise_()
-        self._anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._anim = HiFpsAnimation(self, setter=self.setWindowOpacity)
         self._anim.setDuration(220)
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
@@ -520,7 +520,7 @@ class WhatsAppToast(QWidget):
             self._timer.stop()
         except Exception:
             pass
-        self._anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._anim = HiFpsAnimation(self, setter=self.setWindowOpacity)
         self._anim.setDuration(220)
         self._anim.setStartValue(self.windowOpacity())
         self._anim.setEndValue(0.0)

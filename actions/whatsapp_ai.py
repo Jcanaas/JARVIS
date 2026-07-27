@@ -33,13 +33,35 @@ def _message_line(message: dict[str, Any]) -> str:
     return f"{speaker}: {body}" if body else ""
 
 
+def translate_if_foreign(body: str, target_lang: str = "español") -> str:
+    """Translate incoming text if it isn't already in target_lang; else "".
+
+    Used to show an inline translation subtitle under foreign-language
+    messages. Cheap model, single short call — no conversation context needed.
+    """
+    from actions.genai_client import get_model
+
+    text = " ".join(str(body or "").split())
+    if not text:
+        return ""
+    prompt = (
+        f"Si el siguiente texto de WhatsApp NO está ya en {target_lang}, tradúcelo "
+        f"al {target_lang} manteniendo el tono. Si ya está en {target_lang}, responde "
+        "exactamente con una cadena vacía. Devuelve únicamente la traducción o la "
+        f"cadena vacía, sin comillas ni explicación.\n\nTexto: {text}"
+    )
+    model = get_model("gemini-2.5-flash-lite")
+    response = model.generate_content(prompt)
+    return str(getattr(response, "text", "") or "").strip().strip('"')
+
+
 def generate_whatsapp_reply(
     chat_id: str,
     incoming_body: str = "",
     messages: list[dict[str, Any]] | None = None,
 ) -> str:
     """Generate a draft matching the user's tone without sending it."""
-    from google import genai
+    from actions.genai_client import get_model
 
     context = list(messages or [])
     if not context:
@@ -58,11 +80,8 @@ def generate_whatsapp_reply(
         "Devuelve únicamente el texto que se enviaría, sin comillas, etiquetas ni explicación.\n\n"
         f"Conversación:\n{transcript}"
     )
-    client = genai.Client(api_key=_api_key())
-    response = client.models.generate_content(
-        model="gemma-4-26b-a4b-it",
-        contents=prompt,
-    )
+    model = get_model("gemma-4-26b-a4b-it")
+    response = model.generate_content(prompt)
     text = str(getattr(response, "text", "") or "").strip().strip('"')
     if not text:
         raise RuntimeError("La IA no generó ninguna respuesta.")
@@ -114,8 +133,8 @@ def generate_rule_reply(
     may call ``google_calendar`` (read-only) to check the user's availability
     before answering. Calendar access degrades gracefully if not configured.
     """
-    from google import genai
     from google.genai import types
+    from actions.genai_client import get_model
 
     context = list(messages or [])
     if not context:
@@ -138,11 +157,8 @@ def generate_rule_reply(
         f"Instrucciones de la regla:\n{custom_prompt.strip()}"
     )
 
-    client = genai.Client(api_key=_api_key())
-    config = types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=[types.Tool(function_declarations=[_CALENDAR_TOOL])],
-    )
+    model = get_model("gemini-3.1-flash-lite", system_instruction=system_instruction)
+    tools = [types.Tool(function_declarations=[_CALENDAR_TOOL])]
     contents: list[Any] = [
         types.Content(
             role="user",
@@ -151,11 +167,7 @@ def generate_rule_reply(
     ]
 
     for _ in range(max_calendar_calls + 1):
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
-            contents=contents,
-            config=config,
-        )
+        response = model.generate_content(contents, tools=tools)
         candidate = (response.candidates or [None])[0]
         parts = getattr(getattr(candidate, "content", None), "parts", None) or []
         calls = [p.function_call for p in parts if getattr(p, "function_call", None)]

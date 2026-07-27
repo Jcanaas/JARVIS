@@ -17,20 +17,13 @@ from urllib.parse import quote
 import requests
 
 from actions.doh import enable_for
+from actions.trackers import magnet_tracker_suffix
 
 # Route Peerflix through DNS-over-HTTPS in case the ISP blocks it too.
 enable_for("peerflix.mov")
 
 _BASE = "https://peerflix.mov"
 _TIMEOUT = 12
-
-_TRACKERS = [
-    "udp://tracker.opentrackr.org:1337/announce",
-    "udp://open.demonii.com:1337/announce",
-    "udp://tracker.openbittorrent.com:6969/announce",
-    "udp://exodus.desync.com:6969/announce",
-    "udp://open.stealth.si:80/announce",
-]
 
 _SPANISH_RE = re.compile(r"castellano|español|espanol|🇪🇸|latino", re.IGNORECASE)
 
@@ -76,8 +69,7 @@ def _fmt_size(num_bytes) -> str:
 
 
 def _build_magnet(info_hash: str, name: str) -> str:
-    trackers = "".join(f"&tr={quote(t)}" for t in _TRACKERS)
-    return f"magnet:?xt=urn:btih:{info_hash}&dn={quote(name)}{trackers}"
+    return f"magnet:?xt=urn:btih:{info_hash}&dn={quote(name)}{magnet_tracker_suffix()}"
 
 
 def _parse_stream(item: dict) -> Stream | None:
@@ -150,7 +142,11 @@ def search(imdb_id: str, kind: str = "movie", season: int = 0, episode: int = 0,
         raise PeerflixAddonError(f"No Peerflix streams for '{imdb_id}'.")
 
     if spanish:
-        streams.sort(key=lambda s: (s.spanish, s.seeders), reverse=True)
+        # Peerflix is almost all Castilian, so tier by health first (seeders>=3)
+        # then Spanish, so a dead release doesn't sit at the top of the dialog.
+        streams.sort(
+            key=lambda s: (s.seeders >= 3, s.seeders >= 3 and s.spanish, s.seeders),
+            reverse=True)
     else:
         streams.sort(key=lambda s: s.seeders, reverse=True)
 

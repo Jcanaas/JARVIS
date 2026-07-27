@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QVariantAnimation, QPropertyAnimation, QEasingCurve, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QEasingCurve, pyqtSignal
+
+from .anim import HiFpsAnimation
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget, QGraphicsDropShadowEffect,
@@ -366,24 +368,23 @@ class AnimatedStack(QStackedWidget):
         veil.raise_()
         self._veil = veil
 
-        fade = QVariantAnimation(veil)
+        fade = HiFpsAnimation(veil, setter=veil.set_opacity)
         fade.setDuration(200)
         fade.setStartValue(1.0)
         fade.setEndValue(0.0)
         fade.setEasingCurve(QEasingCurve.Type.OutCubic)
-        fade.valueChanged.connect(veil.set_opacity)
         fade.finished.connect(self._finish_transition)
 
         # La página entrante (viva) sube suavemente a su sitio.
         w.move(0, 14)
-        slide = QPropertyAnimation(w, b"pos", veil)
+        slide = HiFpsAnimation(veil, setter=w.move)
         slide.setDuration(_ANIM_DUR)
         slide.setStartValue(QPoint(0, 14))
         slide.setEndValue(QPoint(0, 0))
         slide.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        fade.start(QVariantAnimation.DeletionPolicy.DeleteWhenStopped)
-        slide.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        fade.start(delete_when_stopped=True)
+        slide.start(delete_when_stopped=True)
 
 
 __all__ = [

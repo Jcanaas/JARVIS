@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, pyqtProperty, pyqtSignal
+from PyQt6.QtCore import QEasingCurve, QRectF, Qt, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QBrush, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QPushButton, QWidget
 
 from ..theme import C, qcol
+from .anim import HiFpsAnimation
 
 
 class _MediaBtn(QPushButton):
@@ -120,6 +121,48 @@ class _LikeBtn(QPushButton):
         p.drawPath(path)
 
 
+class _KaraokeToggleBtn(QPushButton):
+    """Toggle button for the karaoke lyrics overlay — two stacked bars,
+    like subtitle/caption lines, filled when active."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._active = False
+        self.setFixedSize(40, 40)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Letra sincronizada (ventana flotante)")
+        self.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.035);
+                border: 1px solid rgba(255,255,255,0.075);
+                border-radius: 10px;
+            }
+            QPushButton:hover {
+                background: rgba(182,196,255,0.10);
+                border-color: rgba(182,196,255,0.28);
+            }
+        """)
+
+    def set_active(self, active: bool):
+        active = bool(active)
+        if active != self._active:
+            self._active = active
+            self.update()
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = qcol(C.PRI if (self._active or self.underMouse()) else C.TEXT_DIM)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(color) if self._active else QBrush(color.lighter(140)))
+        p.setOpacity(1.0 if self._active else 0.55)
+        p.drawRoundedRect(QRectF(10, 15, 20, 4), 2, 2)
+        p.drawRoundedRect(QRectF(10, 22, 14, 4), 2, 2)
+
+
 class ToggleSwitch(QWidget):
     """Compact iOS-style on/off switch, painted to match the app's accent."""
 
@@ -131,7 +174,7 @@ class ToggleSwitch(QWidget):
         self._pos = 1.0 if self._checked else 0.0
         self.setFixedSize(46, 26)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._anim = QPropertyAnimation(self, b"knob", self)
+        self._anim = HiFpsAnimation(self, setter=self._set_knob)
         self._anim.setDuration(150)
         self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
@@ -198,5 +241,6 @@ class ToggleSwitch(QWidget):
 __all__ = [
     '_MediaBtn',
     '_LikeBtn',
+    '_KaraokeToggleBtn',
     'ToggleSwitch',
 ]

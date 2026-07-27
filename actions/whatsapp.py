@@ -115,7 +115,11 @@ def is_ignored_message(message: Dict[str, Any]) -> bool:
     if message.get("isChannel") or message.get("isNewsletter") or message.get("newsletter"):
         return True
     chat_type = str(message.get("chatType") or message.get("type") or "").lower()
-    return chat_type in {"newsletter", "channel", "broadcast"}
+    if chat_type in {"newsletter", "channel", "broadcast"}:
+        return True
+    # WhatsApp protocol/system notices (encryption notice, business template
+    # updates) aren't real messages — don't count/show/announce them.
+    return chat_type in {"e2e_notification", "notification_template"}
 
 
 def _bridge_qr_status() -> dict:
@@ -203,8 +207,16 @@ def ensure_bridge_ready() -> bool:
         return False
 
 
-def send_whatsapp(to: str, body: str, timeout: int = 10) -> Dict[str, Any]:
-    """Enviar mensaje. `to` debe ser en formato WhatsApp (e.g. 5511999999999@c.us)."""
+def send_whatsapp(
+    to: str,
+    body: str,
+    timeout: int = 45,
+    quoted_message_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Enviar mensaje. `to` debe ser en formato WhatsApp (e.g. 5511999999999@c.us).
+
+    `quoted_message_id` es opcional: id de un mensaje al que responder (cita).
+    """
     to = str(to or "").strip()
     body = str(body or "").strip()
     if not to or "@" not in to:
@@ -212,12 +224,35 @@ def send_whatsapp(to: str, body: str, timeout: int = 10) -> Dict[str, Any]:
     if not body:
         raise WhatsAppError("El mensaje está vacío.")
     url = f"{BRIDGE_URL}/send"
-    resp = requests.post(url, json={"to": to, "body": body}, headers=_request_headers(), timeout=timeout)
+    payload = {"to": to, "body": body}
+    if quoted_message_id:
+        payload["quotedMessageId"] = quoted_message_id
+    resp = requests.post(url, json=payload, headers=_request_headers(), timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
     if not data.get("ok"):
         raise WhatsAppError(str(data.get("error") or "WhatsApp no confirmó el envío."))
     return data
+
+def edit_whatsapp_message(message_id: str, new_body: str, timeout: int = 10) -> Dict[str, Any]:
+    """Editar un mensaje propio ya enviado (solo dentro de la ventana de edición de WhatsApp, ~15 min)."""
+    message_id = str(message_id or "").strip()
+    new_body = str(new_body or "").strip()
+    if not message_id:
+        raise WhatsAppError("Falta el id del mensaje a editar.")
+    if not new_body:
+        raise WhatsAppError("El mensaje editado está vacío.")
+    resp = requests.post(
+        f"{BRIDGE_URL}/edit",
+        json={"id": message_id, "body": new_body},
+        headers=_request_headers(),
+        timeout=timeout,
+    )
+    data = resp.json() if resp.content else {}
+    if not resp.ok or not data.get("ok"):
+        raise WhatsAppError(str(data.get("error") or "No se pudo editar el mensaje."))
+    return data
+
 
 def send_whatsapp_media(
     to: str,
@@ -362,6 +397,16 @@ def get_conversation(
             raise WhatsAppError(str(data.get("error") or "No se pudo cargar la conversación."))
         msgs = data.get('messages', [])
         msgs = [m for m in msgs if not is_ignored_message(m)]
+        # Normalize timestamps to ms before sorting: bridges predating the
+        # toMs() fix serve live-fetched history in epoch seconds while
+        # buffered/optimistic entries are ms, which scrambled message order.
+        for m in msgs:
+            try:
+                ts = int(m.get('timestamp') or 0)
+                if 0 < ts < 10**12:
+                    m['timestamp'] = ts * 1000
+            except Exception:
+                pass
         # sort by timestamp ascending
         try:
             msgs.sort(key=lambda x: int(x.get('timestamp', 0)))
@@ -489,6 +534,10 @@ def list_recent_chats(
                     "unread": int(chat.get("unread") or 0),
                     "isGroup": bool(chat.get("isGroup")),
                     "pictureUrl": chat.get("pictureUrl") or "",
+                    # Delivery/read state of the last message, only meaningful
+                    # when fromMe (WhatsApp doesn't report ack for messages we
+                    # received). -1 error, 1 sent, 2 delivered, 3 read.
+                    "ack": chat.get("ack"),
                 })
             if out:
                 out.sort(key=lambda x: int(x.get("timestamp") or 0), reverse=True)
@@ -519,7 +568,9 @@ def list_recent_chats(
         if not chat_id:
             continue
         try:
-            ts = int(msg.get("timestamp") or 0)
+            # waTs (WhatsApp's own send time) if present is the real
+            # chronological order; timestamp alone is bridge arrival order.
+            ts = int(msg.get("waTs") or msg.get("timestamp") or 0)
         except Exception:
             ts = 0
         current = chats.get(chat_id)
@@ -539,6 +590,7 @@ def list_recent_chats(
             "fromMe": from_me,
             "unread": 0 if from_me else 1,
             "media": bool(msg.get("hasMedia") or msg.get("mediaUrl")),
+            "ack": msg.get("ack"),
         }
 
     items = list(chats.values())
@@ -559,16 +611,38 @@ def media_url(path_or_url: str) -> str:
     return f"{BRIDGE_URL}/{value.lstrip('/')}"
 
 
+_last_media_error: str = ""
+
+
 def download_message_media(message: Dict[str, Any], timeout: int = 10) -> Optional[bytes]:
-    """Download media from a WhatsApp message. Returns file bytes or None on error."""
+    """Download media from a WhatsApp message. Returns file bytes or None on error.
+
+    On failure the underlying reason (bridge error body, HTTP status, network
+    error) is stashed on `_last_media_error` so callers can surface it instead
+    of a generic "couldn't download" message."""
+    global _last_media_error
+    _last_media_error = ""
     if not message or not message.get("mediaUrl"):
+        _last_media_error = "el mensaje no tiene mediaUrl"
         return None
+    url = media_url(message["mediaUrl"])
     try:
-        url = media_url(message["mediaUrl"])
         resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
         return resp.content
-    except Exception:
+    except requests.HTTPError as e:
+        detail = ""
+        try:
+            detail = str(resp.json().get("error") or "")
+        except Exception:
+            detail = (resp.text or "")[:200]
+        _last_media_error = f"HTTP {resp.status_code}" + (f" — {detail}" if detail else "")
+        return None
+    except requests.RequestException as e:
+        _last_media_error = f"error de red hablando con el bridge: {e}"
+        return None
+    except Exception as e:
+        _last_media_error = str(e)
         return None
 
 
@@ -588,7 +662,8 @@ def transcribe_message_audio(message: Dict[str, Any], timeout: int = 10) -> Opti
 
     media_data = download_message_media(message, timeout=timeout)
     if not media_data:
-        raise WhatsAppError("No se pudo descargar el audio del mensaje.")
+        reason = f" ({_last_media_error})" if _last_media_error else ""
+        raise WhatsAppError(f"No se pudo descargar el audio del mensaje.{reason}")
 
     # Save to temp file
     import tempfile

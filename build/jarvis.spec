@@ -29,8 +29,16 @@ _creds = ROOT / "config" / "google_credentials.json"
 if _creds.is_file():
     datas.append((str(_creds), "config"))
 
+# Personal production build: ship api_keys.json (Gemini/TMDB/MAL/...) so the
+# app works out of the box. Seeded to %LOCALAPPDATA%\Jarvis\config on first
+# run and editable afterwards in Ajustes -> APIs. Do NOT distribute this
+# installer publicly with real keys inside.
+_keys = ROOT / "config" / "api_keys.json"
+if _keys.is_file():
+    datas.append((str(_keys), "config"))
+
 binaries = []
-for name in ("mpv.exe", "mpv.com", "d3dcompiler_43.dll"):
+for name in ("mpv.exe", "mpv.com", "d3dcompiler_43.dll", "yt-dlp.exe"):
     p = ROOT / name
     if p.is_file():
         binaries.append((str(p), "."))
@@ -54,6 +62,10 @@ _add_tree("whatsapp_bridge", "whatsapp_bridge",
           skip=(".wwebjs_auth", ".wwebjs_cache", "bridge_token",
                 "bridge_state.json", "bridge.log"))
 
+# Vendored Node scripts (torrent search/stream/download, game search) incl.
+# their node_modules — resolved at runtime via actions.paths.resource().
+_add_tree("actions/vendor", "actions/vendor", skip=(".bin", ".cache"))
+
 
 # --- Dynamic / data-heavy third-party packages --------------------------------
 hiddenimports = []
@@ -62,6 +74,9 @@ _collect_pkgs = [
     "google.genai",
     "yt_dlp", "qrcode", "comtypes", "pycaw", "duckduckgo_search",
     "youtube_transcript_api", "pptx", "dateutil", "bs4",
+    # ytmusicapi needs its locales/ (gettext .mo files) — without them every
+    # YTMusic() call dies at init in the frozen build.
+    "ytmusicapi",
 ]
 for pkg in _collect_pkgs:
     try:
@@ -95,7 +110,7 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-_icon = ROOT / "installer" / "mpv-icon.ico"
+_icon = ROOT / "installer" / "jarvis-icon.ico"
 
 exe = EXE(
     pyz,

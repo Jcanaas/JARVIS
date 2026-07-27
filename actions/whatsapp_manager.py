@@ -10,6 +10,7 @@ Uso básico:
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -20,6 +21,16 @@ from .whatsapp import fetch_messages, is_ignored_message, resolve_contact, send_
 from actions.paths import RESOURCE_DIR, DATA_DIR
 ROOT = RESOURCE_DIR
 PENDING_FILE = DATA_DIR / "whatsapp_pending.json"
+
+_YOUTUBE_ID_RE = re.compile(
+    r"(?:youtu\.be/|youtube\.com/watch\?v=|music\.youtube\.com/watch\?v=)"
+    r"([A-Za-z0-9_-]{11})"
+)
+
+
+def _extract_youtube_id(body: str) -> str:
+    match = _YOUTUBE_ID_RE.search(str(body or ""))
+    return match.group(1) if match else ""
 
 
 def _load_pending() -> Dict[str, Any]:
@@ -43,8 +54,30 @@ class WhatsAppManager:
         reply_generator=None,
         message_sender=None,
         start_thread: bool = True,
+        on_unanswered_reminder=None,
+        reminder_after_secs: float = 3 * 3600,
+        startup_grace_secs: float = 15.0,
+        backlog_age_secs: float = 90.0,
+        flood_threshold: int = 4,
     ):
         self.poll_interval = poll_interval
+        # Startup flood guard: WhatsApp Web re-syncing on connect can dump a
+        # burst of messages the user already read on their phone, each
+        # tagged with a "just arrived" timestamp. Anything that shows up
+        # inside this grace window after start, or that's already old by the
+        # time it's seen, or that arrives as part of a big burst, is flagged
+        # backlog=True so callers (main.py's announcer) can skip the TTS
+        # readout + floating notification for it while still keeping it in
+        # the pending list for the chat UI.
+        self._startup_deadline = time.monotonic() + max(0.0, startup_grace_secs)
+        self.backlog_age_secs = backlog_age_secs
+        self.flood_threshold = flood_threshold
+        # "Responder esto" reminder: nudge once per message if an incoming
+        # message sits unanswered (not in _pending as sent) past this long.
+        self.on_unanswered_reminder = on_unanswered_reminder
+        self.reminder_after_secs = reminder_after_secs
+        self._reminded: set = set()
+        self._last_reminder_scan = 0.0
         self._stop = threading.Event()
         self._lock = threading.Lock()
         # _seen: in-session dedup set — does NOT load old file IDs.
@@ -68,6 +101,10 @@ class WhatsAppManager:
         self._auto_reply_sessions: Dict[str, Dict[str, Any]] = {}
         self._auto_reply_busy: set[str] = set()
         self._auto_reply_queues: Dict[str, List[Dict[str, Any]]] = {}
+        # Listeners notified when an existing message gets edited (own or
+        # remote). Separate from _message_listeners since edits aren't new
+        # messages and shouldn't trigger auto-reply/transcription.
+        self._edit_listeners: List = []
         if start_thread:
             t = threading.Thread(target=self._loop, daemon=True)
             t.start()
@@ -88,6 +125,7 @@ class WhatsAppManager:
                     new_entries = []
                     msg_map = {}  # Map message IDs to bridge messages for audio transcription
                     newest_timestamp = self._last_ts
+                    edit_entries = []
                     with self._lock:
                         for m in msgs:
                             if is_ignored_message(m):
@@ -99,11 +137,39 @@ class WhatsAppManager:
                                 newest_timestamp = max(newest_timestamp, int(m.get("timestamp") or 0))
                             except (TypeError, ValueError):
                                 pass
+                            # Edit events reuse the original message's id (so its
+                            # timestamp/order in the pending store doesn't change),
+                            # which means they'd be skipped by the dedup check below
+                            # if handled as normal messages. Handle them separately:
+                            # patch the stored body and notify edit listeners.
+                            if str(m.get('type') or '').lower() == 'edit':
+                                pending_entry = self._pending.get(mid)
+                                if pending_entry is not None:
+                                    pending_entry['body'] = m.get('body') or ''
+                                    pending_entry['edited'] = True
+                                edit_entries.append({
+                                    'id': mid,
+                                    'from': m.get('chatId'),
+                                    'body': m.get('body') or '',
+                                    'edited': True,
+                                })
+                                continue
                             # deduplicate using session-only _seen set
                             if mid in self._seen:
                                 continue
                             self._seen.add(mid)
                             from_me = bool(m.get('fromMe')) or str(m.get('direction') or '').lower() == 'out'
+                            try:
+                                msg_age_s = (
+                                    int(time.time() * 1000)
+                                    - int(m.get('waTs') or m.get('timestamp') or 0)
+                                ) / 1000.0
+                            except (TypeError, ValueError):
+                                msg_age_s = 0.0
+                            is_backlog = (
+                                time.monotonic() < self._startup_deadline
+                                or msg_age_s > self.backlog_age_secs
+                            )
                             entry = {
                                 'id': mid,
                                 # 'from' is used throughout as "the chat this
@@ -131,19 +197,35 @@ class WhatsAppManager:
                                 'mediaUrl': m.get('mediaUrl') or None,
                                 'mentionedIds': m.get('mentionedIds') or [],
                                 'mentions': m.get('mentions') or {},
+                                'quoted': m.get('quoted') or None,
                                 'draft': None,
                                 'sent': False,
+                                'is_backlog': is_backlog,
                             }
                             self._pending[mid] = entry
                             new_entries.append(entry)
                             msg_map[mid] = m  # Store bridge message for transcription
-                        if new_entries:
+                        if new_entries or edit_entries:
                             _save_pending(self._pending)
                         # Advance only to data actually received. Advancing to "now"
                         # could skip a message arriving between the HTTP response and
                         # this assignment.
                         self._last_ts = newest_timestamp
+
+                    # A burst this size is a reconnect/sync dump, not someone
+                    # actually messaging you several times in 1.5s — flag the
+                    # whole tick as backlog even if individual ages looked fresh.
+                    incoming = [e for e in new_entries if not e.get('fromMe')]
+                    if len(incoming) > self.flood_threshold:
+                        for entry in incoming:
+                            entry['is_backlog'] = True
                     # notify outside lock
+                    for edit_entry in edit_entries:
+                        for listener in list(self._edit_listeners):
+                            try:
+                                listener(edit_entry)
+                            except Exception as e:
+                                print(f"[WA] edit listener error: {e}", file=sys.stderr)
                     if self.on_new_message:
                         for entry in new_entries:
                             print(f"[WA] {entry.get('from')} → {entry.get('body','')[:60]}", file=sys.stderr)
@@ -153,6 +235,25 @@ class WhatsAppManager:
                                 print(f"[WA] announce error: {e}", file=sys.stderr)
                     elif new_entries:
                         print(f"[WA] {len(new_entries)} msg(s), callback not set yet", file=sys.stderr)
+                    # Shared queue: a YouTube/YT Music link in an incoming chat
+                    # gets queued in the headless music player automatically.
+                    for entry in new_entries:
+                        if not entry.get('fromMe') and entry.get('body'):
+                            video_id = _extract_youtube_id(entry['body'])
+                            if video_id:
+                                threading.Thread(
+                                    target=self._queue_shared_track,
+                                    args=(video_id,),
+                                    daemon=True,
+                                ).start()
+                    # Auto-translate incoming foreign-language text (don't block polling)
+                    for entry in new_entries:
+                        if not entry.get('fromMe') and entry.get('body'):
+                            threading.Thread(
+                                target=self._translate_entry_text,
+                                args=(entry,),
+                                daemon=True,
+                            ).start()
                     # Transcribe audio asynchronously (don't block polling)
                     for entry in new_entries:
                         msg_type = str(entry.get('type') or '').lower()
@@ -185,7 +286,38 @@ class WhatsAppManager:
                 _backoff = min(_backoff * 2, 60.0)
                 time.sleep(_backoff)
                 continue
+            self._check_unanswered()
             time.sleep(self.poll_interval)
+
+    def _check_unanswered(self) -> None:
+        """Fire on_unanswered_reminder once per message left unanswered too long.
+
+        Scanned at most once a minute (poll_interval runs every ~1.5s, this
+        would otherwise re-check on every tick for no reason).
+        """
+        if not self.on_unanswered_reminder:
+            return
+        now = time.monotonic()
+        if now - self._last_reminder_scan < 60:
+            return
+        self._last_reminder_scan = now
+        now_ms = int(time.time() * 1000)
+        threshold_ms = self.reminder_after_secs * 1000
+        with self._lock:
+            due = [
+                entry for mid, entry in self._pending.items()
+                if not entry.get('fromMe') and not entry.get('sent')
+                and mid not in self._reminded
+                and (now_ms - int(entry.get('timestamp') or 0)) >= threshold_ms
+            ]
+            for entry in due:
+                self._reminded.add(entry['id'])
+        for entry in due:
+            try:
+                self.on_unanswered_reminder(entry)
+            except Exception as e:
+                import sys
+                print(f"[WA] reminder callback error: {e}", file=sys.stderr)
 
     def stop(self):
         self._stop.set()
@@ -207,6 +339,34 @@ class WhatsAppManager:
             import sys
             print(f"[WA] transcription error: {e}", file=sys.stderr)
 
+    def _queue_shared_track(self, video_id: str) -> None:
+        try:
+            from actions import ytmusic_headless as player
+            player.add_to_queue(video_id)
+        except Exception as e:
+            import sys
+            print(f"[WA] shared queue error: {e}", file=sys.stderr)
+
+    def _translate_entry_text(self, entry: Dict[str, Any]) -> None:
+        """Fill entry['translation'] if the incoming text isn't in Spanish.
+
+        Mirrors _transcribe_entry_audio: best-effort, updates the stored
+        pending entry in place so the next render of this message shows the
+        inline translation (no live re-push to an already-open chat window,
+        same tradeoff the audio transcription makes).
+        """
+        try:
+            from actions.whatsapp_ai import translate_if_foreign
+            translation = translate_if_foreign(entry.get('body', ''))
+            if translation:
+                entry['translation'] = translation
+                with self._lock:
+                    self._pending[entry['id']] = entry
+                    _save_pending(self._pending)
+        except Exception as e:
+            import sys
+            print(f"[WA] translation error: {e}", file=sys.stderr)
+
     def add_message_listener(self, listener) -> None:
         """Register a callable invoked with each new incoming message entry."""
         if listener is not None and listener not in self._message_listeners:
@@ -215,6 +375,17 @@ class WhatsAppManager:
     def remove_message_listener(self, listener) -> None:
         try:
             self._message_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def add_edit_listener(self, listener) -> None:
+        """Register a callable invoked with {'id','from','body','edited'} when a message is edited."""
+        if listener is not None and listener not in self._edit_listeners:
+            self._edit_listeners.append(listener)
+
+    def remove_edit_listener(self, listener) -> None:
+        try:
+            self._edit_listeners.remove(listener)
         except ValueError:
             pass
 
@@ -379,6 +550,7 @@ class WhatsAppManager:
                 source = str(entry.get("from") or "").strip()
                 if source == chat_id:
                     self._pending.pop(message_id, None)
+                    self._reminded.discard(message_id)
                     removed += 1
             if removed:
                 _save_pending(self._pending)

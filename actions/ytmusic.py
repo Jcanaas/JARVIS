@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import threading
 import unicodedata
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from pathlib import Path
@@ -68,6 +70,7 @@ _DOWNLOAD_QUEUE_LOCK = threading.Lock()
 _DOWNLOAD_QUEUE_RUNNING = False
 _DOWNLOAD_PAUSED = threading.Event()
 _DOWNLOAD_CANCEL_ALL = threading.Event()
+_DOWNLOAD_STATE_LOCK = threading.Lock()
 
 
 def _fmt_duration(seconds: Optional[int]) -> str:
@@ -401,6 +404,62 @@ def set_default_quality(audio: str = "", video: str = "") -> dict:
         "audio_quality": _DOWNLOAD_STATE.get("audio_quality", "best"),
         "video_quality": _DOWNLOAD_STATE.get("video_quality", "best"),
     }
+
+
+_COOKIE_BROWSER_CACHE: dict = {"checked": False, "browser": None}
+_COOKIE_BROWSER_LOCK = threading.Lock()
+_COOKIE_BROWSER_CANDIDATES = ("edge", "chrome", "firefox", "brave", "vivaldi", "opera", "chromium")
+
+
+def _detect_cookie_browser() -> Optional[str]:
+    """Find a browser yt-dlp can pull cookies from, so YouTube's "sign in to
+    confirm you're not a bot" check doesn't block every download. Cached after
+    the first check since probing each browser's cookie store is slow."""
+    with _COOKIE_BROWSER_LOCK:
+        if _COOKIE_BROWSER_CACHE["checked"]:
+            return _COOKIE_BROWSER_CACHE["browser"]
+
+        override = str(_DOWNLOAD_STATE.get("cookies_browser") or "").strip().lower()
+        candidates = [override] if override else list(_COOKIE_BROWSER_CANDIDATES)
+
+        found = None
+        try:
+            from yt_dlp.cookies import extract_cookies_from_browser
+        except Exception:
+            extract_cookies_from_browser = None
+
+        if extract_cookies_from_browser:
+            for name in candidates:
+                if not name:
+                    continue
+                try:
+                    jar = extract_cookies_from_browser(name)
+                    if jar is not None and len(jar) > 0:
+                        found = name
+                        break
+                except Exception:
+                    continue
+
+        _COOKIE_BROWSER_CACHE["checked"] = True
+        _COOKIE_BROWSER_CACHE["browser"] = found
+        return found
+
+
+def _cookie_opts() -> dict:
+    browser = _detect_cookie_browser()
+    return {"cookiesfrombrowser": (browser,)} if browser else {}
+
+
+def set_cookies_browser(name: str = "") -> dict:
+    """Force which browser yt-dlp pulls YouTube cookies from (edge/chrome/firefox/...).
+    Empty string clears the override and re-runs auto-detection."""
+    _DOWNLOAD_STATE["cookies_browser"] = str(name or "").strip().lower()
+    _save_download_state(_DOWNLOAD_STATE)
+    with _COOKIE_BROWSER_LOCK:
+        _COOKIE_BROWSER_CACHE["checked"] = False
+        _COOKIE_BROWSER_CACHE["browser"] = None
+    detected = _detect_cookie_browser()
+    return {"configured": _DOWNLOAD_STATE["cookies_browser"], "active": detected}
 
 
 def download_status() -> dict:
@@ -808,8 +867,19 @@ def playlist_track_names(tracks) -> List[str]:
     return names
 
 
-def download_audio_tracks(tracks, output_dir: str = "", quality: str = "", progress_hook=None, cancel_event=None) -> List[str]:
-    """Download each track in a list and return the saved file paths."""
+def download_audio_tracks(tracks, output_dir: str = "", quality: str = "", progress_hook=None, cancel_event=None, max_workers: int = 2) -> List[str]:
+    """Download each track in a list (concurrently) and return the saved file paths.
+
+    yt-dlp swallows ordinary exceptions raised from a progress_hook — only
+    KeyboardInterrupt reliably aborts an in-flight download from inside one, so
+    that's what the cancel path raises. A plain exception here would just get
+    logged and the download would keep running to completion regardless of
+    cancel_event.
+
+    max_workers defaults to 2, not higher: YouTube's bot-check ("Sign in to
+    confirm you're not a bot") triggers on request bursts, not just missing
+    cookies — a handful of tracks landing at once from several worker threads
+    is enough to flag the session even with valid cookies configured."""
     if not _YTDLP_OK:
         raise RuntimeError("yt-dlp no está disponible en este entorno.")
 
@@ -818,42 +888,61 @@ def download_audio_tracks(tracks, output_dir: str = "", quality: str = "", progr
     outdir.mkdir(parents=True, exist_ok=True)
     format_selector = _audio_format_selector(quality)
 
-    saved: List[str] = []
     total = max(1, len(items))
-    for idx, track in enumerate(items, start=1):
+    saved: List[str] = []
+    saved_lock = threading.Lock()
+    progress_lock = threading.Lock()
+    completed = 0
+    cancelled = threading.Event()
+
+    def _overall_percent(extra: float = 0.0) -> float:
+        with progress_lock:
+            base = completed
+        return ((base + extra) / total) * 100.0
+
+    def _download_one(idx: int, track) -> Optional[str]:
+        nonlocal completed
+        if _download_cancel_requested(cancel_event) or cancelled.is_set():
+            return None
         _wait_if_paused(cancel_event)
-        if _download_cancel_requested(cancel_event):
-            _emit_download_state(progress_hook, active=False, percent=((idx - 1) / total) * 100.0, label="Download cancelled", detail=f"{idx - 1}/{total} file(s)", can_cancel=False)
-            return saved
+        if _download_cancel_requested(cancel_event) or cancelled.is_set():
+            return None
 
         url = _track_url(track)
-        if not url:
-            continue
-
         title = _safe_filename(
             track.get("title", f"track_{idx}") if isinstance(track, dict) else f"track_{idx}"
         )
-        outtmpl = str(outdir / f"{idx:03d} - {title} [%(id)s].%(ext)s")
+        if not url:
+            with progress_lock:
+                completed += 1
+            return None
 
+        # Stagger concurrent workers so requests don't land in a tight burst —
+        # that pattern is what trips YouTube's bot-check, more than the sheer
+        # number of downloads.
+        _deadline = time.monotonic() + random.uniform(0.4, 1.4)
+        while time.monotonic() < _deadline:
+            if _download_cancel_requested(cancel_event) or cancelled.is_set():
+                return None
+            time.sleep(0.1)
+
+        outtmpl = str(outdir / f"{idx:03d} - {title} [%(id)s].%(ext)s")
         _emit_download_state(
-            progress_hook,
-            active=True,
-            percent=((idx - 1) / total) * 100.0,
-            label="Preparing audio download",
-            detail=f"{idx}/{total} · {title}",
-            can_cancel=True,
+            progress_hook, active=True, percent=_overall_percent(),
+            label="Downloading audio", detail=f"{idx}/{total} · {title}", can_cancel=True,
         )
 
         def _hook(data: dict):
             _wait_if_paused(cancel_event)
-            if _download_cancel_requested(cancel_event):
-                raise DownloadCancelled()
+            if _download_cancel_requested(cancel_event) or cancelled.is_set():
+                # Only KeyboardInterrupt actually stops yt-dlp mid-download —
+                # any other exception raised here is caught and ignored by yt-dlp.
+                raise KeyboardInterrupt("download cancelled")
             status = data.get("status")
             if status == "downloading":
                 downloaded = float(data.get("downloaded_bytes") or 0)
                 total_bytes = float(data.get("total_bytes") or data.get("total_bytes_estimate") or 0)
-                inner = (downloaded / total_bytes * 100.0) if total_bytes > 0 else 0.0
-                overall = (((idx - 1) + (inner / 100.0)) / total) * 100.0
+                inner = (downloaded / total_bytes) if total_bytes > 0 else 0.0
                 detail = f"{idx}/{total} · {title}"
                 speed = data.get("speed")
                 eta = data.get("eta")
@@ -867,9 +956,9 @@ def download_audio_tracks(tracks, output_dir: str = "", quality: str = "", progr
                     extra.append(f"ETA {int(eta)}s")
                 if extra:
                     detail = f"{detail} · " + " · ".join(extra)
-                _emit_download_state(progress_hook, active=True, percent=overall, label="Downloading audio", detail=detail, can_cancel=True)
+                _emit_download_state(progress_hook, active=True, percent=_overall_percent(inner), label="Downloading audio", detail=detail, can_cancel=True)
             elif status == "finished":
-                _emit_download_state(progress_hook, active=True, percent=(idx / total) * 100.0, label="Finalizing audio", detail=f"{idx}/{total} · {title}", can_cancel=True)
+                _emit_download_state(progress_hook, active=True, percent=_overall_percent(1.0), label="Finalizing audio", detail=f"{idx}/{total} · {title}", can_cancel=True)
 
         opts = {
             "format": format_selector,
@@ -879,36 +968,58 @@ def download_audio_tracks(tracks, output_dir: str = "", quality: str = "", progr
             "no_warnings": True,
             "restrictfilenames": False,
             "progress_hooks": [_hook],
+            **_cookie_opts(),
         }
 
+        path: Optional[str] = None
         try:
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if info:
-                    saved.append(str(Path(ydl.prepare_filename(info))))
-        except DownloadCancelled:
-            _emit_download_state(progress_hook, active=False, percent=((idx - 1) / total) * 100.0, label="Download cancelled", detail=f"{idx}/{total} · {title}", can_cancel=False)
-            return saved
+                    path = str(Path(ydl.prepare_filename(info)))
+        except (KeyboardInterrupt, DownloadCancelled):
+            cancelled.set()
         except Exception as e:
-            _DOWNLOAD_STATE.setdefault("last_failed", []).append({
-                "title": title,
-                "url": url,
-                "quality": quality or _DOWNLOAD_STATE.get("audio_quality", "best"),
-                "error": str(e)[:120],
-            })
-            _save_download_state(_DOWNLOAD_STATE)
+            with _DOWNLOAD_STATE_LOCK:
+                _DOWNLOAD_STATE.setdefault("last_failed", []).append({
+                    "title": title,
+                    "url": url,
+                    "quality": quality or _DOWNLOAD_STATE.get("audio_quality", "best"),
+                    "error": str(e)[:120],
+                })
+                _save_download_state(_DOWNLOAD_STATE)
             _emit_download_state(
-                progress_hook,
-                active=True,
-                percent=((idx - 1) / total) * 100.0,
-                label="Skipping unavailable track",
-                detail=f"{idx}/{total} · {title} · {str(e)[:80]}",
-                can_cancel=True,
+                progress_hook, active=True, percent=_overall_percent(),
+                label="Skipping unavailable track", detail=f"{idx}/{total} · {title} · {str(e)[:80]}", can_cancel=True,
             )
-            continue
+        finally:
+            with progress_lock:
+                completed += 1
+        return path
 
-    _emit_download_state(progress_hook, active=False, percent=100.0 if saved else 0.0, label="Download complete", detail=f"{len(saved)} file(s)", can_cancel=False)
+    workers = max(1, min(int(max_workers or 1), total))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = []
+        for idx, track in enumerate(items, start=1):
+            if _download_cancel_requested(cancel_event) or cancelled.is_set():
+                break
+            futures.append(pool.submit(_download_one, idx, track))
+        for fut in futures:
+            try:
+                result = fut.result()
+            except Exception:
+                result = None
+            if result:
+                with saved_lock:
+                    saved.append(result)
 
+    was_cancelled = cancelled.is_set() or _download_cancel_requested(cancel_event)
+    _emit_download_state(
+        progress_hook, active=False,
+        percent=_overall_percent() if was_cancelled else (100.0 if saved else 0.0),
+        label="Download cancelled" if was_cancelled else "Download complete",
+        detail=f"{len(saved)} file(s)", can_cancel=False,
+    )
     return saved
 
 

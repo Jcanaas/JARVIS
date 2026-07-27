@@ -56,6 +56,17 @@ def config_path(*parts) -> Path:
     return CONFIG_DIR.joinpath(*parts)
 
 
+def find_node() -> str | None:
+    """Prefer the bundled Node runtime; fall back to a system install."""
+    for candidate in (
+        RESOURCE_DIR / "node" / "node.exe",
+        RESOURCE_DIR / "node" / "bin" / "node",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("node")
+
+
 def memory_path(*parts) -> Path:
     """Path inside the writable memory directory."""
     return MEMORY_DIR.joinpath(*parts)

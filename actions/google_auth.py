@@ -138,15 +138,24 @@ def get_google_service(api_name: str, api_version: str):
             # listens on IPv4, which makes the OAuth redirect fail with
             # ERR_CONNECTION_REFUSED. Using 127.0.0.1 for both the bind address
             # and the redirect URI avoids that mismatch.
-            creds = flow.run_local_server(
-                host="127.0.0.1",
-                port=0,
-                open_browser=True,
-                success_message=(
-                    "Autenticacion completada. Ya puedes cerrar esta pestana "
-                    "y volver a Jarvis."
-                ),
-            )
+            try:
+                creds = flow.run_local_server(
+                    host="127.0.0.1",
+                    port=0,
+                    open_browser=True,
+                    success_message=(
+                        "Autenticacion completada. Ya puedes cerrar esta pestana "
+                        "y volver a Jarvis."
+                    ),
+                )
+            finally:
+                # Dismiss the "a browser will open" notice as soon as the flow
+                # ends (success or failure) instead of leaving it up 45 s.
+                try:
+                    from actions.auth_dialog import close_gcal_auth_pending_dialog
+                    close_gcal_auth_pending_dialog()
+                except Exception:
+                    pass
             TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
 
     return build(api_name, api_version, credentials=creds)

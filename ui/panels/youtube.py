@@ -99,13 +99,22 @@ class _PanelControls(QWidget):
     keeps its existing wiring.
     """
 
-    def __init__(self, panel, video_box, is_active=None):
+    def __init__(self, panel, video_box, is_active=None, on_click=None, on_double=None):
         super().__init__(panel)
         self._panel = panel
         self._box = video_box
         # Optional predicate deciding when the bar may show. Defaults to the
         # YouTube panel's own layout check; other panels pass their own.
         self._is_active = is_active
+        # Click-on-video callbacks (single = play/pause, double = fullscreen).
+        # Debounced so a double-click doesn't also fire the single-click toggle.
+        self._on_click = on_click
+        self._on_double = on_double
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(QApplication.doubleClickInterval())
+        if on_click is not None:
+            self._click_timer.timeout.connect(on_click)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -121,6 +130,8 @@ class _PanelControls(QWidget):
         bar_l.setSpacing(10)
 
         self.play_btn = _MediaBtn(_MediaBtn.PLAY)
+        self.back_btn = _icon_button("backward", "Retroceder 10 s", size=36, icon_size=18)
+        self.fwd_btn = _icon_button("forward", "Adelantar 10 s", size=36, icon_size=18)
         self.time_lbl = QLabel("0:00 / 0:00")
         self.time_lbl.setStyleSheet("color: #FFFFFF; font-size: 11px; background: transparent;")
         self.seek = _SeekSlider(Qt.Orientation.Horizontal)
@@ -161,8 +172,17 @@ class _PanelControls(QWidget):
         self.subs_btn.hide()
         self.float_btn = _icon_button("pip", "Vídeo flotante", size=36, icon_size=18)
         self.fullscreen_btn = _icon_button("fullscreen", "Pantalla completa", size=36, icon_size=18)
+        # White icons: the default TEXT_DIM grey washes out over video.
+        for _name, _btn in (("backward", self.back_btn), ("forward", self.fwd_btn),
+                            ("download", self.download_btn), ("audio", self.audio_btn),
+                            ("pip", self.float_btn), ("fullscreen", self.fullscreen_btn)):
+            _btn.setIcon(_line_icon(_name, "#FFFFFF", 18))
 
+        bar_l.addStretch()
+        bar_l.addWidget(self.back_btn)
         bar_l.addWidget(self.play_btn)
+        bar_l.addWidget(self.fwd_btn)
+        bar_l.addStretch()
         bar_l.addWidget(self.time_lbl)
         bar_l.addWidget(self.seek, stretch=1)
         bar_l.addWidget(self.vol_icon)
@@ -176,6 +196,8 @@ class _PanelControls(QWidget):
         bar_l.addWidget(self.fullscreen_btn)
 
         self._bar.hide()
+        self._last_cursor = None
+        self._idle_ms = 0
         self._timer = QTimer(self)
         self._timer.setInterval(150)
         self._timer.timeout.connect(self._sync)
@@ -183,6 +205,21 @@ class _PanelControls(QWidget):
 
     def resizeEvent(self, event):
         self._bar.setGeometry(0, self.height() - 62, self.width(), 62)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._on_click is not None:
+            self._click_timer.start()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._on_double is not None:
+            self._click_timer.stop()
+            self._on_double()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def _sync(self):
         panel = self._panel
@@ -211,10 +248,26 @@ class _PanelControls(QWidget):
         if not self.isVisible():
             self.show()
             self.raise_()
-        inside = rect.contains(QCursor.pos())
-        if inside != self._bar.isVisible():
-            self._bar.setVisible(inside)
-            if inside:
+        # Show the bar while the cursor is inside AND recently moved (or is
+        # hovering the bar itself); hide after ~2.5 s idle so the gradient
+        # doesn't sit permanently over the video.
+        pos = QCursor.pos()
+        inside = rect.contains(pos)
+        moved = self._last_cursor is None or pos != self._last_cursor
+        self._last_cursor = pos
+        if not inside:
+            visible = False
+            self._idle_ms = 0
+        elif moved:
+            visible = True
+            self._idle_ms = 0
+        else:
+            self._idle_ms += self._timer.interval()
+            over_bar = self._bar.isVisible() and self._bar.geometry().contains(self.mapFromGlobal(pos))
+            visible = over_bar or self._idle_ms < 2500
+        if visible != self._bar.isVisible():
+            self._bar.setVisible(visible)
+            if visible:
                 self._bar.raise_()
 
 
@@ -469,7 +522,9 @@ class YouTubeModePanel(QWidget):
         pp.addLayout(video_holder)
 
         # --- YouTube-style controls overlaid on the video (shown on hover) ---
-        self._pc = _PanelControls(self, self.video_box)
+        self._pc = _PanelControls(self, self.video_box,
+                                  on_click=self._toggle_play,
+                                  on_double=self._toggle_fullscreen_video)
         self.play_btn = self._pc.play_btn
         self.seek = self._pc.seek
         self.time_lbl = self._pc.time_lbl
@@ -480,9 +535,12 @@ class YouTubeModePanel(QWidget):
         self.fullscreen_btn = self._pc.fullscreen_btn
         self.like_btn.setToolTip("Me gusta (en tu cuenta de YouTube)")
         for _b in (self.play_btn, self.seek, self.volume, self.like_btn,
+                   self._pc.back_btn, self._pc.fwd_btn,
                    self.download_btn, self.float_btn, self.fullscreen_btn):
             _b.setEnabled(False)
         self.play_btn.clicked.connect(self._toggle_play)
+        self._pc.back_btn.clicked.connect(self._rewind_video)
+        self._pc.fwd_btn.clicked.connect(self._forward_video)
         self.seek.sliderPressed.connect(lambda: setattr(self, "_user_dragging", True))
         self.seek.sliderReleased.connect(self._on_seek_released)
         self.volume.valueChanged.connect(self._on_volume)
@@ -752,7 +810,8 @@ class YouTubeModePanel(QWidget):
         self._liked = False
         self.like_btn.set_liked(False)
         for _b in (self.like_btn, self.download_btn, self.float_btn,
-                   self.fullscreen_btn, self.play_btn, self.seek, self.volume):
+                   self.fullscreen_btn, self.play_btn, self.seek, self.volume,
+                   self._pc.back_btn, self._pc.fwd_btn):
             _b.setEnabled(True)
         self.title_lbl.setText(video.get("title", ""))
         self.channel_lbl.setText(video.get("channel", ""))
@@ -1228,8 +1287,8 @@ class YouTubeModePanel(QWidget):
         if win is not None:
             win.close()
             win.deleteLater()
-        self.fullscreen_btn.setIcon(_line_icon("fullscreen", C.TEXT_DIM, 18))
-        self.float_btn.setIcon(_line_icon("pip", C.TEXT_DIM, 18))
+        self.fullscreen_btn.setIcon(_line_icon("fullscreen", "#FFFFFF", 18))
+        self.float_btn.setIcon(_line_icon("pip", "#FFFFFF", 18))
         QTimer.singleShot(0, self._size_video)
 
     def _prev_video(self):

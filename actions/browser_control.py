@@ -309,6 +309,38 @@ def _resolve_browser(name: str) -> dict | None:
     return {"engine": engine, "exe": exe, "channel": channel}
 
 
+_BROWSER_EXE_NAMES = {
+    "chrome":  "chrome.exe",
+    "edge":    "msedge.exe",
+    "brave":   "brave.exe",
+    "vivaldi": "vivaldi.exe",
+    "opera":   "opera.exe",
+    "operagx": "opera.exe",
+    "firefox": "firefox.exe",
+}
+
+
+def _browser_process_running(browser_name: str) -> bool:
+    """
+    True if the user already has this browser open on Windows. Launching a
+    persistent context on the REAL profile is guaranteed to fail then
+    (ProcessSingleton lock) — checking first skips a slow doomed launch.
+    """
+    if _OS != "Windows":
+        return False
+    exe = _BROWSER_EXE_NAMES.get(browser_name)
+    if not exe:
+        return False
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        return exe.lower() in out.lower()
+    except Exception:
+        return False
+
+
 def _detect_default_browser() -> str:
     try:
         if _OS == "Windows":
@@ -493,14 +525,20 @@ class _BrowserSession:
             + (f" @ {exe}" if exe else "")
         )
 
-        try:
-            self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
-            await asyncio.sleep(0.5) 
-            self._page = await self._context.new_page()
-            print(f"[Browser] ✅ Launched [{label}] profile={profile}")
-            return
-        except Exception as e:
-            print(f"[Browser] ⚠️  Real profile failed for {label}: {e}")
+        skip_real_profile = _browser_process_running(self.browser_name)
+        if skip_real_profile:
+            print(f"[Browser] {self.browser_name} is already running — real profile is "
+                  f"locked, going straight to JARVIS profile (no logged-in sessions there)")
+
+        if not skip_real_profile:
+            try:
+                self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
+                await asyncio.sleep(0.5)
+                self._page = await self._context.new_page()
+                print(f"[Browser] ✅ Launched [{label}] profile={profile}")
+                return
+            except Exception as e:
+                print(f"[Browser] ⚠️  Real profile failed for {label}: {e}")
 
         jarvis_profile = str(Path.home() / ".jarvis_profiles" / self.browser_name)
         Path(jarvis_profile).mkdir(parents=True, exist_ok=True)
@@ -553,7 +591,7 @@ class _BrowserSession:
 
         if result_url and result_url not in ("about:blank", "", None):
             return f"Opened: {result_url}"
-        return f"Could not open: {url}"
+        return f"ERROR: Could not open: {url}"
 
     async def search(self, query: str, engine: str = "google") -> str:
         _engines = {
@@ -574,11 +612,11 @@ class _BrowserSession:
             if selector:
                 await page.click(selector, timeout=8_000)
                 return f"Clicked selector: {selector}"
-            return "No selector or text provided."
+            return "ERROR: No selector or text provided."
         except PlaywrightTimeout:
-            return "Element not found (timeout)."
+            return "ERROR: Element not found (timeout)."
         except Exception as e:
-            return f"Click error: {e}"
+            return f"ERROR: Click error: {e}"
 
     async def type_text(self, selector: str = None, text: str = "",
                         clear_first: bool = True) -> str:
@@ -590,7 +628,7 @@ class _BrowserSession:
             await el.type(text, delay=50)
             return "Text typed."
         except Exception as e:
-            return f"Type error: {e}"
+            return f"ERROR: Type error: {e}"
 
     async def scroll(self, direction: str = "down", amount: int = 500) -> str:
         page = await self._get_page()
@@ -599,7 +637,7 @@ class _BrowserSession:
             await page.mouse.wheel(0, y)
             return f"Scrolled {direction}."
         except Exception as e:
-            return f"Scroll error: {e}"
+            return f"ERROR: Scroll error: {e}"
 
     async def press(self, key: str) -> str:
         page = await self._get_page()
@@ -607,7 +645,7 @@ class _BrowserSession:
             await page.keyboard.press(key)
             return f"Pressed: {key}"
         except Exception as e:
-            return f"Key error: {e}"
+            return f"ERROR: Key error: {e}"
 
     async def get_text(self) -> str:
         page = await self._get_page()
@@ -615,11 +653,134 @@ class _BrowserSession:
             text = await page.inner_text("body")
             return text[:4_000]
         except Exception as e:
-            return f"Could not get page text: {e}"
+            return f"ERROR: Could not get page text: {e}"
 
     async def get_url(self) -> str:
         page = await self._get_page()
         return page.url
+
+    async def get_state(self) -> str:
+        """
+        Compact snapshot for a reactive agent loop: URL, title, and an ARIA
+        tree (role + accessible name + [ref=eN] per element, same primitive
+        Playwright's own MCP tool uses). The refs can be acted on directly
+        via click_ref/type_ref, which is far more reliable than matching
+        elements by guessed names on dynamic pages like LinkedIn.
+        """
+        page = await self._get_page()
+        try:
+            url   = page.url
+            title = await page.title()
+
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+            except Exception:
+                pass
+
+            # If a modal dialog is open, snapshot ONLY the dialog: on heavy
+            # pages (LinkedIn feed) the full-page tree blows past the size
+            # cap and the dialog — the thing the agent actually needs to act
+            # on — gets truncated away. A focused snapshot also keeps refs
+            # valid, since refs are reassigned per snapshot call.
+            dialog_note = ""
+            tree = ""
+            try:
+                dialogs = page.locator('[role="dialog"], [aria-modal="true"]')
+                n = await dialogs.count()
+                for i in range(n - 1, -1, -1):
+                    dlg = dialogs.nth(i)
+                    if await dlg.is_visible():
+                        tree = await dlg.aria_snapshot(mode="ai", timeout=15_000)
+                        dialog_note = (
+                            "AN OPEN DIALOG IS FOCUSED — the snapshot below shows ONLY the "
+                            "dialog. Interact with its elements (or press Escape to close it).\n"
+                        )
+                        break
+            except Exception:
+                tree = ""
+
+            if not tree.strip():
+                try:
+                    tree = await page.aria_snapshot(mode="ai", timeout=20_000)
+                except Exception as e:
+                    print(f"[Browser] aria_snapshot failed ({e}), falling back to JS extraction")
+
+            if not tree.strip():
+                # Fallback: pull interactive elements straight from the DOM so
+                # the agent is never left completely blind on heavy pages.
+                try:
+                    items = await page.evaluate(
+                        """() => {
+                            const out = [];
+                            const els = document.querySelectorAll(
+                                'button, a[href], input, textarea, select, ' +
+                                '[role=button], [role=link], [role=textbox], [contenteditable=true]'
+                            );
+                            for (const el of els) {
+                                if (out.length >= 120) break;
+                                const r = el.getBoundingClientRect();
+                                if (r.width < 2 || r.height < 2) continue;
+                                const name = (
+                                    el.getAttribute('aria-label') ||
+                                    el.innerText ||
+                                    el.getAttribute('placeholder') ||
+                                    el.getAttribute('title') || ''
+                                ).trim().replace(/\\s+/g, ' ').slice(0, 80);
+                                if (!name) continue;
+                                const role = el.getAttribute('role') || el.tagName.toLowerCase();
+                                out.push('- ' + role + ' \"' + name + '\"');
+                            }
+                            return out.join('\\n');
+                        }"""
+                    )
+                    tree = "(no refs available — DOM fallback, use smart_click/smart_type by name)\n" + items
+                except Exception as e:
+                    tree = f"(page structure unavailable: {e})"
+
+            state = (
+                f"URL: {url}\n"
+                f"Title: {title}\n\n"
+                f"{dialog_note}"
+                f"Page structure (role \"accessible name\" [ref=eN]):\n{tree[:6_500]}"
+            )
+            return state[:8_000]
+        except Exception as e:
+            return f"ERROR: Could not get page state: {e}"
+
+    async def click_ref(self, ref: str) -> str:
+        """Click the element with the given [ref=eN] from the last get_state snapshot."""
+        page = await self._get_page()
+        ref = str(ref).strip().lstrip("[").rstrip("]").replace("ref=", "").strip()
+        if not ref:
+            return "ERROR: No ref provided."
+        try:
+            await page.locator(f"aria-ref={ref}").click(timeout=8_000)
+            return f"Clicked ref: {ref}"
+        except PlaywrightTimeout:
+            return f"ERROR: Ref '{ref}' not found or not clickable (stale snapshot? call get_state again)."
+        except Exception as e:
+            return f"ERROR: Click ref error: {e}"
+
+    async def type_ref(self, ref: str, text: str, clear_first: bool = True) -> str:
+        """Type into the element with the given [ref=eN] from the last get_state snapshot."""
+        page = await self._get_page()
+        ref = str(ref).strip().lstrip("[").rstrip("]").replace("ref=", "").strip()
+        if not ref:
+            return "ERROR: No ref provided."
+        try:
+            el = page.locator(f"aria-ref={ref}")
+            await el.click(timeout=8_000)
+            if clear_first:
+                try:
+                    await el.clear(timeout=3_000)
+                except Exception:
+                    pass  # contenteditable composers often reject clear(); typing still works
+            await el.type(text, delay=30)
+            return f"Typed into ref: {ref}"
+        except PlaywrightTimeout:
+            return f"ERROR: Ref '{ref}' not found (stale snapshot? call get_state again)."
+        except Exception as e:
+            return f"ERROR: Type ref error: {e}"
 
     async def fill_form(self, fields: dict) -> str:
         page    = await self._get_page()
@@ -632,13 +793,20 @@ class _BrowserSession:
                 results.append(f"✓ {selector}")
             except Exception as e:
                 results.append(f"✗ {selector}: {e}")
-        return "Form filled: " + ", ".join(results)
+        summary = "Form filled: " + ", ".join(results)
+        if any("✗" in r for r in results):
+            return f"ERROR: {summary}"
+        return summary
 
     async def smart_click(self, description: str) -> str:
+        import re as _re
         page = await self._get_page()
+        # Substring + case-insensitive name matching: exact accessible names
+        # on dynamic/localized pages are rarely guessed right on the first try.
+        name_pattern = _re.compile(_re.escape(description), _re.IGNORECASE)
         for role in ("button", "link", "searchbox", "textbox", "menuitem", "tab"):
             try:
-                loc = page.get_by_role(role, name=description)
+                loc = page.get_by_role(role, name=name_pattern)
                 if await loc.count() > 0:
                     await loc.first.click(timeout=5_000)
                     return f"Clicked ({role}): '{description}'"
@@ -657,7 +825,7 @@ class _BrowserSession:
                 return f"Clicked: '{description}'"
             except Exception:
                 pass
-        return f"Could not find element: '{description}'"
+        return f"ERROR: Could not find element: '{description}'"
 
     async def smart_type(self, description: str, text: str) -> str:
         page = await self._get_page()
@@ -678,7 +846,7 @@ class _BrowserSession:
                 return f"Typed into ({method}): '{description}'"
             except Exception:
                 continue
-        return f"Could not find input: '{description}'"
+        return f"ERROR: Could not find input: '{description}'"
 
     async def new_tab(self, url: str = "") -> str:
         page = await self._get_page()
@@ -697,7 +865,7 @@ class _BrowserSession:
             pages = ctx.pages
             self._page = pages[-1] if pages else None
             return "Tab closed."
-        return "No active tab to close."
+        return "ERROR: No active tab to close."
 
     async def screenshot(self, path: str = None) -> str:
         page = await self._get_page()
@@ -706,7 +874,7 @@ class _BrowserSession:
             await page.screenshot(path=save_path, full_page=False)
             return f"Screenshot saved: {save_path}"
         except Exception as e:
-            return f"Screenshot error: {e}"
+            return f"ERROR: Screenshot error: {e}"
 
     async def back(self) -> str:
         page = await self._get_page()
@@ -714,7 +882,7 @@ class _BrowserSession:
             await page.go_back(timeout=10_000)
             return f"Navigated back: {page.url}"
         except Exception as e:
-            return f"Back error: {e}"
+            return f"ERROR: Back error: {e}"
 
     async def forward(self) -> str:
         page = await self._get_page()
@@ -722,7 +890,7 @@ class _BrowserSession:
             await page.go_forward(timeout=10_000)
             return f"Navigated forward: {page.url}"
         except Exception as e:
-            return f"Forward error: {e}"
+            return f"ERROR: Forward error: {e}"
 
     async def reload(self) -> str:
         page = await self._get_page()
@@ -730,7 +898,7 @@ class _BrowserSession:
             await page.reload(timeout=15_000)
             return f"Page reloaded: {page.url}"
         except Exception as e:
-            return f"Reload error: {e}"
+            return f"ERROR: Reload error: {e}"
 
     async def close_browser(self) -> str:
         await self._async_close()
@@ -811,11 +979,11 @@ def browser_control(
     params  = parameters or {}
     action  = params.get("action", "").lower().strip()
     browser = params.get("browser", "").lower().strip() or None
-    result  = "Unknown action."
+    result  = "ERROR: Unknown action."
 
     if action == "switch":
         target = browser or params.get("target", "").lower().strip()
-        result = _registry.switch(target) if target else "Please specify a browser."
+        result = _registry.switch(target) if target else "ERROR: Please specify a browser."
         _log(result)
         return result
 
@@ -832,7 +1000,7 @@ def browser_control(
     try:
         sess = _registry.get(browser)
     except Exception as e:
-        result = f"Could not start browser session: {e}"
+        result = f"ERROR: Could not start browser session: {e}"
         _log(result)
         return result
 
@@ -858,6 +1026,13 @@ def browser_control(
             result = sess.run(sess.get_text())
         elif action == "get_url":
             result = sess.run(sess.get_url())
+        elif action == "get_state":
+            result = sess.run(sess.get_state(), timeout=90)
+        elif action == "click_ref":
+            result = sess.run(sess.click_ref(params.get("ref", "")))
+        elif action == "type_ref":
+            result = sess.run(sess.type_ref(
+                params.get("ref", ""), params.get("text", ""), params.get("clear_first", True)))
         elif action == "press":
             result = sess.run(sess.press(params.get("key", "Enter")))
         elif action == "new_tab":
@@ -874,14 +1049,14 @@ def browser_control(
             result = sess.run(sess.reload())
         elif action == "close":
             target = browser or _registry._active_browser
-            result = _registry.close_one(target) if target else "No browser specified."
+            result = _registry.close_one(target) if target else "ERROR: No browser specified."
         else:
-            result = f"Unknown browser action: '{action}'"
+            result = f"ERROR: Unknown browser action: '{action}'"
 
     except concurrent.futures.TimeoutError:
-        result = f"Browser action '{action}' timed out (60s)."
+        result = f"ERROR: Browser action '{action}' timed out (60s)."
     except Exception as e:
-        result = f"Browser error ({action}): {e}"
+        result = f"ERROR: Browser error ({action}): {e}"
 
     _log(result)
     return result
