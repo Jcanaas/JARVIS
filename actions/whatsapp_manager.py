@@ -56,8 +56,22 @@ class WhatsAppManager:
         start_thread: bool = True,
         on_unanswered_reminder=None,
         reminder_after_secs: float = 3 * 3600,
+        startup_grace_secs: float = 15.0,
+        backlog_age_secs: float = 90.0,
+        flood_threshold: int = 4,
     ):
         self.poll_interval = poll_interval
+        # Startup flood guard: WhatsApp Web re-syncing on connect can dump a
+        # burst of messages the user already read on their phone, each
+        # tagged with a "just arrived" timestamp. Anything that shows up
+        # inside this grace window after start, or that's already old by the
+        # time it's seen, or that arrives as part of a big burst, is flagged
+        # backlog=True so callers (main.py's announcer) can skip the TTS
+        # readout + floating notification for it while still keeping it in
+        # the pending list for the chat UI.
+        self._startup_deadline = time.monotonic() + max(0.0, startup_grace_secs)
+        self.backlog_age_secs = backlog_age_secs
+        self.flood_threshold = flood_threshold
         # "Responder esto" reminder: nudge once per message if an incoming
         # message sits unanswered (not in _pending as sent) past this long.
         self.on_unanswered_reminder = on_unanswered_reminder
@@ -145,6 +159,17 @@ class WhatsAppManager:
                                 continue
                             self._seen.add(mid)
                             from_me = bool(m.get('fromMe')) or str(m.get('direction') or '').lower() == 'out'
+                            try:
+                                msg_age_s = (
+                                    int(time.time() * 1000)
+                                    - int(m.get('waTs') or m.get('timestamp') or 0)
+                                ) / 1000.0
+                            except (TypeError, ValueError):
+                                msg_age_s = 0.0
+                            is_backlog = (
+                                time.monotonic() < self._startup_deadline
+                                or msg_age_s > self.backlog_age_secs
+                            )
                             entry = {
                                 'id': mid,
                                 # 'from' is used throughout as "the chat this
@@ -175,6 +200,7 @@ class WhatsAppManager:
                                 'quoted': m.get('quoted') or None,
                                 'draft': None,
                                 'sent': False,
+                                'is_backlog': is_backlog,
                             }
                             self._pending[mid] = entry
                             new_entries.append(entry)
@@ -185,6 +211,14 @@ class WhatsAppManager:
                         # could skip a message arriving between the HTTP response and
                         # this assignment.
                         self._last_ts = newest_timestamp
+
+                    # A burst this size is a reconnect/sync dump, not someone
+                    # actually messaging you several times in 1.5s — flag the
+                    # whole tick as backlog even if individual ages looked fresh.
+                    incoming = [e for e in new_entries if not e.get('fromMe')]
+                    if len(incoming) > self.flood_threshold:
+                        for entry in incoming:
+                            entry['is_backlog'] = True
                     # notify outside lock
                     for edit_entry in edit_entries:
                         for listener in list(self._edit_listeners):

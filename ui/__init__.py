@@ -123,6 +123,9 @@ class MainWindow(QMainWindow):
     _camera_start_sig = pyqtSignal()
     _camera_stop_sig  = pyqtSignal()
     _karaoke_sig = pyqtSignal(str, tuple)
+    _translate_start_sig = pyqtSignal(str, float)
+    _translate_stop_sig  = pyqtSignal()
+    _translate_text_sig  = pyqtSignal(str)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -149,7 +152,11 @@ class MainWindow(QMainWindow):
         self._wa_avatar_cache: dict[str, bytes] = {}
         self._wa_unread_count = 0
         self._wa_unread_fetching = False
-        self._right_collapsed = True
+        # Persisted across restarts via app_settings ("right_panel_collapsed") —
+        # do NOT hardcode this back to True/False, it silently reverts the
+        # user's fold/unfold choice on every launch (regression fixed once already).
+        from actions import app_settings as _app_settings
+        self._right_collapsed = bool(_app_settings.get("right_panel_collapsed", False))
         self._current_file: str | None = None
         self._mode_combo: QComboBox | None = None
         self._mode_buttons: dict[str, QPushButton] = {}
@@ -247,6 +254,9 @@ class MainWindow(QMainWindow):
         self._camera_start_sig.connect(self.start_camera_stream)
         self._camera_stop_sig.connect(self.stop_camera_stream)
         self._karaoke_sig.connect(self._apply_karaoke_lyrics)
+        self._translate_start_sig.connect(self._start_screen_translate)
+        self._translate_stop_sig.connect(self._stop_screen_translate)
+        self._translate_text_sig.connect(self._apply_translate_text)
 
         # Persistent downloads: the manager fires its listener on a worker
         # thread, so bounce the snapshot onto the Qt thread via a signal. Then
@@ -297,6 +307,8 @@ class MainWindow(QMainWindow):
         self._music_duck_target = 42
         self._music_duck_floor = 34
         self._music_duck_step = 2
+        self._translate_overlay: "_TranslateOverlayWindow | None" = None
+        self._translate_stop_flag: "threading.Event | None" = None
         self._music_duck_active = False
         self._music_duck_should_restore = False
         self._music_duck_timer = QTimer(self)
@@ -313,6 +325,8 @@ class MainWindow(QMainWindow):
         self.on_playback_command = None  # callback: fn(action, params)
         self._music_float: _MusicFloatWindow | None = None
 
+        # Do NOT remove/reorder: loads mic_default_state/mic_last_state from
+        # app_settings so mic startup config survives restart (regression risk).
         self._load_mic_state_from_config()
         self._apply_startup_settings()
 
@@ -433,8 +447,12 @@ class MainWindow(QMainWindow):
         self._camera_live.stop()
 
     def _toggle_right_panel(self):
-        """Pliega/despliega el panel derecho (sesión, archivos y comando)."""
+        """Pliega/despliega el panel derecho (sesión, archivos y comando).
+        Persist choice — see comment on self._right_collapsed init, must
+        survive restart or the user's fold state resets every launch."""
         self._right_collapsed = not self._right_collapsed
+        from actions import app_settings
+        app_settings.set("right_panel_collapsed", self._right_collapsed)
         self._apply_right_panel_visibility()
         if self._right_collapsed:
             self._right_toggle_btn.setIcon(_line_icon("panel_open", C.TEXT_DIM, 18))
@@ -639,6 +657,18 @@ class MainWindow(QMainWindow):
             self._center_stack.addWidget(self._movies_panel)
         self._center_stack.setCurrentWidget(self._movies_panel)
         self._center_stack.setVisible(True)
+
+    def play_movie_from_assistant(self, query: str, kind: str = "movie"):
+        """Switch to Movies mode and hands-free play a title (AI assistant)."""
+        anime = (kind or "").lower() == "anime"
+        if anime:
+            self._show_anime_mode()
+            panel = self._anime_panel
+        else:
+            self._show_movies_mode()
+            panel = self._movies_panel
+        if panel is not None:
+            panel.assistant_play(query, "tv" if kind == "tv" else ("anime" if anime else "movie"))
 
     def _show_anime_mode(self):
         self._set_mode_combo("Anime")
@@ -1173,13 +1203,22 @@ class MainWindow(QMainWindow):
         self._pb_like = _LikeBtn()
         self._pb_like.setToolTip("Marcar como Me gusta")
         self._pb_like.setAccessibleName("Cambiar Me gusta de la canción")
+        self._pb_karaoke = _KaraokeToggleBtn()
+        self._pb_karaoke.setAccessibleName("Mostrar letra sincronizada")
+        self._pb_karaoke.clicked.connect(self._toggle_karaoke_float)
 
         ctrl = QHBoxLayout(); ctrl.setSpacing(8)
         ctrl.addWidget(self._pb_prev)
         ctrl.addWidget(self._pb_play)
         ctrl.addWidget(self._pb_next)
         ctrl.addWidget(self._pb_like)
+        ctrl.addWidget(self._pb_karaoke)
         lay.addLayout(ctrl)
+
+        self._karaoke_float: "_KaraokeFloatWindow | None" = None
+        self._karaoke_lines: tuple = ()
+        self._karaoke_key = ""          # track identity the loaded lines belong to
+        self._karaoke_searching = False
 
         # Track info + slider
         info = QVBoxLayout(); info.setSpacing(4)
@@ -1196,15 +1235,7 @@ class MainWindow(QMainWindow):
             "QSlider::handle:horizontal { background:#DCE1FF; width:12px; height:12px; margin:-4px 0; border-radius:6px; }"
             "QSlider::handle:horizontal:hover { background:#b6c4ff; }"
         )
-        self._karaoke_lbl = QLabel("")
-        self._karaoke_lbl.setFont(QFont(FONT_UI, 9))
-        self._karaoke_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-        self._karaoke_lbl.hide()
-        self._karaoke_lines: tuple = ()
-        self._karaoke_video_id = ""
-
         info.addWidget(self._track_lbl)
-        info.addWidget(self._karaoke_lbl)
         info.addWidget(self._slider)
         lay.addLayout(info, stretch=1)
 
@@ -1438,7 +1469,6 @@ class MainWindow(QMainWindow):
             self._pb_like.setToolTip(
                 "Comprobando Me gusta..." if liked is None else "Marcar como Me gusta"
             )
-            self._fetch_karaoke_lyrics(video_id, title, artists)
         # Don't let the 1s poller override the button while the user's like
         # request is still in flight (avoids the toggle flickering back).
         if liked is not None and not self._like_pending:
@@ -1455,13 +1485,33 @@ class MainWindow(QMainWindow):
         elif title and self._play_state == "buffering":
             txt += "  ·  Almacenando búfer…"
         self._track_lbl.setText(txt)
-        if self._karaoke_video_id == video_id and self._karaoke_lines:
-            from actions.lyrics import current_line
-            line = current_line(self._karaoke_lines, float(position or 0))
-            self._karaoke_lbl.setText(line)
-            self._karaoke_lbl.setVisible(bool(line))
-        else:
-            self._karaoke_lbl.hide()
+        if self._karaoke_float is not None:
+            # Isolated: a karaoke failure (e.g. the float widget getting
+            # destroyed under us) must never break the playback bar update.
+            try:
+                # Key by title|artists, not videoId: some playback paths never
+                # report a videoId and the lyrics lookup only needs metadata.
+                key = f"{title}|{artists}" if title else ""
+                track_txt = f"{title} — {artists}" if title else ""
+                if not key:
+                    self._karaoke_float.update_line("", "(no hay música sonando)")
+                elif key != self._karaoke_key:
+                    self._karaoke_key = key
+                    self._karaoke_lines = ()
+                    self._karaoke_float.update_line(track_txt, "Buscando letra…")
+                    self._fetch_karaoke_lyrics(key, title, artists)
+                elif self._karaoke_lines:
+                    from actions.lyrics import current_line
+                    line = current_line(self._karaoke_lines, float(position or 0))
+                    self._karaoke_float.update_line(track_txt, line or "♪")
+                elif not self._karaoke_searching:
+                    self._karaoke_float.update_line(track_txt, "(no encontré letra sincronizada)")
+            except RuntimeError:
+                # Underlying C++ widget deleted — drop the stale reference.
+                self._karaoke_float = None
+                self._pb_karaoke.set_active(False)
+            except Exception:
+                pass
         if duration and duration > 0:
             if not self._user_dragging:
                 pct = int((position / duration) * 100000)
@@ -1496,25 +1546,89 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _fetch_karaoke_lyrics(self, video_id: str, title: str, artists: str) -> None:
+    def _toggle_karaoke_float(self) -> None:
+        """Show/hide the floating karaoke overlay. Fetches lyrics for the
+        currently playing track the moment it's turned on."""
+        if self._karaoke_float is not None:
+            self._karaoke_float.close()
+            self._karaoke_float = None
+            self._karaoke_lines = ()
+            self._karaoke_key = ""
+            self._pb_karaoke.set_active(False)
+            return
+
+        self._karaoke_float = _KaraokeFloatWindow(on_close=self._toggle_karaoke_float)
+        self._karaoke_float.show()
+        self._pb_karaoke.set_active(True)
+        if self._play_title:
+            self._karaoke_key = f"{self._play_title}|{self._play_artists}"
+            self._karaoke_float.update_line(
+                f"{self._play_title} — {self._play_artists}", "Buscando letra…")
+            self._fetch_karaoke_lyrics(self._karaoke_key, self._play_title, self._play_artists)
+        else:
+            self._karaoke_float.update_line("", "(no hay música sonando)")
+
+    def _fetch_karaoke_lyrics(self, key: str, title: str, artists: str) -> None:
         """Look up synced lyrics for the new track on a worker thread (network
         call) and marshal the result back to the UI thread via a signal."""
         self._karaoke_lines = ()
-        self._karaoke_lbl.hide()
+        self._karaoke_searching = True
 
         def worker():
             from actions.lyrics import get_synced_lyrics
-            lines = get_synced_lyrics(title, artists)
-            self._karaoke_sig.emit(video_id, lines)
+            try:
+                lines = get_synced_lyrics(title, artists)
+            except Exception:
+                lines = ()
+            self._karaoke_sig.emit(key, lines)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_karaoke_lyrics(self, video_id: str, lines: tuple) -> None:
-        # The track may have changed again while the lookup was in flight.
-        if video_id != self._play_video_id:
+    def _apply_karaoke_lyrics(self, key: str, lines: tuple) -> None:
+        # The track (or the overlay) may have changed while the lookup was in flight.
+        if self._karaoke_float is None or key != self._karaoke_key:
             return
-        self._karaoke_video_id = video_id
+        self._karaoke_searching = False
         self._karaoke_lines = lines
+        if not lines:
+            track_txt = f"{self._play_title} — {self._play_artists}" if self._play_title else ""
+            self._karaoke_float.update_line(track_txt, "(no encontré letra sincronizada)")
+
+    def _start_screen_translate(self, target_lang: str, interval_secs: float) -> None:
+        """Open the OCR+translation overlay and start polling the screen on a
+        worker thread (translate_screen_text is a network call — never on
+        the Qt thread). Restarts cleanly if one was already running."""
+        if self._translate_overlay is not None:
+            self._stop_screen_translate()
+
+        overlay = _TranslateOverlayWindow(on_close=self._stop_screen_translate)
+        overlay.show()
+        self._translate_overlay = overlay
+        stop_flag = threading.Event()
+        self._translate_stop_flag = stop_flag
+
+        def worker():
+            from actions.screen_translator import translate_screen_text
+            while not stop_flag.is_set():
+                text = translate_screen_text(target_lang)
+                if stop_flag.is_set():
+                    return
+                self._translate_text_sig.emit(text)
+                stop_flag.wait(timeout=max(2.0, interval_secs))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_screen_translate(self) -> None:
+        if self._translate_stop_flag is not None:
+            self._translate_stop_flag.set()
+            self._translate_stop_flag = None
+        if self._translate_overlay is not None:
+            self._translate_overlay.close()
+            self._translate_overlay = None
+
+    def _apply_translate_text(self, text: str) -> None:
+        if self._translate_overlay is not None:
+            self._translate_overlay.update_text(text)
 
 
 
@@ -1903,6 +2017,14 @@ class JarvisUI:
             self._app.aboutToQuit.connect(_hl._cleanup_on_exit)
         except Exception:
             pass
+        # Stop the persistent WebTorrent streaming daemon (movies) on exit —
+        # it stays alive across plays for a warm DHT routing table, so it
+        # needs an explicit shutdown; nothing else kills it.
+        try:
+            from actions import vlc_player as _vp
+            self._app.aboutToQuit.connect(_vp.shutdown)
+        except Exception:
+            pass
         # Install cross-thread auth dialog poller (must run on main thread)
         try:
             from actions.auth_dialog import install_main_thread_poller
@@ -2040,6 +2162,26 @@ class JarvisUI:
         except Exception:
             pass
 
+    def start_screen_translate(self, target_lang: str = "es", interval_secs: float = 6.0):
+        """Thread-safe: puede llamarse desde el hilo del asyncio loop de JarvisLive."""
+        try:
+            self._win._translate_start_sig.emit(str(target_lang or "es"), float(interval_secs or 6.0))
+        except Exception:
+            pass
+
+    def stop_screen_translate(self):
+        """Thread-safe: puede llamarse desde el hilo del asyncio loop de JarvisLive."""
+        try:
+            self._win._translate_stop_sig.emit()
+        except Exception:
+            pass
+
+    def is_screen_translate_active(self) -> bool:
+        try:
+            return self._win._translate_overlay is not None
+        except Exception:
+            return False
+
     def wait_for_api_key(self):
         while not self._win._ready:
             time.sleep(0.1)
@@ -2086,5 +2228,12 @@ class JarvisUI:
     def request_download_cancel(self):
         try:
             self._win._request_download_cancel()
+        except Exception:
+            pass
+
+    def play_movie(self, query: str, kind: str = "movie"):
+        """Switch to Movies/Anime mode and hands-free play a title (assistant)."""
+        try:
+            self._win.play_movie_from_assistant(query, kind)
         except Exception:
             pass

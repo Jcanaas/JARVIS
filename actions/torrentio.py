@@ -31,17 +31,7 @@ _TIMEOUT = 12
 _PROVIDERS = "mejortorrent,wolfmax4k,cinecalidad,elitetorrent,yts,eztv,thepiratebay,1337x,torrentgalaxy,magnetdl,besttorrents"
 _ANIME_PROVIDERS = "nyaa,eztv,1337x"
 
-_TRACKERS = [
-    "udp://tracker.opentrackr.org:1337/announce",
-    "udp://open.demonii.com:1337/announce",
-    "udp://tracker.openbittorrent.com:6969/announce",
-    "udp://exodus.desync.com:6969/announce",
-    "udp://open.stealth.si:80/announce",
-    "udp://tracker.torrent.eu.org:451/announce",
-    "udp://tracker.tiny-vps.com:6969/announce",
-    "udp://tracker.moeking.me:6969/announce",
-    "udp://tracker.dler.org:6969/announce",
-]
+from actions.trackers import magnet_tracker_suffix
 
 # Torrentio tags language with a flag emoji, which is reliable; "dual" alone is
 # not (e.g. "Dual Japanese/English"), so it's excluded to avoid false positives.
@@ -78,8 +68,7 @@ class Stream:
 
 def _build_magnet(info_hash: str, name: str) -> str:
     from urllib.parse import quote
-    trackers = "".join(f"&tr={quote(t)}" for t in _TRACKERS)
-    return f"magnet:?xt=urn:btih:{info_hash}&dn={quote(name)}{trackers}"
+    return f"magnet:?xt=urn:btih:{info_hash}&dn={quote(name)}{magnet_tracker_suffix()}"
 
 
 def _parse_stream(item: dict) -> Stream | None:
@@ -164,7 +153,11 @@ def search(imdb_id: str, kind: str = "movie", season: int = 0, episode: int = 0,
         raise TorrentioError(f"No Torrentio streams for '{imdb_id}'.")
 
     if spanish:
-        streams.sort(key=lambda s: (s.spanish, s.seeders), reverse=True)
+        # Health-tiered: healthy streams first, Spanish preferred only among
+        # them, so a dead Castilian release can't crowd out live intl ones.
+        streams.sort(
+            key=lambda s: (s.seeders >= 3, s.seeders >= 3 and s.spanish, s.seeders),
+            reverse=True)
     else:
         streams.sort(key=lambda s: s.seeders, reverse=True)
 

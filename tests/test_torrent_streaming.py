@@ -1,5 +1,6 @@
 """Tests for torrent-based streaming (movie_search, torrent_search, vlc_player)."""
 import json
+import queue
 import sys
 import unittest
 from pathlib import Path
@@ -185,39 +186,120 @@ class TorrentSearchTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# VLC Player (WebTorrent stream)                                            #
+# VLC Player (persistent WebTorrent daemon)                                 #
 # --------------------------------------------------------------------------- #
+class _FakeDaemon:
+    """Stand-in for the daemon subprocess. stdin.write() enqueues the scripted
+    response(s) for that command's id onto a queue that stdout iterates from —
+    mirrors the real process's causal ordering (a response can't arrive before
+    its command was sent), which avoids racing the background reader thread
+    against test setup."""
+
+    def __init__(self, script: dict):
+        # script: {request_id: [response_dict, ...]} in emission order.
+        self._script = script
+        self._q = queue.Queue()
+        self.stdin = MagicMock()
+        self.stdin.write.side_effect = self._on_write
+        self.poll = MagicMock(return_value=None)
+        self.stdout = self
+
+    def _on_write(self, data):
+        msg = json.loads(data)
+        for resp in self._script.get(msg.get("id"), []):
+            self._q.put(json.dumps(resp) + "\n")
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self._q.get()
+
+
 class VLCPlayerTests(unittest.TestCase):
     def setUp(self):
-        vp._stream_process = None
+        vp._daemon_proc = None
+        vp._reader_thread = None
+        vp._pending_id = None
+        vp._pending_event.clear()
+        vp._pending_result = {}
+        vp._pending_progress_hook = None
 
+    @patch("actions.vlc_player.uuid.uuid4", return_value="req-1")
     @patch("actions.vlc_player._locate_node", return_value="node")
     @patch("actions.vlc_player.subprocess.Popen")
-    def test_start_streaming_returns_url(self, mock_popen, mock_node):
-        proc = MagicMock()
+    def test_start_streaming_returns_url(self, mock_popen, mock_node, mock_uuid):
         url = "http://127.0.0.1:8888/webtorrent/hash/Movie.mp4"
-        proc.stdout.readline.return_value = json.dumps({"url": url, "name": "Movie.mp4"}) + "\n"
-        mock_popen.return_value = proc
+        mock_popen.return_value = _FakeDaemon({
+            "req-1": [{"id": "req-1", "type": "ready", "url": url, "name": "Movie.mp4"}],
+        })
 
         result = vp.start_streaming("magnet:?xt=urn:btih:abc123", "Inception")
         self.assertEqual(result, url)
 
+    @patch("actions.vlc_player.uuid.uuid4", return_value="req-1")
     @patch("actions.vlc_player._locate_node", return_value="node")
     @patch("actions.vlc_player.subprocess.Popen")
-    def test_start_streaming_no_output_raises(self, mock_popen, mock_node):
-        proc = MagicMock()
-        proc.stdout.readline.return_value = ""  # no URL line
-        proc.poll.return_value = 1
-        proc.stderr.read.return_value = "no seeders"
-        mock_popen.return_value = proc
+    def test_start_streaming_error_raises(self, mock_popen, mock_node, mock_uuid):
+        mock_popen.return_value = _FakeDaemon({
+            "req-1": [{"id": "req-1", "type": "error", "message": "no seeders"}],
+        })
 
         with self.assertRaises(vp.VLCPlayerError):
             vp.start_streaming("magnet:?xt=urn:btih:abc123")
+
+    @patch("actions.vlc_player.uuid.uuid4", return_value="req-1")
+    @patch("actions.vlc_player._locate_node", return_value="node")
+    @patch("actions.vlc_player.subprocess.Popen")
+    def test_start_streaming_relays_progress(self, mock_popen, mock_node, mock_uuid):
+        mock_popen.return_value = _FakeDaemon({
+            "req-1": [
+                {"id": "req-1", "type": "progress", "peers": 3, "elapsed": 4},
+                {"id": "req-1", "type": "ready", "url": "http://x/y.mp4", "name": "y.mp4"},
+            ],
+        })
+
+        seen = []
+        vp.start_streaming("magnet:?xt=urn:btih:abc123",
+                           progress_hook=lambda p, e: seen.append((p, e)))
+        self.assertEqual(seen, [(3, 4)])
 
     @patch("actions.vlc_player._locate_node", side_effect=vp.VLCPlayerError("not found"))
     def test_start_streaming_without_node_raises(self, mock_node):
         with self.assertRaises(vp.VLCPlayerError):
             vp.start_streaming("magnet:?xt=urn:btih:abc")
+
+    @patch("actions.vlc_player.uuid.uuid4", return_value="req-1")
+    @patch("actions.vlc_player._locate_node", return_value="node")
+    @patch("actions.vlc_player.subprocess.Popen")
+    def test_start_streaming_daemon_eof_raises(self, mock_popen, mock_node, mock_uuid):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = iter([])  # daemon closed its pipe without responding
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        with self.assertRaises(vp.VLCPlayerError):
+            vp.start_streaming("magnet:?xt=urn:btih:abc123")
+
+    @patch("actions.vlc_player.uuid.uuid4", side_effect=["req-1", "req-2"])
+    @patch("actions.vlc_player._locate_node", return_value="node")
+    @patch("actions.vlc_player.subprocess.Popen")
+    def test_stop_streaming_sends_stop_command(self, mock_popen, mock_node, mock_uuid):
+        proc = _FakeDaemon({
+            "req-1": [{"id": "req-1", "type": "ready", "url": "http://x/y.mp4", "name": "y.mp4"}],
+            "req-2": [{"id": "req-2", "type": "stopped"}],
+        })
+        mock_popen.return_value = proc
+
+        vp.start_streaming("magnet:?xt=urn:btih:abc123")
+        vp.stop_streaming()  # must not raise
+
+        commands = [json.loads(c.args[0])["cmd"] for c in proc.stdin.write.call_args_list]
+        self.assertEqual(commands, ["play", "stop"])
+
+    def test_stop_streaming_without_daemon_is_a_noop(self):
+        vp.stop_streaming()  # nothing started yet; must not raise
 
     @patch("actions.vlc_player._locate_node", return_value="node")
     def test_get_status_when_available(self, mock_node):

@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Minimal WebTorrent HTTP streaming server for Jarvis movie playback.",
-  "main": "stream.mjs",
+  "description": "Persistent WebTorrent HTTP streaming daemon for Jarvis movie playback.",
+  "main": "daemon.mjs",
   "engines": {
     "node": ">=18"
   },

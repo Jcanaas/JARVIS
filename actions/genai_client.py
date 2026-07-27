@@ -56,7 +56,8 @@ class ModelWrapper:
 
         contents = args[0] if args else kwargs.pop('contents', None)
         kwargs.pop('contents', None)
-        kwargs.pop('config', None)  # no caller passes this today; always build fresh per attempt
+        kwargs.pop('config', None)  # config is rebuilt fresh per attempt below
+        tools = kwargs.pop('tools', None)  # e.g. [types.Tool(function_declarations=[...])]
 
         candidates = [self.model_name] + [m for m in _FALLBACK_MODELS if m != self.model_name]
 
@@ -73,6 +74,8 @@ class ModelWrapper:
             config = types.GenerateContentConfig()
             if self.system_instruction:
                 config.system_instruction = self.system_instruction
+            if tools:
+                config.tools = tools
             # 2.5-series models "think" by default. Without an explicit budget
             # the response can come back as thought-only parts, so response.text
             # is an empty string ("" -> JSON parse failures downstream). None of
@@ -93,7 +96,16 @@ class ModelWrapper:
                         continue
                 raise
 
-            if not (response.text or "").strip():
+            # A tool-call response legitimately has no text — response.text is
+            # empty because the model returned a function_call part instead.
+            # Only treat "no text" as a failure worth falling back from when
+            # there's no function call either.
+            has_function_call = any(
+                getattr(part, "function_call", None)
+                for candidate in (response.candidates or [])
+                for part in (getattr(getattr(candidate, "content", None), "parts", None) or [])
+            )
+            if not has_function_call and not (response.text or "").strip():
                 if not is_last:
                     print(f"[GenAI] ⚠️ Empty response from {model_name}, falling back to next model")
                     last_error = RuntimeError(f"Empty response from {model_name}")

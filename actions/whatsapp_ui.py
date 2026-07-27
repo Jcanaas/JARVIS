@@ -594,12 +594,25 @@ class WhatsAppWindow(QWidget):
         self._media_preview_labels: dict[str, list[QLabel]] = {}
         self._media_preview_cache: dict[str, bytes] = {}
         self._media_preview_loading: set[str] = set()
+        # El bridge (Puppeteer) procesa cada /media en serie contra la misma
+        # página de Chrome: abrir un chat con muchas imágenes/vídeos disparaba
+        # un hilo por miniatura, y las últimas de la cola tardaban más que el
+        # timeout HTTP y fallaban al azar. Limitamos cuántas se piden a la vez.
+        self._media_preview_semaphore = threading.Semaphore(3)
         # Inline audio players (only one sounds at a time) + transcription targets.
         self._audio_players: list = []
         self._transcribe_widgets: dict[str, tuple] = {}
         self._transcribing: set[str] = set()
         self._chat_filter = "all"
         self._loading_chats = False
+        # Resilience against transient bridge blips: a single failed/empty /qr
+        # poll used to flip the panel straight to the QR/Reintentar page, and
+        # Reintentar does a full session-destroying reconnect (often forcing a
+        # fresh QR scan). Track whether we've ever shown chats and how many
+        # consecutive genuine not-ready answers we've seen, so we only surface
+        # the QR linker when the bridge is really unlinked — not on a hiccup.
+        self._chats_shown_once = False
+        self._not_ready_streak = 0
         self._loading_chat_ids: set[str] = set()
         self._marking_read_chat_ids: set[str] = set()
         self._loading_acks = False
@@ -1275,17 +1288,39 @@ class WhatsAppWindow(QWidget):
             # Connected → show the normal chat UI and stop QR polling.
             # (_loading_chats is left set: the worker is still fetching chats and
             #  will reset it via chats_loaded → _apply_loaded_chats.)
+            self._not_ready_streak = 0
             if self._qr_poll_timer.isActive():
                 self._qr_poll_timer.stop()
             if stack.currentIndex() != 0:
                 stack.setCurrentIndex(0)
-        else:
-            # Not linked → show QR and keep polling until the phone connects.
+            return
+
+        # The bridge call failed outright (busy/restarting/unreachable). This is
+        # transient: don't tear a working chat view down to the QR/Reintentar
+        # screen — just keep polling. Only show the loading page if we have
+        # nothing to show yet (first open before any chats have loaded).
+        if status.get("_transient"):
             self._loading_chats = False
-            stack.setCurrentIndex(1)
-            self._render_qr(status)
+            if not self._chats_shown_once:
+                stack.setCurrentIndex(1)
+                self._render_qr({})
             if not self._qr_poll_timer.isActive():
                 self._qr_poll_timer.start()
+            return
+
+        # Genuinely reachable but not linked. If chats are already on screen,
+        # require two consecutive not-ready answers before flipping to the QR
+        # linker, so a single blip while syncing doesn't nuke the view.
+        self._loading_chats = False
+        self._not_ready_streak += 1
+        if self._chats_shown_once and self._not_ready_streak < 2:
+            if not self._qr_poll_timer.isActive():
+                self._qr_poll_timer.start()
+            return
+        stack.setCurrentIndex(1)
+        self._render_qr(status)
+        if not self._qr_poll_timer.isActive():
+            self._qr_poll_timer.start()
 
     def load_pending(self):
         if self.chat_mode:
@@ -1311,12 +1346,23 @@ class WhatsAppWindow(QWidget):
         def worker():
             # First confirm the bridge has an active WhatsApp session; if not,
             # surface the in-panel QR linker instead of silently failing.
+            # A totally empty reply means the bridge HTTP call failed (process
+            # busy/restarting/unreachable) — that is transient and must NOT be
+            # treated the same as a reachable-but-unlinked bridge, or a hiccup
+            # would kick a working chat view over to the QR/Reintentar screen.
             try:
                 status = _bridge_qr_status()
+                if not status:
+                    # One quick retry before declaring the bridge unreachable.
+                    time.sleep(0.6)
+                    status = _bridge_qr_status()
             except Exception:
                 status = {}
-            if not status or not status.get("ready"):
-                self.bridge_state.emit(status or {})
+            if not status:
+                self.bridge_state.emit({"_transient": True})
+                return
+            if not status.get("ready"):
+                self.bridge_state.emit(status)
                 return
             self.bridge_state.emit({"ready": True})
 
@@ -1382,6 +1428,9 @@ class WhatsAppWindow(QWidget):
         self._loading_chats = False
         if chats is None:
             return
+        # We reached a ready bridge and got a chat list — remember it so a later
+        # transient not-ready blip doesn't bounce us to the QR linker.
+        self._chats_shown_once = True
         if not isinstance(chats, list):
             chats = []
         previous_ids = [str(c.get("chatId") or "") for c in self._all_chats]
@@ -1696,6 +1745,11 @@ class WhatsAppWindow(QWidget):
                 self._message_render_timer.stop()
             # Bottom anchoring is handled by the leading stretch added in
             # _begin_message_render; no trailing stretch here.
+            # Recalcula anchos contra el viewport real: en el primer render
+            # (antes de que la ventana termine de asentarse) _bubble_max_width
+            # puede usar el ancho por defecto (900) y dejar burbujas cortadas
+            # hasta el próximo resize.
+            self._update_bubble_widths()
             if self._render_scroll_mode == "preserve":
                 QTimer.singleShot(20, self._restore_scroll_after_more)
             else:
@@ -2000,12 +2054,14 @@ class WhatsAppWindow(QWidget):
         chat_id = str((entry or {}).get("from") or "").strip()
         if not chat_id:
             return
-        if chat_id == self.current_chat_id:
-            # Append straight from the entry we already have. Calling
-            # load_conversation() here would look like a refresh but does
-            # nothing: this chat is always in _conversation_cache while open,
-            # so it hits the cache branch and just re-renders the stale list.
-            self._append_incoming_message(chat_id, entry)
+        # Update the cache for ANY chat with a message, not just the one on
+        # screen — otherwise a message sent/received in a background chat
+        # (e.g. an AI auto-reply firing on a schedule while you're looking at
+        # a different conversation) never makes it into _conversation_cache,
+        # and load_conversation() keeps serving the stale cached list forever
+        # once you do open that chat. _append_incoming_message() already only
+        # paints a bubble when chat_id is the one currently on screen.
+        self._append_incoming_message(chat_id, entry)
         # Always refresh chat list (preview, order, unread count).
         self._incoming_refresh_timer.start(800)
 
@@ -2859,34 +2915,47 @@ class WhatsAppWindow(QWidget):
         def worker():
             raw = b""
             error = ""
-            try:
-                response = requests.get(url, timeout=30)
-                response.raise_for_status()
-                raw = response.content
-                if msg_type == "video" and raw:
-                    import cv2
-                    suffix = ".mp4"
-                    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-                        handle.write(raw)
-                        temp_path = handle.name
+            with self._media_preview_semaphore:
+                for attempt in range(2):
                     try:
-                        capture = cv2.VideoCapture(temp_path)
-                        ok, frame = capture.read()
-                        capture.release()
-                        if not ok or frame is None:
-                            raise RuntimeError("No se pudo extraer una miniatura")
-                        ok, encoded = cv2.imencode(".jpg", frame)
-                        if not ok:
-                            raise RuntimeError("No se pudo codificar la miniatura")
-                        raw = encoded.tobytes()
-                    finally:
+                        response = requests.get(url, timeout=45)
+                        response.raise_for_status()
+                        raw = response.content
+                        error = ""
+                        break
+                    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                        error = str(exc)
+                        raw = b""
+                        continue
+                    except Exception as exc:
+                        error = str(exc)
+                        raw = b""
+                        break
+                if raw and msg_type == "video":
+                    try:
+                        import cv2
+                        suffix = ".mp4"
+                        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+                            handle.write(raw)
+                            temp_path = handle.name
                         try:
-                            Path(temp_path).unlink()
-                        except OSError:
-                            pass
-            except Exception as exc:
-                error = str(exc)
-                raw = b""
+                            capture = cv2.VideoCapture(temp_path)
+                            ok, frame = capture.read()
+                            capture.release()
+                            if not ok or frame is None:
+                                raise RuntimeError("No se pudo extraer una miniatura")
+                            ok, encoded = cv2.imencode(".jpg", frame)
+                            if not ok:
+                                raise RuntimeError("No se pudo codificar la miniatura")
+                            raw = encoded.tobytes()
+                        finally:
+                            try:
+                                Path(temp_path).unlink()
+                            except OSError:
+                                pass
+                    except Exception as exc:
+                        error = str(exc)
+                        raw = b""
             self.media_preview_loaded.emit(url, raw, f"{msg_type}|{error}")
 
         threading.Thread(target=worker, daemon=True).start()
@@ -3415,6 +3484,12 @@ class WhatsAppWindow(QWidget):
                 error = ""
                 try:
                     response = send_whatsapp(to=to_id, body=text, quoted_message_id=quoted_id or None)
+                except requests.exceptions.Timeout:
+                    # El bridge (WhatsApp Web) puede tardar en responder aunque
+                    # ya haya entregado el mensaje: el timeout de la petición
+                    # HTTP no significa que el envío falló. No lo marcamos como
+                    # fallido para evitar falsos "no se ha enviado".
+                    pass
                 except Exception as exc:
                     error = str(exc)
                 self.message_send_finished.emit(optimistic["id"], target, response, error)

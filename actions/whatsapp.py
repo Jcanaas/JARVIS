@@ -210,7 +210,7 @@ def ensure_bridge_ready() -> bool:
 def send_whatsapp(
     to: str,
     body: str,
-    timeout: int = 10,
+    timeout: int = 45,
     quoted_message_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Enviar mensaje. `to` debe ser en formato WhatsApp (e.g. 5511999999999@c.us).
@@ -611,16 +611,38 @@ def media_url(path_or_url: str) -> str:
     return f"{BRIDGE_URL}/{value.lstrip('/')}"
 
 
+_last_media_error: str = ""
+
+
 def download_message_media(message: Dict[str, Any], timeout: int = 10) -> Optional[bytes]:
-    """Download media from a WhatsApp message. Returns file bytes or None on error."""
+    """Download media from a WhatsApp message. Returns file bytes or None on error.
+
+    On failure the underlying reason (bridge error body, HTTP status, network
+    error) is stashed on `_last_media_error` so callers can surface it instead
+    of a generic "couldn't download" message."""
+    global _last_media_error
+    _last_media_error = ""
     if not message or not message.get("mediaUrl"):
+        _last_media_error = "el mensaje no tiene mediaUrl"
         return None
+    url = media_url(message["mediaUrl"])
     try:
-        url = media_url(message["mediaUrl"])
         resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
         return resp.content
-    except Exception:
+    except requests.HTTPError as e:
+        detail = ""
+        try:
+            detail = str(resp.json().get("error") or "")
+        except Exception:
+            detail = (resp.text or "")[:200]
+        _last_media_error = f"HTTP {resp.status_code}" + (f" — {detail}" if detail else "")
+        return None
+    except requests.RequestException as e:
+        _last_media_error = f"error de red hablando con el bridge: {e}"
+        return None
+    except Exception as e:
+        _last_media_error = str(e)
         return None
 
 
@@ -640,7 +662,8 @@ def transcribe_message_audio(message: Dict[str, Any], timeout: int = 10) -> Opti
 
     media_data = download_message_media(message, timeout=timeout)
     if not media_data:
-        raise WhatsAppError("No se pudo descargar el audio del mensaje.")
+        reason = f" ({_last_media_error})" if _last_media_error else ""
+        raise WhatsAppError(f"No se pudo descargar el audio del mensaje.{reason}")
 
     # Save to temp file
     import tempfile

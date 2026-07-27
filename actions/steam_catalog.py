@@ -426,6 +426,37 @@ def get_new_releases(limit: int = 20) -> list[Game]:
     return _cached(f"new:{limit}", fetch)
 
 
+def get_specials(limit: int = 10) -> list[dict]:
+    """Today's Steam storefront discounts (general — not tied to any wishlist,
+    Steam gives no unauthenticated way to read a user's own wishlist/library).
+    Returns plain dicts (discount fields don't fit the Game dataclass):
+    {appid, title, discount_percent, final_price_cents, original_price_cents, currency}.
+    """
+    def fetch():
+        data = _http_get(f"{STORE_API_BASE}/featuredcategories", {"cc": _CC, "l": _LANG})
+        items = (data.get("specials") or {}).get("items", [])
+        out, seen = [], set()
+        for it in items:
+            appid = it.get("id", 0)
+            title = it.get("name", "")
+            discount = int(it.get("discount_percent") or 0)
+            if not appid or not title or discount <= 0 or appid in _HARDWARE_APPIDS or appid in seen:
+                continue
+            seen.add(appid)
+            out.append({
+                "appid": appid,
+                "title": title,
+                "discount_percent": discount,
+                "final_price_cents": it.get("final_price"),
+                "original_price_cents": it.get("original_price"),
+                "currency": it.get("currency", "EUR"),
+            })
+            if len(out) >= limit:
+                break
+        return out
+    return _cached(f"specials:{limit}", fetch)
+
+
 def search_action(parameters: dict) -> str:
     """Voice/agent entry point for game search.
 

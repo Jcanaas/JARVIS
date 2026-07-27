@@ -51,11 +51,9 @@ class CrossfadeReadinessTests(unittest.TestCase):
     def test_crossfade_keeps_outgoing_track_until_incoming_is_actively_playing(self):
         sequence = []
         current_pipe = ytmusic_headless._PIPE_PATHS[0]
-
-        def output_ready(*_args, **_kwargs):
-            self.assertEqual(ytmusic_headless._last_meta["videoId"], "outgoing")
-            sequence.append("output-ready")
-            return True
+        alt_pipe = ytmusic_headless._PIPE_PATHS[1]
+        outgoing_volumes = []
+        incoming_volumes = []
 
         def active_ready(*_args, **_kwargs):
             self.assertEqual(ytmusic_headless._last_meta["videoId"], "outgoing")
@@ -63,12 +61,16 @@ class CrossfadeReadinessTests(unittest.TestCase):
             return True
 
         def send(command, pipe=None):
-            if pipe == current_pipe and command[:2] == ["set_property", "volume"]:
-                self.assertEqual(sequence, ["output-ready", "active-ready"])
+            if command[:2] == ["set_property", "volume"]:
+                if pipe == current_pipe:
+                    self.assertEqual(sequence, ["active-ready", "active-ready"])
+                    outgoing_volumes.append(command[2])
+                elif pipe == alt_pipe:
+                    incoming_volumes.append(command[2])
             return True
 
         snapshot = {
-            "time-pos": 0.0,
+            "time-pos": 197.0,
             "duration": 200.0,
             "pause": False,
             "eof-reached": False,
@@ -90,11 +92,6 @@ class CrossfadeReadinessTests(unittest.TestCase):
             patch.object(ytmusic_headless, "_send_command", side_effect=send),
             patch.object(
                 ytmusic_headless,
-                "_wait_for_audio_output_ready",
-                side_effect=output_ready,
-            ),
-            patch.object(
-                ytmusic_headless,
                 "_wait_for_audio_ready",
                 side_effect=active_ready,
             ),
@@ -111,12 +108,17 @@ class CrossfadeReadinessTests(unittest.TestCase):
             )
 
         self.assertTrue(started)
-        self.assertEqual(sequence, ["output-ready", "active-ready"])
+        self.assertEqual(sequence, ["active-ready", "active-ready"])
         self.assertEqual(ytmusic_headless._last_meta["videoId"], "incoming")
         self.assertTrue(ytmusic_headless._last_meta["ready"])
         self.assertEqual(ytmusic_headless._last_meta["state"], "playing")
+        self.assertGreater(len(outgoing_volumes), 2)
+        self.assertEqual(outgoing_volumes[0], ytmusic_headless._user_volume)
+        self.assertEqual(outgoing_volumes[-1], 0)
+        self.assertEqual(incoming_volumes[-1], ytmusic_headless._user_volume)
+        self.assertEqual(outgoing_volumes, sorted(outgoing_volumes, reverse=True))
 
-    def test_output_readiness_timeout_preserves_outgoing_before_direct_fallback(self):
+    def test_incoming_readiness_timeout_preserves_outgoing_before_direct_fallback(self):
         current_pipe = ytmusic_headless._PIPE_PATHS[0]
         outgoing_process = ytmusic_headless._procs[0]
         incoming_process = ytmusic_headless._procs[1]
@@ -147,12 +149,8 @@ class CrossfadeReadinessTests(unittest.TestCase):
             patch.object(ytmusic_headless, "_send_command", side_effect=send),
             patch.object(
                 ytmusic_headless,
-                "_wait_for_audio_output_ready",
-                return_value=False,
-            ) as output_ready,
-            patch.object(
-                ytmusic_headless,
                 "_wait_for_audio_ready",
+                return_value=False,
             ) as active_ready,
             patch.object(
                 ytmusic_headless,
@@ -166,10 +164,9 @@ class CrossfadeReadinessTests(unittest.TestCase):
             )
 
         self.assertTrue(started)
-        output_ready.assert_called_once_with(
+        active_ready.assert_called_once_with(
             ytmusic_headless._PIPE_PATHS[1], timeout=12.0
         )
-        active_ready.assert_not_called()
         fallback.assert_called_once_with("incoming", "Incoming", "Artist")
         incoming_process.terminate.assert_called_once_with()
         outgoing_process.terminate.assert_not_called()
@@ -220,6 +217,52 @@ class CrossfadeReadinessTests(unittest.TestCase):
         finally:
             ytmusic_headless._active_slot = old_active
             ytmusic_headless._crossfade_fading_out = old_fading
+
+    def test_crossfade_waits_for_the_actual_fade_window_after_preparing_audio(self):
+        self.assertFalse(
+            ytmusic_headless._crossfade_window_ready(
+                {"time-pos": 150.0, "duration": 180.0}, 3.0
+            )
+        )
+        self.assertTrue(
+            ytmusic_headless._crossfade_window_ready(
+                {"time-pos": 177.0, "duration": 180.0}, 3.0
+            )
+        )
+        self.assertTrue(
+            ytmusic_headless._crossfade_window_ready(
+                {"time-pos": None, "duration": None, "idle-active": True}, 3.0
+            )
+        )
+
+    def test_crossfade_starts_muted_playback_before_waiting_for_audio(self):
+        """MPV may not create an audio output for a file loaded while paused."""
+        alt_pipe = ytmusic_headless._PIPE_PATHS[1]
+        incoming_started = []
+
+        def send(command, pipe=None):
+            if pipe == alt_pipe and command == ["set_property", "pause", False]:
+                incoming_started.append(True)
+            return True
+
+        def audio_ready(*_args, **_kwargs):
+            self.assertTrue(incoming_started)
+            return False
+
+        with (
+            patch.object(ytmusic_headless, "_start_mpv", return_value=True),
+            patch.object(ytmusic_headless, "_ipc_request", return_value={"error": "success"}),
+            patch.object(ytmusic_headless, "_send_command", side_effect=send),
+            patch.object(ytmusic_headless, "_wait_for_audio_output_ready") as output_ready,
+            patch.object(ytmusic_headless, "_wait_for_audio_ready", side_effect=audio_ready),
+            patch.object(ytmusic_headless, "_play_video"),
+            patch("actions.ytmusic_headless.threading.Thread", _ImmediateThread),
+        ):
+            ytmusic_headless._begin_crossfade_overlap(
+                "incoming", "Incoming", "Artist", "https://stream", 200
+            )
+
+        output_ready.assert_not_called()
 
 
 if __name__ == "__main__":

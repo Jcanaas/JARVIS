@@ -592,7 +592,7 @@ def _poster_pixmap(pixmap: "QPixmap", w: int, h: int, radius: int) -> "QPixmap":
 
 
 class _MovieCard(QWidget):
-    """Clickable movie card — Netflix mockup style: rounded poster, hover fade."""
+    """Clickable discovery card with a clear, streaming-style hover affordance."""
 
     clicked = pyqtSignal(object)  # movie data
 
@@ -607,6 +607,11 @@ class _MovieCard(QWidget):
         # title is (1- vs 2-line titles were breaking row alignment).
         self.setFixedWidth(self._W)
         self._orig_pixmap: "QPixmap | None" = None
+        self._source_pixmap: "QPixmap | None" = None
+        self._hover_zoom = 1.0
+        self._zoom_anim = QPropertyAnimation(self, b"hoverZoom", self)
+        self._zoom_anim.setDuration(180)
+        self._zoom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 7)
@@ -671,7 +676,8 @@ class _MovieCard(QWidget):
                 pixmap.loadFromData(data)
                 if pixmap.isNull():
                     continue
-                self.poster.setPixmap(_poster_pixmap(pixmap, self._W, self._H, 13))
+                self._source_pixmap = pixmap
+                self._render_poster()
                 return True
             except Exception:
                 continue
@@ -683,12 +689,36 @@ class _MovieCard(QWidget):
         # QScrollArea that cache goes stale on scroll — cards visually "stick"
         # at their old spot instead of following the scroll. Dimming the
         # poster's own pixmap on hover avoids that entirely.
-        self._set_dim(True)
+        self._animate_zoom(1.075)
         super().enterEvent(ev)
 
     def leaveEvent(self, ev):
-        self._set_dim(False)
+        self._animate_zoom(1.0)
         super().leaveEvent(ev)
+
+    @pyqtProperty(float)
+    def hoverZoom(self):
+        return self._hover_zoom
+
+    @hoverZoom.setter
+    def hoverZoom(self, value):
+        self._hover_zoom = float(value)
+        self._render_poster()
+
+    def _animate_zoom(self, target: float):
+        self._zoom_anim.stop()
+        self._zoom_anim.setStartValue(self._hover_zoom)
+        self._zoom_anim.setEndValue(target)
+        self._zoom_anim.start()
+
+    def _render_poster(self):
+        if self._source_pixmap is None or self._source_pixmap.isNull():
+            return
+        zw = max(self._W, int(self._W * self._hover_zoom))
+        zh = max(self._H, int(self._H * self._hover_zoom))
+        zoomed = _poster_pixmap(self._source_pixmap, zw, zh, 13)
+        x, y = (zoomed.width() - self._W) // 2, (zoomed.height() - self._H) // 2
+        self.poster.setPixmap(_round_pixmap(zoomed.copy(x, y, self._W, self._H), 13))
 
     def _set_dim(self, dim: bool):
         pm = self.poster.pixmap()
@@ -709,6 +739,81 @@ class _MovieCard(QWidget):
 
     def mousePressEvent(self, ev):
         self.clicked.emit(self.movie)
+
+
+class _ContentRail(QWidget):
+    """A horizontally paged streaming rail with lightweight navigation."""
+
+    def __init__(self, title: str, items: list, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background:transparent;")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 8, 0, 8)
+        root.setSpacing(6)
+
+        heading = QHBoxLayout()
+        label = QLabel(title)
+        label.setFont(QFont("Inter", 13, QFont.Weight.Bold))
+        label.setStyleSheet("color:#edf6ff; background:transparent;")
+        heading.addWidget(label)
+        heading.addStretch(1)
+        hint = QLabel("Ver todo  ›")
+        hint.setStyleSheet("color:#75bfff; background:transparent; font-size:9px; font-weight:700;")
+        heading.addWidget(hint)
+        root.addLayout(heading)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(7)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFixedHeight(266)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("background:transparent; border:none;")
+        content = QWidget()
+        content.setStyleSheet("background:transparent;")
+        cards = QHBoxLayout(content)
+        cards.setContentsMargins(4, 8, 4, 4)
+        cards.setSpacing(14)
+        for movie in items:
+            card = _MovieCard(movie)
+            card.clicked.connect(self._emit_click)
+            cards.addWidget(card)
+        cards.addStretch(1)
+        self._scroll.setWidget(content)
+        self._scroll_anim = QPropertyAnimation(self._scroll.horizontalScrollBar(), b"value", self)
+        self._scroll_anim.setDuration(320)
+        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        for glyph, direction in (("‹", -1), ("›", 1)):
+            button = QPushButton(glyph)
+            button.setFixedSize(32, 52)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet("""
+                QPushButton { background:rgba(12,38,58,210); color:#e9f7ff; border:1px solid #275b7f;
+                    border-radius:10px; font-size:18pt; padding-bottom:3px; }
+                QPushButton:hover { background:#1672a8; border-color:#82d3ff; }
+            """)
+            button.clicked.connect(lambda _=False, d=direction: self._page(d))
+            body.addWidget(button)
+            if direction < 0:
+                body.addWidget(self._scroll, 1)
+        root.addLayout(body)
+
+    clicked = pyqtSignal(object)
+
+    def _emit_click(self, movie):
+        self.clicked.emit(movie)
+
+    def _page(self, direction: int):
+        bar = self._scroll.horizontalScrollBar()
+        step = max(260, int(self._scroll.viewport().width() * 0.88))
+        target = max(bar.minimum(), min(bar.maximum(), bar.value() + direction * step))
+        self._scroll_anim.stop()
+        self._scroll_anim.setStartValue(bar.value())
+        self._scroll_anim.setEndValue(target)
+        self._scroll_anim.start()
 
 
 _MIN_HEALTHY_SEEDERS = 5  # below this, warn and prefer an alternative release
@@ -884,6 +989,7 @@ class _HeroBanner(QWidget):
 
     play_clicked = pyqtSignal(object)   # movie/anime
     info_clicked = pyqtSignal(object)
+    trailer_clicked = pyqtSignal(object)
     _bg_ready = pyqtSignal(int, QImage)  # (carousel index, backdrop image)
 
     _RADIUS = 18
@@ -907,7 +1013,7 @@ class _HeroBanner(QWidget):
 
     def _build(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 16, 18, 18)
+        outer.setContentsMargins(24, 20, 24, 22)
         outer.setSpacing(0)
 
         # Top row: meta chips left, carousel dots right
@@ -926,40 +1032,74 @@ class _HeroBanner(QWidget):
         dots_lay.setContentsMargins(0, 4, 4, 0)
         dots_lay.setSpacing(6)
         top.addWidget(self._dots_box, 0, Qt.AlignmentFlag.AlignTop)
+        for glyph, delta in (("‹", -1), ("›", 1)):
+            nav = QPushButton(glyph)
+            nav.setFixedSize(28, 28)
+            nav.setCursor(Qt.CursorShape.PointingHandCursor)
+            nav.setStyleSheet("""
+                QPushButton { background:rgba(8,14,18,150); color:#fff; border:1px solid rgba(255,255,255,85);
+                    border-radius:14px; font-size:15pt; padding-bottom:3px; }
+                QPushButton:hover { background:rgba(255,255,255,45); }
+            """)
+            nav.clicked.connect(lambda _=False, d=delta: self._show_index(self._index + d))
+            top.addWidget(nav, 0, Qt.AlignmentFlag.AlignTop)
         outer.addLayout(top)
 
         outer.addStretch(1)
 
-        # Bottom row: ⏵ circle + title/subtitle left, heart right
-        bottom = QHBoxLayout()
-        bottom.setSpacing(14)
+        # Editorial content block. It makes a hero feel like a destination,
+        # instead of a large poster with a tiny caption.
+        self._title_lbl = QLabel("")
+        self._title_lbl.setWordWrap(True)
+        self._title_lbl.setFont(QFont("Inter", 23, QFont.Weight.Bold))
+        self._title_lbl.setStyleSheet("color:#ffffff; background:transparent;")
+        outer.addWidget(self._title_lbl)
 
-        self._play_btn = QPushButton("▶")
-        self._play_btn.setFixedSize(46, 46)
+        self._sub_lbl = QLabel("")
+        self._sub_lbl.setFont(QFont("Inter", 9, QFont.Weight.DemiBold))
+        self._sub_lbl.setStyleSheet("color:rgba(255,255,255,190); background:transparent;")
+        outer.addWidget(self._sub_lbl)
+
+        self._overview_lbl = QLabel("")
+        self._overview_lbl.setWordWrap(True)
+        self._overview_lbl.setMaximumHeight(44)
+        self._overview_lbl.setFont(QFont("Inter", 9))
+        self._overview_lbl.setStyleSheet("color:rgba(255,255,255,185); background:transparent; padding-top:4px;")
+        outer.addWidget(self._overview_lbl)
+        outer.addSpacing(12)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+
+        self._play_btn = QPushButton("▶  Reproducir")
+        self._play_btn.setFixedHeight(42)
         self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play_btn.setToolTip("Reproducir")
         self._play_btn.setStyleSheet("""
             QPushButton {
                 background:rgba(255,255,255,235); color:#111820;
-                border:none; border-radius:23px;
-                font-size:13pt; padding-left:4px;
+                border:none; border-radius:21px; padding:0 18px;
+                font-family:Inter; font-size:9pt; font-weight:700;
             }
             QPushButton:hover { background:#ffffff; }
         """)
         self._play_btn.clicked.connect(lambda: self.play_clicked.emit(self._movie))
         bottom.addWidget(self._play_btn)
 
-        text_col = QVBoxLayout()
-        text_col.setSpacing(2)
-        self._title_lbl = QLabel("")
-        self._title_lbl.setFont(QFont("Inter", 13, QFont.Weight.DemiBold))
-        self._title_lbl.setStyleSheet("color:#ffffff; background:transparent;")
-        text_col.addWidget(self._title_lbl)
-        self._sub_lbl = QLabel("")
-        self._sub_lbl.setFont(QFont("Inter", 9))
-        self._sub_lbl.setStyleSheet("color:rgba(255,255,255,175); background:transparent;")
-        text_col.addWidget(self._sub_lbl)
-        bottom.addLayout(text_col)
+        self._trailer_btn = QPushButton("▷  Ver tráiler")
+        self._trailer_btn.setFixedHeight(42)
+        self._trailer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._trailer_btn.setToolTip("Buscar tráiler oficial")
+        self._trailer_btn.setStyleSheet("""
+            QPushButton {
+                background:rgba(12,19,23,145); color:#ffffff;
+                border:1px solid rgba(255,255,255,100); border-radius:21px;
+                padding:0 17px; font-family:Inter; font-size:9pt; font-weight:700;
+            }
+            QPushButton:hover { background:rgba(255,255,255,35); border-color:#ffffff; }
+        """)
+        self._trailer_btn.clicked.connect(self._open_trailer)
+        bottom.addWidget(self._trailer_btn)
         bottom.addStretch(1)
 
         self._like_btn = QPushButton("♡")
@@ -971,6 +1111,17 @@ class _HeroBanner(QWidget):
         self._style_like()
 
         outer.addLayout(bottom)
+
+    def _open_trailer(self):
+        """Open an official-trailer search without requiring a second video API."""
+        if self._movie is None:
+            return
+        from urllib.parse import quote_plus
+        title = getattr(self._movie, "title", "")
+        year = getattr(self._movie, "release_year", 0)
+        query = f"{title} {year or ''} tráiler oficial".strip()
+        QDesktopServices.openUrl(QUrl(f"https://www.youtube.com/results?search_query={quote_plus(query)}"))
+        self.trailer_clicked.emit(self._movie)
 
     # -- carousel API ---------------------------------------------------
 
@@ -995,6 +1146,13 @@ class _HeroBanner(QWidget):
         if movie:
             self._show_index(0)
 
+    def set_compact(self, compact: bool = True):
+        """Use the banner as pure artwork when a dedicated detail card follows."""
+        for widget in (self._chips_box, self._dots_box, self._title_lbl,
+                       self._sub_lbl, self._overview_lbl, self._play_btn,
+                       self._trailer_btn, self._like_btn):
+            widget.setVisible(not compact)
+
     def _show_index(self, i: int):
         if not self._items:
             return
@@ -1007,6 +1165,9 @@ class _HeroBanner(QWidget):
             f"★ {m.rating:.1f}" if getattr(m, "rating", 0) else "",
         ]))
         self._sub_lbl.setText(sub or "Reproducir ahora")
+        overview = (getattr(m, "overview", "") or "").strip()
+        self._overview_lbl.setText(overview)
+        self._overview_lbl.setVisible(bool(overview))
         self._set_chips(m)
         self._style_dots()
         self._style_like()
@@ -1334,6 +1495,9 @@ class MoviesModePanel(QWidget):
     _torrents_found_dl = pyqtSignal(list, object)  # (torrents, movie) — download flow
     _pos_sig = pyqtSignal(float, float, bool)  # position, duration, playing
     _subtitle_ready = pyqtSignal(str, str)  # (srt_path, label)
+    _assistant_stream = pyqtSignal(object, object)  # (torrent, movie) — auto-play
+    _suggestions_ready = pyqtSignal(list, int)
+    _home_rails_ready = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1342,8 +1506,11 @@ class MoviesModePanel(QWidget):
         self._detail_movie = None
         self._playing_movie = None
         self._playing_episode = 0  # absolute episode number (0 for movies)
+        self._current_srt = None   # path of the last external .srt loaded (for retiming)
         self._episode_numbers: list[int] = []  # populated by AnimeModePanel
         self._episode_data: dict[int, dict] = {}  # number → episode dict (kitsu)
+        self._suggestion_token = 0
+        self._suggestion_items: dict[str, object] = {}
 
         # Playback backend + player state (mirrors the YouTube player).
         self._player = _VLCBackend() if HAS_VLC else None
@@ -1368,6 +1535,10 @@ class MoviesModePanel(QWidget):
         self._torrents_found_dl.connect(self._show_torrent_select_download)
         self._pos_sig.connect(self._apply_position)
         self._subtitle_ready.connect(self._on_subtitle_ready)
+        self._assistant_stream.connect(
+            lambda torrent, movie: self._begin_stream(torrent, movie, 0))
+        self._suggestions_ready.connect(self._apply_suggestions)
+        self._home_rails_ready.connect(self._apply_home_rails)
         QTimer.singleShot(0, self._load_trending)
 
     def _build_ui(self):
@@ -1441,6 +1612,13 @@ class MoviesModePanel(QWidget):
         pal.setColor(QPalette.ColorRole.PlaceholderText, QColor("#9aa6ab"))
         self._search.setPalette(pal)
         self._search.returnPressed.connect(self._do_search)
+        self._search.textChanged.connect(self._queue_suggestions)
+        self._search_completer = QCompleter([], self)
+        self._search_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._search_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._search_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._search_completer.activated.connect(self._open_suggestion)
+        self._search.setCompleter(self._search_completer)
         sf_lay.addWidget(self._search, 1)
 
         header_lay.addWidget(search_frame, 1)
@@ -1527,14 +1705,13 @@ class MoviesModePanel(QWidget):
 
         grid_lay.addWidget(chips_row)
 
-        # Poster grid — no inner scroll; it grows with content and the whole
-        # page (hero included) scrolls as one, per the requested behaviour.
+        # Multiple horizontal rails make the catalogue scannable at a glance.
         self._grid_widget = QWidget()
         self._grid_widget.setObjectName("MovieGrid")
         self._grid_widget.setStyleSheet("background:transparent;")
-        self._grid = QGridLayout(self._grid_widget)
-        self._grid.setSpacing(14)
-        self._grid.setContentsMargins(4, 12, 4, 12)
+        self._grid = QVBoxLayout(self._grid_widget)
+        self._grid.setSpacing(2)
+        self._grid.setContentsMargins(0, 0, 0, 10)
         grid_lay.addWidget(self._grid_widget)
         grid_lay.addStretch(1)
 
@@ -1717,7 +1894,14 @@ class MoviesModePanel(QWidget):
         """(label, callback) pairs for the pill row. Panels override this."""
         return [
             ("Tendencias", self._load_trending),
-            ("Recientes", self._load_recent),
+            ("Series", self._load_recent),
+            ("Acción", lambda: self._load_category("Acción")),
+            ("Comedia", lambda: self._load_category("Comedia")),
+            ("Terror", lambda: self._load_category("Terror")),
+            ("Ciencia ficción", lambda: self._load_category("Ciencia ficción")),
+            ("Animación", lambda: self._load_category("Animación")),
+            ("Crimen", lambda: self._load_category("Crimen")),
+            ("Documentales", lambda: self._load_category("Documental")),
         ]
 
     def _show_user_menu(self):
@@ -1771,6 +1955,25 @@ class MoviesModePanel(QWidget):
                 from actions import cinemeta
                 items = cinemeta.get_trending(kind="movie", limit=18)
                 self._results_ready.emit(items, "Películas en tendencia", "")
+                # These are independent discovery shelves, not cosmetic
+                # rearrangements of the same list.
+                rails = [("Tendencias", items)]
+                for title, query in (
+                    ("Acción", "Acción"),
+                    ("Comedia", "Comedia"),
+                    ("Terror", "Terror"),
+                    ("Ciencia ficción", "Ciencia ficción"),
+                    ("Animación", "Animación"),
+                    ("Crimen", "Crimen"),
+                    ("Documentales", "Documental"),
+                ):
+                    try:
+                        section = cinemeta.search(query, kind="movie", limit=14)
+                        if section:
+                            rails.append((title, section))
+                    except Exception:
+                        continue
+                self._home_rails_ready.emit(rails)
             except Exception as e:
                 self._results_ready.emit([], "", str(e))
 
@@ -1789,6 +1992,70 @@ class MoviesModePanel(QWidget):
 
         self._run_async(work)
 
+    def _queue_suggestions(self, text: str):
+        query = text.strip()
+        self._suggestion_token += 1
+        token = self._suggestion_token
+        if len(query) < 2:
+            self._search_completer.setModel(QStringListModel([], self._search_completer))
+            return
+
+        # A short debounce avoids one network lookup for every keystroke.
+        QTimer.singleShot(260, lambda q=query, t=token: self._fetch_suggestions(q, t))
+
+    def _fetch_suggestions(self, query: str, token: int):
+        if token != self._suggestion_token:
+            return
+
+        def work():
+            try:
+                from actions import cinemeta
+                items = cinemeta.search(query, kind="multi", limit=7)
+                self._suggestions_ready.emit(items, token)
+            except Exception:
+                self._suggestions_ready.emit([], token)
+
+        self._run_async(work)
+
+    def _apply_suggestions(self, items: list, token: int):
+        if token != self._suggestion_token:
+            return
+        self._suggestion_items = {}
+        names = []
+        for movie in items:
+            year = getattr(movie, "release_year", 0)
+            kind = "Serie" if getattr(movie, "media_type", "movie") != "movie" else "Película"
+            text = f"{movie.title}  ·  {year or kind}"
+            self._suggestion_items[text] = movie
+            names.append(text)
+        model = QStringListModel(names, self._search_completer)
+        self._search_completer.setModel(model)
+        if names and self._search.hasFocus():
+            self._search_completer.complete()
+
+    def _open_suggestion(self, text: str):
+        movie = self._suggestion_items.get(text)
+        if movie is not None:
+            self._search_completer.popup().hide()
+            self._show_detail.emit(movie)
+
+    def _load_category(self, category: str):
+        """Cinemeta exposes a search catalog rather than a genre endpoint.
+        Treating a genre as a discovery query keeps the category rail useful
+        with the same provider and no extra API key.
+        """
+        self._set_status(f"Explorando {category.lower()}…")
+
+        def work():
+            try:
+                from actions import cinemeta
+                items = cinemeta.search(category, kind="movie", limit=18)
+                self._results_ready.emit(items, f"Películas de {category}", "")
+            except Exception as e:
+                self._results_ready.emit([], "", str(e))
+
+        self._run_async(work)
+
     def _on_results(self, items: list, header: str, error: str):
         self._items = items
         self._show_grid_view()
@@ -1797,31 +2064,38 @@ class MoviesModePanel(QWidget):
             return
         self._set_status(header)
         self._title.setText(header)
-
         # Featured carousel in the hero banner (first results)
         if hasattr(self, "_hero"):
             self._hero.set_items(items[:5])
             self._hero.setVisible(bool(items))
 
-        # Clear grid
+        # Clear existing rails.
         while self._grid.count():
             item = self._grid.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
 
-        # Add movie cards
-        COLS = 5
-        for i, movie in enumerate(items):
-            card = _MovieCard(movie)
-            card.clicked.connect(lambda m: self._show_detail.emit(m))
-            col = i % COLS
-            row = i // COLS
-            self._grid.addWidget(card, row, col,
-                                 Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._render_rails([(header or "Resultados", items)])
 
         # Scroll back to the top when new results arrive.
         if hasattr(self, "_page_scroll"):
             self._page_scroll.verticalScrollBar().setValue(0)
+
+    def _render_rails(self, selections):
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        for title, rail_items in selections:
+            rail = _ContentRail(title, rail_items[:14])
+            rail.clicked.connect(lambda m: self._show_detail.emit(m))
+            self._grid.addWidget(rail)
+
+    def _apply_home_rails(self, rails):
+        # Do not replace a user-initiated search with late category results.
+        if self._title.text() != "Películas en tendencia":
+            return
+        self._render_rails(rails)
 
     def _on_back(self):
         """Contextual back: from the player, stop it; otherwise go to the grid."""
@@ -1851,41 +2125,61 @@ class MoviesModePanel(QWidget):
         detail.setSpacing(14)
         detail.setContentsMargins(0, 0, 0, 8)
 
-        # Hero banner — same widget as the grid carousel and the anime detail
-        # view. Fetches the backdrop itself (async, disk-cached) and falls
-        # back to the poster when there is no backdrop.
+        # Artwork-first backdrop; the information below owns the typography and
+        # actions so the detail screen reads as one deliberate composition.
         hero = _HeroBanner()
-        hero.setFixedHeight(360)
+        hero.setFixedHeight(270)
         hero.play_clicked.connect(lambda m: self._search_and_play(m))
         hero.info_clicked.connect(lambda _: None)  # already on the detail view
         hero.set_movie(movie)
+        hero.set_compact(True)
         detail.addWidget(hero)
 
-        # Synopsis card
+        info = QFrame()
+        info.setStyleSheet("""
+            QFrame { background:#0b1b27; border:1px solid #1b4a69; border-radius:16px; }
+            QLabel { background:transparent; border:none; }
+        """)
+        info_lay = QVBoxLayout(info)
+        info_lay.setContentsMargins(24, 20, 24, 22)
+        info_lay.setSpacing(10)
+
+        eyebrow = QLabel("PELÍCULA" if getattr(movie, "media_type", "movie") == "movie" else "SERIE")
+        eyebrow.setFont(QFont("Inter", 8, QFont.Weight.Bold))
+        eyebrow.setStyleSheet("color:#6dc9ff; letter-spacing:1px;")
+        info_lay.addWidget(eyebrow)
+        title = QLabel(movie.title)
+        title.setWordWrap(True)
+        title.setFont(QFont("Inter", 23, QFont.Weight.Bold))
+        title.setStyleSheet("color:#f5fbff;")
+        info_lay.addWidget(title)
+
+        facts = QHBoxLayout()
+        facts.setSpacing(8)
+        for value in filter(None, [
+            str(getattr(movie, "release_year", 0) or ""),
+            f"★ {movie.rating:.1f}" if getattr(movie, "rating", 0) else "",
+            "HD",
+        ]):
+            chip = QLabel(value)
+            chip.setFont(QFont("Inter", 8, QFont.Weight.Bold))
+            chip.setStyleSheet("color:#cbeaff; background:#12334a; border-radius:10px; padding:5px 10px;")
+            facts.addWidget(chip)
+        facts.addStretch(1)
+        info_lay.addLayout(facts)
+
         if movie.overview:
-            card = QWidget()
-            card.setStyleSheet(
-                f"background:{C.PANEL}; border:1px solid {C.BORDER_A};"
-                "border-radius:12px;"
-            )
-            card_lay = QVBoxLayout(card)
-            card_lay.setContentsMargins(16, 12, 16, 14)
-            card_lay.setSpacing(6)
-            synopsis_label = QLabel("Sinopsis")
-            synopsis_label.setFont(QFont(FONT_UI, 11, QFont.Weight.Bold))
-            synopsis_label.setStyleSheet(
-                f"color:{C.TEXT}; background:transparent; border:none;")
-            card_lay.addWidget(synopsis_label)
             overview = QLabel(movie.overview)
             overview.setWordWrap(True)
-            overview.setFont(QFont(FONT_UI, 10))
-            overview.setStyleSheet(
-                f"color:{C.TEXT_MED}; background:transparent; border:none;")
-            card_lay.addWidget(overview)
-            detail.addWidget(card)
+            overview.setFont(QFont("Inter", 10))
+            overview.setStyleSheet("color:#b7c9d5; line-height:1.45;")
+            info_lay.addWidget(overview)
 
-        # Action row: play (primary gradient) + download (outline)
-        play_btn = QPushButton("▶  Reproducir")
+        # Action row: the primary path is obvious; secondary actions are kept
+        # available without competing with it.
+        play_btn = QPushButton("  Reproducir")
+        play_btn.setIcon(_line_icon("play", C.DARK, 16))
+        play_btn.setIconSize(QSize(16, 16))
         play_btn.setFixedHeight(44)
         play_btn.setFont(QFont(FONT_UI, 11, QFont.Weight.Bold))
         play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1900,26 +2194,34 @@ class MoviesModePanel(QWidget):
         """)
         play_btn.clicked.connect(lambda: self._search_and_play(movie))
 
-        # Download button — same torrent aggregation as Play, but saves the
-        # file to disk instead of streaming it into VLC.
-        download_btn = QPushButton("⬇  Descargar")
+        secondary_qss = f"""
+            QPushButton {{ background:{C.GLASS}; color:{C.TEXT}; border:1px solid {C.BORDER};
+                border-radius:10px; font-weight:700; }}
+            QPushButton:hover {{ border-color:#75caff; background:{C.GLASS_2}; }}
+        """
+        trailer_btn = QPushButton("  Tráiler")
+        trailer_btn.setIcon(_line_icon("play", C.TEXT, 16))
+        trailer_btn.setIconSize(QSize(16, 16))
+        trailer_btn.setFixedHeight(44)
+        trailer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        trailer_btn.setStyleSheet(secondary_qss)
+        trailer_btn.clicked.connect(hero._open_trailer)
+
+        download_btn = QPushButton("  Descargar")
+        download_btn.setIcon(_line_icon("download", C.TEXT, 16))
+        download_btn.setIconSize(QSize(16, 16))
         download_btn.setFixedHeight(44)
-        download_btn.setFont(QFont(FONT_UI, 11, QFont.Weight.Bold))
         download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        download_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{C.GLASS}; color:{C.TEXT};
-                border:1px solid {C.BORDER}; border-radius:10px; font-weight:bold;
-            }}
-            QPushButton:hover {{ border-color:{C.PRI}; color:{C.PRI}; }}
-        """)
+        download_btn.setStyleSheet(secondary_qss)
         download_btn.clicked.connect(lambda: self._search_and_download(movie))
         play_row = QHBoxLayout()
         play_row.setSpacing(10)
-        play_row.setContentsMargins(4, 2, 4, 0)
+        play_row.setContentsMargins(0, 8, 0, 0)
         play_row.addWidget(play_btn, 1)
+        play_row.addWidget(trailer_btn, 1)
         play_row.addWidget(download_btn, 1)
-        detail.addLayout(play_row)
+        info_lay.addLayout(play_row)
+        detail.addWidget(info)
 
         detail.addStretch()
         self._detail_layout.addWidget(detail_widget)
@@ -2007,7 +2309,18 @@ class MoviesModePanel(QWidget):
                 continue
             seen.add(key)
             unique.append(t)
-        unique.sort(key=lambda t: (getattr(t, "spanish", False), t.seeders), reverse=True)
+        # Rank in health tiers so a near-dead Castilian release (1-2 seeders,
+        # won't stream) never outranks a healthy one. Within the healthy tier
+        # keep the Spanish-first preference; the dead tier is ordered by seeders
+        # alone so the least-hopeless option floats up.
+        MIN_HEALTHY = 3
+
+        def _rank(t):
+            s = t.seeders or 0
+            healthy = s >= MIN_HEALTHY
+            return (healthy, healthy and getattr(t, "spanish", False), s)
+
+        unique.sort(key=_rank, reverse=True)
         return unique
 
     def _search_and_play(self, movie):
@@ -2063,7 +2376,11 @@ class MoviesModePanel(QWidget):
             self._set_status("Reproducción cancelada")
             return
 
-        torrent = dialog.selected_torrent
+        self._begin_stream(dialog.selected_torrent, movie, episode)
+
+    def _begin_stream(self, torrent, movie, episode: int = 0):
+        """Switch to the player view and stream the chosen torrent (main
+        thread). Shared by the dialog flow and the assistant auto-play flow."""
         if not (self._player and self._player.available()):
             self._set_status("VLC no disponible. Instala la app VLC de VideoLAN (videolan.org) en 64 bits.")
             return
@@ -2086,13 +2403,51 @@ class MoviesModePanel(QWidget):
             try:
                 from actions import vlc_player as vp
 
+                # Metadata for real-world swarms (esp. Spanish trackers) can
+                # legitimately take up to a minute; surface live peer counts
+                # so the wait doesn't read as a hang.
+                def on_progress(peers, elapsed):
+                    self._status_sig.emit(
+                        f"▶ Conectando con «{movie.title}»… "
+                        f"{peers} peers ({elapsed}s)")
+
                 stream_url = vp.start_streaming(
                     torrent.magnet, movie.title,
-                    file_index=getattr(torrent, "file_idx", -1))
+                    file_index=getattr(torrent, "file_idx", -1),
+                    progress_hook=on_progress)
                 # Playback touches Qt widgets, so hand the URL to the main thread.
                 self._stream_ready.emit(stream_url, movie)
             except Exception as e:
                 self._status_sig.emit(f"Error iniciando reproducción: {e}")
+
+        self._run_async(work)
+
+    def assistant_play(self, query: str, kind: str = "movie"):
+        """Hands-free play entry point for the AI assistant: resolve the title
+        to a movie, gather torrents, auto-pick the top-ranked (healthy) one, and
+        stream it — no dialog. Runs the lookup on a worker thread; the actual
+        playback is marshalled back to the main thread via a signal."""
+        query = (query or "").strip()
+        if not query:
+            self._set_status("¿Qué película quieres ver?")
+            return
+        self._set_status(f"Buscando «{query}»…")
+
+        def work():
+            try:
+                from actions import movie_search as ms
+                results = ms.search(query, kind=kind or "movie", limit=1)
+            except Exception as e:
+                self._status_sig.emit(f"No encontré «{query}»: {e}")
+                return
+            if not results:
+                self._status_sig.emit(f"No encontré «{query}».")
+                return
+            movie = results[0]
+            torrents = self._gather_torrents(movie)  # emits its own status on fail
+            if torrents:
+                # Top of the health-tiered ranking = best bet to actually load.
+                self._assistant_stream.emit(torrents[0], movie)
 
         self._run_async(work)
 
@@ -2281,6 +2636,25 @@ class MoviesModePanel(QWidget):
         reset = menu.addAction("Restablecer sincronía")
         reset.triggered.connect(lambda: self._player.set_subtitle_delay(0))
 
+        # Progressive drift (grows over time) = FPS mismatch, not a constant
+        # offset. Rescale the loaded .srt between the common film frame rates.
+        drift = menu.addMenu("Corregir desfase progresivo (FPS)")
+        drift.setStyleSheet(menu.styleSheet())
+        drift.setEnabled(bool(self._current_srt))
+        # Symptom → correction: cues drifting ever LATER means their timestamps
+        # are too large, so the timeline must be compressed (scale < 1, i.e.
+        # src_fps < dst_fps); ever EARLIER means it must be stretched.
+        fps_pairs = [
+            ("Subtítulo va cada vez más tarde  (23.976 → 25)", 23.976, 25.0),
+            ("Subtítulo va cada vez más pronto (25 → 23.976)", 25.0, 23.976),
+            ("Cada vez más tarde  (23.976 → 24)", 23.976, 24.0),
+            ("Cada vez más pronto (24 → 23.976)", 24.0, 23.976),
+        ]
+        for label, sf, df in fps_pairs:
+            act = drift.addAction(label)
+            act.triggered.connect(
+                lambda _=False, a=sf, b=df: self._retime_subs(a, b))
+
         btn = self._active_control_btn("subs_btn")
         menu.exec(btn.mapToGlobal(btn.rect().topLeft()))
 
@@ -2400,9 +2774,33 @@ class MoviesModePanel(QWidget):
     def _on_subtitle_ready(self, srt_path: str, label: str):
         """Load a downloaded subtitle into VLC (main thread)."""
         if self._player and self._player.add_subtitle_file(srt_path):
+            self._current_srt = srt_path
             self._set_status(f"✓ Subtítulos en {label} cargados")
         else:
             self._set_status("No se pudieron cargar los subtítulos")
+
+    # -- progressive subtitle drift correction (FPS mismatch) ---------------
+    def _retime_subs(self, src_fps: float, dst_fps: float):
+        """Rescale the loaded external .srt to fix a growing desync, then
+        reload it. FPS mismatch (e.g. 25 vs 23.976) makes the offset accumulate
+        over time — a constant spu-delay can't fix that, but rescaling can."""
+        if not self._current_srt:
+            self._set_status("Primero carga un subtítulo (Buscar online…)")
+            return
+        try:
+            from actions import subtitle_retime
+            new_path = subtitle_retime.retime_fps(
+                self._current_srt, src_fps, dst_fps)
+        except Exception as e:
+            self._set_status(f"No se pudo corregir el desfase: {e}")
+            return
+        if self._player and self._player.add_subtitle_file(new_path):
+            self._current_srt = new_path
+            # The correction is baked into the file; clear any manual delay.
+            self._player.set_subtitle_delay(0)
+            self._set_status(f"✓ Desfase corregido ({src_fps:g}→{dst_fps:g} fps)")
+        else:
+            self._set_status("No se pudo recargar el subtítulo corregido")
 
     def _start_poller(self):
         if self._poll_thread is not None and self._poll_thread.is_alive():
@@ -3428,11 +3826,48 @@ class AnimeModePanel(MoviesModePanel):
 
         # -- Synopsis --
         if anime.overview:
+            overview_card = QFrame()
+            overview_card.setStyleSheet(
+                f"background:{C.PANEL}; border:1px solid {C.BORDER_A}; border-radius:12px;"
+            )
+            overview_lay = QVBoxLayout(overview_card)
+            overview_lay.setContentsMargins(16, 12, 16, 14)
+            overview_lay.setSpacing(6)
+            overview_title = QLabel("Sinopsis")
+            overview_title.setFont(QFont(FONT_UI, 11, QFont.Weight.Bold))
+            overview_title.setStyleSheet(f"color:{C.TEXT}; background:transparent; border:none;")
+            overview_lay.addWidget(overview_title)
             overview = QLabel(anime.overview)
             overview.setWordWrap(True)
             overview.setFont(QFont(FONT_UI, 10))
-            overview.setStyleSheet(f"color:{C.TEXT_MED}; padding:0 4px;")
-            self._detail_layout.addWidget(overview)
+            overview.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+            overview_lay.addWidget(overview)
+            self._detail_layout.addWidget(overview_card)
+
+        anime_actions = QHBoxLayout()
+        anime_actions.setContentsMargins(4, 2, 4, 2)
+        anime_actions.setSpacing(10)
+        start_btn = QPushButton("▶  Empezar a ver")
+        start_btn.setFixedHeight(42)
+        start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        start_btn.setStyleSheet(f"""
+            QPushButton {{ background:{C.PRI_DIM}; color:{C.DARK}; border:none;
+                border-radius:10px; font-weight:700; }}
+            QPushButton:hover {{ background:{C.PRI}; }}
+        """)
+        start_btn.clicked.connect(lambda: self._search_and_play(anime, episode=1))
+        trailer_btn = QPushButton("▷  Ver tráiler")
+        trailer_btn.setFixedHeight(42)
+        trailer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        trailer_btn.setStyleSheet(f"""
+            QPushButton {{ background:{C.GLASS}; color:{C.TEXT}; border:1px solid {C.BORDER};
+                border-radius:10px; font-weight:700; padding:0 16px; }}
+            QPushButton:hover {{ border-color:{C.TEXT}; background:{C.GLASS_2}; }}
+        """)
+        trailer_btn.clicked.connect(hero._open_trailer)
+        anime_actions.addWidget(start_btn, 1)
+        anime_actions.addWidget(trailer_btn)
+        self._detail_layout.addLayout(anime_actions)
 
         # -- MAL status card (only if logged in and we have a mal_id) --
         from actions.mal_auth import is_logged_in

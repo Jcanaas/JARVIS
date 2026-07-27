@@ -63,14 +63,30 @@ def _memory_entries() -> list[dict]:
         for key, entry in items.items():
             value = entry.get("value") if isinstance(entry, dict) else entry
             updated = entry.get("updated") if isinstance(entry, dict) else ""
+            expires = entry.get("expires") if isinstance(entry, dict) else ""
             if value:
                 entries.append({
                     "category": category,
                     "key": key,
                     "value": str(value),
                     "updated": updated or "",
+                    "expires": expires or "",
+                    "permanent": not bool(expires),
                 })
     return entries
+
+
+def memory_remember(key: str, value: str, category: str = "notes", ttl_days: int = 0) -> str:
+    """Save a memory entry. ttl_days=0 (default) means permanent — "recuérdalo
+    de por vida". A positive ttl_days means it auto-expires that many days
+    from now — "solo para esta semana" etc."""
+    from memory.memory_manager import remember
+
+    if not key or not str(value or "").strip():
+        return "Necesito key y value para recordar algo."
+    ttl = int(ttl_days or 0)
+    return remember(key=key, value=value, category=category or "notes",
+                     ttl_days=ttl if ttl > 0 else None)
 
 
 def memory_list(category: str = "", limit: int = 50) -> list[dict]:
@@ -203,6 +219,13 @@ def personal_tools(parameters: dict, speak=None):
 
     event_bus.log("Personal", f"[Personal] {action}")
 
+    if action == "memory_remember":
+        return memory_remember(
+            key=params.get("key", ""),
+            value=params.get("value", ""),
+            category=params.get("category", "notes"),
+            ttl_days=int(params.get("ttl_days") or 0),
+        )
     if action == "memory_list":
         return memory_list(category=params.get("category", ""), limit=int(params.get("limit") or 50))
     if action == "memory_search":
@@ -235,6 +258,6 @@ def personal_tools(parameters: dict, speak=None):
         return clipboard_history(limit=int(params.get("limit") or 10))
 
     return (
-        "Accion desconocida. Usa memory_list, memory_search, memory_forget, "
+        "Accion desconocida. Usa memory_remember, memory_list, memory_search, memory_forget, "
         "notes_add, notes_list, notes_search, clipboard_get, clipboard_set o clipboard_history."
     )

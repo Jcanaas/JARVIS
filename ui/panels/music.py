@@ -20,6 +20,29 @@ from ..icons import *
 from ..widgets import *
 from ..widgets.inputs import SearchGlowInput
 
+
+class _SquareArtworkLabel(QLabel):
+    """Artwork label whose requested height tracks its available width."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return max(1, int(width))
+
+    def sizeHint(self) -> QSize:
+        return QSize(320, 320)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(260, 260)
+
+
 class MusicModePanelV2(QWidget):
     _thumb_sig = pyqtSignal(object, object)
     _result_sig = pyqtSignal(str, object)
@@ -164,6 +187,18 @@ class MusicModePanelV2(QWidget):
         self.shuffle_btn.clicked.connect(self._play_current_playlist_shuffled)
         self.shuffle_btn.setVisible(False)
         header_actions.addWidget(self.shuffle_btn)
+
+        self.offline_btn = QPushButton("Descargar offline")
+        self.offline_btn.setObjectName("MusicHeaderAction")
+        self.offline_btn.setIcon(_line_icon("download", "#DCE1FF", 17))
+        self.offline_btn.setIconSize(QSize(17, 17))
+        self.offline_btn.setToolTip("Descargar esta playlist en local (máxima calidad)")
+        self.offline_btn.clicked.connect(self._toggle_offline)
+        self.offline_btn.setVisible(False)
+        header_actions.addWidget(self.offline_btn)
+        self._offline_poll_timer = None
+        self._ensure_offline_poll_timer()
+
         header_actions.addStretch()
 
         header_text.addLayout(header_actions)
@@ -221,12 +256,11 @@ class MusicModePanelV2(QWidget):
         self.details_heading = QLabel("REPRODUCIENDO")
         self.details_heading.setObjectName("NowPlayingHeading")
         details_layout.addWidget(self.details_heading)
-        self.detail_cover = QLabel()
+        self.detail_cover = _SquareArtworkLabel()
         self.detail_cover.setObjectName("NowPlayingCover")
         self.detail_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.detail_cover.setMinimumHeight(260)
-        self.detail_cover.setMaximumHeight(360)
-        self.detail_cover.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.detail_cover.setMaximumHeight(440)
         self.details_scroll = QScrollArea()
         self.details_scroll.setObjectName("NowPlayingScroll")
         self.details_scroll.setWidgetResizable(True)
@@ -1109,13 +1143,18 @@ class MusicModePanelV2(QWidget):
             self.detail_cover.setPixmap(QPixmap())
             self.detail_cover.setText("♪")
             return
-        compact = bool(getattr(self, "_details_compact_state", False))
-        min_size = 120 if compact else 260
-        max_w = max(min_size, min(520, self.detail_cover.width() or 320))
-        max_h = max(min_size, min(360, self.detail_cover.height() or 340))
+        # The rail is never rendered in a compact/reflowed mode.  Keep one
+        # square sizing rule so a resize cannot leave a tiny or stretched art
+        # preview behind when the rail becomes visible again.
+        min_size = 260
+        max_w = max(min_size, self.detail_cover.width() or 320)
+        max_h = max(min_size, self.detail_cover.height() or max_w)
         scaled = pix.scaled(
             max_w,
             max_h,
+            # Contain the complete source image.  Expanding to fill the
+            # frame crops album-art edges whenever the label is not perfectly
+            # square during a resize.
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -1343,6 +1382,7 @@ class MusicModePanelV2(QWidget):
             self._set_header(self._playlist_title(playlist), self._playlist_meta(playlist, len(self._items)), "Lista", playlist)
         is_playlist = bool(playlist) and table_kind == "playlist_tracks" and bool(self._items)
         self.shuffle_btn.setVisible(is_playlist)
+        self._refresh_offline_button()
         self.status.setVisible(False)
         self._prefetch_thumbnails()
         self._prefetch_audio_streams(0, 4)
@@ -1774,6 +1814,9 @@ class MusicModePanelV2(QWidget):
         self._table_kind = "playlist_tracks"
         self._playlist_request += 1
         self._set_header(self._playlist_title(data), self._playlist_meta(data), "Lista", data)
+        # Offline playlists: verify against YouTube Music and pull any tracks
+        # added since the last visit, in the background.
+        self._maybe_autosync_offline()
 
         import time as _time
         cached = self._playlist_tracks_cache.get(pid)
@@ -1882,13 +1925,142 @@ class MusicModePanelV2(QWidget):
             "shuffle": False,
         })
 
+    # ------------------------------------------------------------------
+    # Offline playlists
+    # ------------------------------------------------------------------
+
+    def _current_playlist_id(self) -> str:
+        pl = self._current_playlist or {}
+        return str(pl.get("playlistId") or pl.get("browseId") or "").strip()
+
+    def _is_current_offline(self) -> bool:
+        pid = self._current_playlist_id()
+        if not pid:
+            return False
+        try:
+            from actions.offline_library import is_offline
+            return is_offline(pid)
+        except Exception:
+            return False
+
+    def _is_current_syncing(self) -> bool:
+        pid = self._current_playlist_id()
+        if not pid:
+            return False
+        try:
+            from actions.offline_library import is_syncing
+            return is_syncing(pid)
+        except Exception:
+            return False
+
+    def _refresh_offline_button(self):
+        is_playlist = (
+            self._table_kind == "playlist_tracks"
+            and bool(self._items)
+            and bool(self._current_playlist_id())
+        )
+        self.offline_btn.setVisible(is_playlist)
+        if not is_playlist:
+            return
+        if self._is_current_syncing():
+            self.offline_btn.setText("Sincronizando...")
+            self.offline_btn.setToolTip("Descargando canciones que faltan de esta playlist")
+            self.offline_btn.setEnabled(False)
+        elif self._is_current_offline():
+            self.offline_btn.setText("Sincronizar offline")
+            self.offline_btn.setToolTip("Verificar canciones nuevas, o borrar la copia local")
+            self.offline_btn.setEnabled(True)
+        else:
+            self.offline_btn.setText("Descargar offline")
+            self.offline_btn.setToolTip("Descargar esta playlist en local (máxima calidad)")
+            self.offline_btn.setEnabled(True)
+
+    def _ensure_offline_poll_timer(self):
+        if getattr(self, "_offline_poll_timer", None) is not None:
+            return
+        self._offline_poll_timer = QTimer(self)
+        self._offline_poll_timer.setInterval(600)
+        self._offline_poll_timer.timeout.connect(self._refresh_offline_button)
+        self._offline_poll_timer.start()
+
+    def _start_offline_download(self, pid: str, title: str):
+        win = self.window()
+        if not getattr(win, "on_playback_command", None):
+            QMessageBox.warning(
+                self, "Descargar offline",
+                "El backend de reproducción/descarga no está conectado (on_playback_command es None). "
+                "Revisa la consola al arrancar JARVIS por si _install_playback_handlers falló.",
+            )
+            return
+        # Both first download and re-sync go through the same action: it marks
+        # the playlist offline (if needed) and downloads whatever is missing.
+        self._send_playback("download_playlist_offline", {"playlist_id": pid, "title": title})
+        self._refresh_offline_button()
+
+    def _remove_current_offline(self):
+        pid = self._current_playlist_id()
+        if not pid:
+            return
+        delete = QMessageBox.question(
+            self, "Quitar de offline",
+            "¿Borrar también los archivos descargados de esta playlist?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes
+        self._send_playback("remove_playlist_offline", {"playlist_id": pid, "delete_files": delete})
+        self._refresh_offline_button()
+
+    def _toggle_offline(self):
+        """Click handler for the single offline button.
+
+        Not offline yet -> starts the download. Already offline and idle ->
+        pops a small menu (sync now / delete + disable). Currently syncing ->
+        the button is disabled by _refresh_offline_button, nothing to do."""
+        pid = self._current_playlist_id()
+        if not pid:
+            QMessageBox.warning(
+                self, "Descargar offline",
+                "No hay una playlist abierta con ID reconocible; no se puede descargar.\n"
+                f"current_playlist={self._current_playlist!r}",
+            )
+            return
+        if self._is_current_syncing():
+            return
+
+        if not self._is_current_offline():
+            title = self._playlist_title(self._current_playlist or {})
+            self._start_offline_download(pid, title)
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet(self._MENU_STYLE)
+        act_sync = menu.addAction("Sincronizar ahora")
+        act_delete = menu.addAction("Borrar y desactivar offline")
+        chosen = menu.exec(self.offline_btn.mapToGlobal(self.offline_btn.rect().bottomLeft()))
+        if chosen is act_sync:
+            title = self._playlist_title(self._current_playlist or {})
+            self._start_offline_download(pid, title)
+        elif chosen is act_delete:
+            self._remove_current_offline()
+
+    def _maybe_autosync_offline(self):
+        """When opening an offline playlist, verify/download missing tracks."""
+        pid = self._current_playlist_id()
+        if not pid or not self._is_current_offline():
+            return
+        title = self._playlist_title(self._current_playlist or {})
+        self._send_playback("sync_playlist_offline", {"playlist_id": pid, "title": title})
+
     def _send_playback(self, action: str, params: dict | None = None):
         win = self.window()
         cb = getattr(win, "on_playback_command", None)
         if cb:
             threading.Thread(target=cb, args=(action, params or {}), daemon=True).start()
 
-    _DETAILS_COMPACT_WIDTH = 860
+    # Below this width the details rail is hidden completely.  It must never
+    # reflow underneath the library: doing so makes the panel jump vertically
+    # while resizing and leaves a broken-looking half card at the bottom.
+    _DETAILS_HIDE_WIDTH = 860
     _HEADER_NARROW_WIDTH = 560
 
     def resizeEvent(self, event):
@@ -1899,49 +2071,45 @@ class MusicModePanelV2(QWidget):
 
     def _details_should_show(self) -> bool:
         data = self._now_playing_data if isinstance(self._now_playing_data, dict) else {}
-        return bool(data.get("title"))
+        return bool(data.get("title")) and self.width() >= self._DETAILS_HIDE_WIDTH
 
     def _apply_details_responsive(self):
-        """Keep now-playing useful at every practical panel width.
+        """Keep the details rail stable while the panel is resized.
 
-        At desktop widths it is a persistent right rail.  Below the breakpoint
-        it moves below the library and turns into a short horizontal card, so
-        song and artist information remains available without squeezing either
-        the table or the album art.
+        The rail is either a right-hand column or hidden.  It is deliberately
+        never moved below the library: a vertical fallback causes a visible
+        layout jump and can leave the card stranded underneath the table.
         """
-        compact = self.width() < self._DETAILS_COMPACT_WIDTH
-        if compact == getattr(self, "_details_compact_state", None):
+        hidden = self.width() < self._DETAILS_HIDE_WIDTH
+        if hidden == getattr(self, "_details_hidden_state", None):
             return
-        self._details_compact_state = compact
+        self._details_hidden_state = hidden
 
-        if compact:
-            self._body_layout.setDirection(QBoxLayout.Direction.TopToBottom)
-            self._body_layout.setStretch(0, 1)
-            self._body_layout.setStretch(1, 0)
-            self.details_panel.setMinimumWidth(0)
-            self.details_panel.setMinimumHeight(174)
-            self.details_panel.setMaximumHeight(224)
-            self.details_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            self.details_content_layout.setDirection(QBoxLayout.Direction.LeftToRight)
-            self.details_content_layout.setStretch(0, 0)
-            self.details_content_layout.setStretch(1, 1)
-            self.detail_cover.setFixedSize(136, 136)
-        else:
-            self._body_layout.setDirection(QBoxLayout.Direction.LeftToRight)
-            self._body_layout.setStretch(0, 7)
-            self._body_layout.setStretch(1, 3)
-            self.details_panel.setMinimumWidth(310)
-            self.details_panel.setMinimumHeight(0)
-            self.details_panel.setMaximumHeight(16777215)
-            self.details_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-            self.details_content_layout.setDirection(QBoxLayout.Direction.TopToBottom)
-            self.details_content_layout.setStretch(0, 0)
-            self.details_content_layout.setStretch(1, 0)
-            self.detail_cover.setMinimumHeight(260)
-            self.detail_cover.setMaximumHeight(360)
-            self.detail_cover.setMinimumWidth(0)
-            self.detail_cover.setMaximumWidth(16777215)
-            self.detail_cover.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Keep one horizontal body layout in every state.  When hidden, the
+        # left/library pane receives all available width instead of reflowing.
+        if hidden:
+            # Hide before changing the sizing hints so Qt can actually shrink
+            # the parent window below the desktop rail's minimum width.
+            self.details_panel.setVisible(False)
+        self._body_layout.setDirection(QBoxLayout.Direction.LeftToRight)
+        self._body_layout.setStretch(0, 1 if hidden else 7)
+        self._body_layout.setStretch(1, 0 if hidden else 3)
+        # Do not impose a desktop-only minimum on the parent: it would prevent
+        # the resize event from ever reaching the hide breakpoint.
+        self.details_panel.setMinimumWidth(0)
+        self.details_panel.setMinimumHeight(0)
+        self.details_panel.setMaximumHeight(16777215)
+        self.details_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.details_content_layout.setDirection(QBoxLayout.Direction.TopToBottom)
+        self.details_content_layout.setStretch(0, 0)
+        self.details_content_layout.setStretch(1, 0)
+        self.detail_cover.setMinimumHeight(0 if hidden else 260)
+        self.detail_cover.setMaximumHeight(440)
+        self.detail_cover.setMinimumWidth(0)
+        self.detail_cover.setMaximumWidth(16777215)
+        cover_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        cover_policy.setHeightForWidth(True)
+        self.detail_cover.setSizePolicy(cover_policy)
 
         # Re-scale the current artwork to its new container without waiting for
         # a metadata refresh.
@@ -1950,7 +2118,8 @@ class MusicModePanelV2(QWidget):
 
     def _update_details_visibility(self):
         try:
-            self.details_panel.setVisible(self._details_should_show())
+            visible = self._details_should_show()
+            self.details_panel.setVisible(visible)
         except RuntimeError:
             pass
 
@@ -3549,6 +3718,98 @@ class _MusicFloatWindow(QWidget):
         self._anim.stop()
         super().closeEvent(event)
 
+
+class _KaraokeFloatWindow(QWidget):
+    """Floating always-on-top karaoke overlay: shows the current synced
+    lyric line big and centered. Draggable, closable via update_line()."""
+
+    def __init__(self, on_close):
+        super().__init__()
+        self._on_close = on_close
+        self._drag: QPoint | None = None
+        self._origin: QPoint | None = None
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(520, 140)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        self._track_lbl = QLabel("")
+        self._track_lbl.setStyleSheet(
+            "color: rgba(182,196,255,0.65); font-size: 11px; font-weight: 700; background: transparent;"
+        )
+        self._track_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        top.addWidget(self._track_lbl, stretch=1)
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(18, 18)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(lambda: self._on_close())
+        close_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " color: rgba(175,200,230,0.40); font-size: 13px; padding: 0; }"
+            "QPushButton:hover { color: #B6C4FF; }"
+            "QPushButton:pressed { color: #5E82FF; }"
+        )
+        top.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        lay.addLayout(top)
+
+        self._line_lbl = QLabel("♪")
+        self._line_lbl.setWordWrap(True)
+        self._line_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._line_lbl.setStyleSheet(
+            "color: #DCE1FF; font-size: 20px; font-weight: 700; background: transparent;"
+        )
+        lay.addWidget(self._line_lbl, stretch=1)
+
+        for w in (self._track_lbl, self._line_lbl):
+            w.installEventFilter(self)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(182, 196, 255, 45), 1))
+        p.setBrush(QColor(5, 10, 20, 235))
+        p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 16, 16)
+
+    # ------------------------------------------------------------------ drag
+    def eventFilter(self, obj, event):
+        t = event.type()
+        if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._drag = event.globalPosition().toPoint()
+            self._origin = self.pos()
+        elif t == QEvent.Type.MouseMove and self._drag is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self.move(self._origin + (event.globalPosition().toPoint() - self._drag))
+        elif t == QEvent.Type.MouseButtonRelease:
+            self._drag = None
+        return False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag = event.globalPosition().toPoint()
+            self._origin = self.pos()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            self.move(self._origin + (event.globalPosition().toPoint() - self._drag))
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag = None
+
+    def update_line(self, track: str, line: str):
+        self._track_lbl.setText(track)
+        self._line_lbl.setText(line or "♪")
 
 
 

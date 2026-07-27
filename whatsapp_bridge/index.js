@@ -617,8 +617,13 @@ client.on('disconnected', (reason) => {
 
 client.on('message', async (msg) => {
   try {
+    // On LID chats msg.id._serialized is undefined; using it raw made mediaUrl
+    // "/media?id=undefined", and getMessageById('undefined') throws "Invalid
+    // serialized message id specified" (500) on transcribe/download. Rebuild
+    // the canonical id like serializeMessage() does.
+    const messageId = serializeMsgId(msg.id);
     const entry = {
-      id: msg.id ? msg.id._serialized : null,
+      id: messageId,
       from: msg.from,
       to: msg.to || null,
       chatId: msg.fromMe ? msg.to : msg.from,
@@ -629,7 +634,7 @@ client.on('message', async (msg) => {
       fromMe: !!msg.fromMe,
       direction: msg.fromMe ? 'out' : 'in',
       hasMedia: !!msg.hasMedia,
-      mediaUrl: msg.hasMedia && msg.id ? `/media?id=${encodeURIComponent(msg.id._serialized)}` : null,
+      mediaUrl: msg.hasMedia && messageId ? `/media?id=${encodeURIComponent(messageId)}` : null,
       mentionedIds: Array.isArray(msg.mentionedIds) ? msg.mentionedIds : [],
       quoted: await getQuotedInfo(msg),
       // `timestamp` is arrival order (Date.now()) — the Python manager's
@@ -678,7 +683,9 @@ client.on('message_create', async (msg) => {
       // show up after a full conversation reload. Our own sends via
       // /send and /send_media already push their own entry, so dedupe by id
       // to avoid double entries for those.
-      const id = msg.id ? msg.id._serialized : null;
+      // Rebuild via serializeMsgId (LID chats drop id._serialized) so mediaUrl
+      // never becomes "/media?id=undefined". See the 'message' handler above.
+      const id = serializeMsgId(msg.id);
       if (id && !isNoiseMessage(msg) && !messages.some(m => m.id === id)) {
         const entry = {
           id,
@@ -692,7 +699,7 @@ client.on('message_create', async (msg) => {
           fromMe: true,
           direction: 'out',
           hasMedia: !!msg.hasMedia,
-          mediaUrl: msg.hasMedia && msg.id ? `/media?id=${encodeURIComponent(msg.id._serialized)}` : null,
+          mediaUrl: msg.hasMedia && id ? `/media?id=${encodeURIComponent(id)}` : null,
           mentionedIds: Array.isArray(msg.mentionedIds) ? msg.mentionedIds : [],
           quoted: await getQuotedInfo(msg),
           // See the identical comment in the 'message' handler above: keep
@@ -1077,6 +1084,13 @@ const MEDIA_CACHE_TTL_MS = 5 * 60 * 1000;
 const MEDIA_CACHE_MAX = 40;
 
 async function loadMedia(id) {
+  // Guard against ids that can't be a real serialized MessageID (e.g. stale
+  // "/media?id=undefined" entries buffered before the LID id fix). Passing
+  // these to getMessageById throws "Invalid serialized message id specified"
+  // (a 500); a clean 404 is the honest answer.
+  if (!id || id === 'undefined' || id === 'null' || id.split('_').length < 3) {
+    return { error: 'invalid message id', status: 404 };
+  }
   const cached = mediaCache.get(id);
   if (cached && (Date.now() - cached.ts) < MEDIA_CACHE_TTL_MS) {
     cached.ts = Date.now();
@@ -1167,10 +1181,15 @@ app.post('/send', requireToken, async (req, res) => {
     }
     const sendOptions = quotedMessageId ? { quotedMessageId } : {};
     const m = await client.sendMessage(to, body, sendOptions);
+    // m.id._serialized puede venir undefined (bug conocido de IDs LID en
+    // wwebjs) aunque el mensaje ya se haya entregado. Antes esto tiraba una
+    // excepción al construir la respuesta y el catch externo devolvía
+    // ok:false al instante, aunque WhatsApp ya lo había enviado.
+    const sentId = (m.id && m.id._serialized) || null;
     try {
       const fromId = client.info && client.info.wid ? client.info.wid._serialized : 'me';
       const entry = {
-        id: m.id ? m.id._serialized : null,
+        id: sentId,
         from: fromId,
         to: to,
         // Chat identity for consumers that group messages by chat (Python's
@@ -1211,7 +1230,7 @@ app.post('/send', requireToken, async (req, res) => {
     } catch (e) {
       console.error('failed to record outgoing message', e);
     }
-    res.json({ ok: true, id: m.id._serialized, to, body, ack: m.ack ?? 0 });
+    res.json({ ok: true, id: sentId, to, body, ack: m.ack ?? 0 });
   } catch (e) {
     console.error('send error', e);
     res.status(500).json({ ok: false, error: e.toString() });

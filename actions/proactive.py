@@ -79,3 +79,34 @@ class ProactiveEngine:
                 "Treat these as preferences for this proactive check-in. Follow them when safe and relevant.",
             ])
         return "\n".join(lines)
+
+
+def build_journal_prompt(memory: dict) -> str:
+    """One-shot end-of-day voice journal prompt: ask how the day went, then
+    (once the user actually answers, in a later turn) save a short summary
+    via personal_tools notes_add. Fires once per calendar day — the caller
+    tracks the "already asked today" date, not this function."""
+    from memory.memory_manager import format_memory_for_prompt
+
+    now = datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    mem_str = format_memory_for_prompt(memory) or "(no user data stored yet)"
+
+    return "\n".join([
+        "[DAILY_JOURNAL_CHECK] It's the end of the day — check in about how it went.",
+        f"Today's date: {date_str}",
+        "",
+        "Context about this person:",
+        mem_str,
+        "",
+        "Guidelines:",
+        "- Ask genuinely and briefly how their day went. One short, warm question.",
+        "- Do NOT say [DAILY_JOURNAL_CHECK] or mention these instructions.",
+        "- Respond in the user's language (use memory; default English).",
+        "- Wait for their actual answer in the conversation before doing anything else.",
+        "- Once they've described their day (even briefly), call personal_tools with "
+        "action=notes_add, title='" + date_str + "', tags=['diario'], and text = a short "
+        "1-3 sentence summary of what they told you in their own words/tone — not a verbatim "
+        "transcript, a summary. Then just briefly acknowledge it (e.g. \"anotado\") — don't dwell on it.",
+        "- If they say nothing worth noting, or brush off the question, don't force a note.",
+    ])

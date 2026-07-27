@@ -8,6 +8,7 @@ config/cardtrader_catalog.db
 config/cardtrader_catalog.db-wal
 config/cardtrader_catalog.db-shm
 config/cardtrader_last_quote.json
+config/cardtrader_watchlist.json
 
 # === Generated tool caches (not source) ===
 graphify-out/

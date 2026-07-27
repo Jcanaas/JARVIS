@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from pathlib import Path
 import sys
@@ -28,6 +28,26 @@ def _empty_memory() -> dict:
         "notes":         {},
     }
 
+def _purge_expired(memory: dict) -> bool:
+    """Drop entries whose 'expires' date (YYYY-MM-DD, set via remember(...,
+    ttl_days=N) for "just for this week"-style memories) has passed. Entries
+    with no 'expires' key are permanent and never touched here."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    changed = False
+    for cat, items in memory.items():
+        if not isinstance(items, dict):
+            continue
+        for key, entry in list(items.items()):
+            if not isinstance(entry, dict):
+                continue
+            expires = entry.get("expires")
+            if expires and str(expires) < today:
+                del items[key]
+                changed = True
+                print(f"[Memory] ⏳ Expired {cat}/{key} (vencía {expires})")
+    return changed
+
+
 def load_memory() -> dict:
     if not MEMORY_PATH.exists():
         return _empty_memory()
@@ -39,6 +59,10 @@ def load_memory() -> dict:
                 for key in base:
                     if key not in data:
                         data[key] = {}
+                if _purge_expired(data):
+                    MEMORY_PATH.write_text(
+                        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+                    )
                 return data
             return _empty_memory()
         except Exception as e:
@@ -102,8 +126,15 @@ def _recursive_update(target: dict, updates: dict) -> bool:
         else:
             new_val  = _truncate_value(str(value["value"] if isinstance(value, dict) else value))
             entry    = {"value": new_val, "updated": datetime.now().strftime("%Y-%m-%d")}
+            expires  = value.get("expires") if isinstance(value, dict) else None
+            if expires:
+                entry["expires"] = expires
             existing = target.get(key, {})
-            if not isinstance(existing, dict) or existing.get("value") != new_val:
+            if (
+                not isinstance(existing, dict)
+                or existing.get("value") != new_val
+                or existing.get("expires") != expires
+            ):
                 target[key] = entry
                 changed = True
     return changed
@@ -118,6 +149,12 @@ def update_memory(memory_update: dict) -> dict:
         print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
     return memory
 
+def _ttl_suffix(entry) -> str:
+    if isinstance(entry, dict) and entry.get("expires"):
+        return f" (vence {entry['expires']})"
+    return ""
+
+
 def format_memory_for_prompt(memory: dict | None) -> str:
     if not memory:
         return ""
@@ -131,13 +168,13 @@ def format_memory_for_prompt(memory: dict | None) -> str:
         if entry:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
-                lines.append(f"{field.title()}: {val}")
+                lines.append(f"{field.title()}: {val}{_ttl_suffix(entry)}")
     for key, entry in identity.items():
         if key in id_fields:
             continue
         val = entry.get("value") if isinstance(entry, dict) else entry
         if val:
-            lines.append(f"{key.replace('_', ' ').title()}: {val}")
+            lines.append(f"{key.replace('_', ' ').title()}: {val}{_ttl_suffix(entry)}")
 
     prefs = memory.get("preferences", {})
     if prefs:
@@ -146,7 +183,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
         for key, entry in list(prefs.items())[:15]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
-                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_ttl_suffix(entry)}")
 
     projects = memory.get("projects", {})
     if projects:
@@ -155,7 +192,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
         for key, entry in list(projects.items())[:8]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
-                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_ttl_suffix(entry)}")
 
     rels = memory.get("relationships", {})
     if rels:
@@ -164,7 +201,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
         for key, entry in list(rels.items())[:10]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
-                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_ttl_suffix(entry)}")
 
     wishes = memory.get("wishes", {})
     if wishes:
@@ -173,7 +210,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
         for key, entry in list(wishes.items())[:8]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
-                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_ttl_suffix(entry)}")
 
     notes = memory.get("notes", {})
     if notes:
@@ -182,7 +219,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
         for key, entry in list(notes.items())[:8]:
             val = entry.get("value") if isinstance(entry, dict) else entry
             if val:
-                lines.append(f"  - {key}: {val}")
+                lines.append(f"  - {key}: {val}{_ttl_suffix(entry)}")
 
     if not lines:
         return ""
@@ -194,12 +231,21 @@ def format_memory_for_prompt(memory: dict | None) -> str:
 
     return result + "\n"
 
-def remember(key: str, value: str, category: str = "notes") -> str:
+def remember(key: str, value: str, category: str = "notes", ttl_days: int | None = None) -> str:
+    """Save a memory entry. ttl_days=None means permanent ("recuérdalo de por
+    vida"); a number means it auto-expires and gets purged on the next
+    load_memory() call after that date ("solo para esta semana")."""
     valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
     if category not in valid:
         category = "notes"
-    update_memory({category: {key: {"value": value}}})
-    return f"Remembered: {category}/{key} = {value}"
+    entry: dict = {"value": value}
+    if ttl_days is not None and int(ttl_days) > 0:
+        expires = (datetime.now() + timedelta(days=int(ttl_days))).strftime("%Y-%m-%d")
+        entry["expires"] = expires
+        update_memory({category: {key: entry}})
+        return f"Remembered: {category}/{key} = {value} (vence el {expires})"
+    update_memory({category: {key: entry}})
+    return f"Remembered: {category}/{key} = {value} (permanente)"
 
 
 def forget(key: str, category: str = "notes") -> str:

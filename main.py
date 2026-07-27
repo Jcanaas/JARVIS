@@ -140,6 +140,10 @@ from memory.conversation_history import (
 
 from actions.file_processor import file_processor
 from actions.flight_finder     import flight_finder
+from actions.cardtrader_watchlist import (
+    watchlist_add as _ct_watch_add, watchlist_remove as _ct_watch_remove,
+    watchlist_list as _ct_watch_list, check_price_changes as _ct_watch_check,
+)
 from actions.cardtrader        import (
     cardtrader_search_card, cardtrader_quote_deck, cardtrader_add_to_cart,
     cardtrader_cart, cardtrader_catalog,
@@ -149,7 +153,7 @@ from actions.weather_report    import weather_action
 from actions.send_message      import send_message
 from actions.reminder          import reminder
 from actions.computer_settings import computer_settings
-from actions.proactive         import ProactiveEngine
+from actions.proactive         import ProactiveEngine, build_journal_prompt
 from actions.screen_processor  import _capture_camera, _capture_screen
 from actions.youtube_video     import youtube_video
 from actions.desktop           import desktop_control
@@ -164,7 +168,8 @@ from actions.computer_control  import computer_control
 from actions.capabilities      import capabilities_catalog
 from actions.personal_tools    import personal_tools
 from actions.system_tools      import system_tools
-from actions.productivity_tools import productivity_tools
+from actions.productivity_tools import productivity_tools, calendar_today as productivity_tools_calendar_today
+from actions.steam_catalog import get_specials as get_steam_specials
 from actions.utility_tools     import utility_tools
 from actions.google_calendar   import google_calendar
 from actions.gmail             import gmail
@@ -464,15 +469,17 @@ TOOL_DECLARATIONS = [
         "name": "movies",
         "description": (
             "Search and stream movies or TV shows via torrents. "
-            "Uses TMDB for metadata (titles, posters, ratings) and finds magnet links from 1337x. "
-            "Actions: search (find by title) | trending (popular right now). "
-            "Selections auto-launch in peerflix for streaming."
+            "Uses TMDB for metadata (titles, posters, ratings) and aggregates magnet links "
+            "(Peerflix/Torrentio/1337x). "
+            "Actions: play (switch to Movies mode and start streaming the best-matching title, "
+            "hands-free) | search (return a text list of matches) | trending (popular right now). "
+            "Use 'play' when the user wants to watch something now."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "search | trending"},
-                "query": {"type": "STRING", "description": "Movie/TV title (required for search)"},
+                "action": {"type": "STRING", "description": "play | search | trending"},
+                "query": {"type": "STRING", "description": "Movie/TV title (required for play and search)"},
                 "kind": {"type": "STRING", "description": "movie | tv"}
             },
             "required": ["action"]
@@ -1092,6 +1099,58 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "screen_translate",
+        "description": (
+            "Overlay flotante de OCR + traducción en tiempo real sobre lo que sea que esté en "
+            "pantalla (un juego en inglés, un manual en PDF, cualquier ventana). Lee el texto "
+            "visible cada pocos segundos y muestra la traducción encima, sin bloquear nada."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "start | stop"},
+                "target_lang": {"type": "STRING", "description": "Idioma destino, ej: español, inglés (default español)"},
+                "interval_secs": {"type": "INTEGER", "description": "Segundos entre lecturas de pantalla (default 6, minimo 2)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "screen_watch",
+        "description": (
+            "Vigila la pantalla en segundo plano hasta que ocurra algo concreto (ej: "
+            "'la barra de progreso ha terminado', 'ha aparecido un mensaje de error', "
+            "'la descarga ha terminado') y avisa por voz cuando pase, sin bloquear la "
+            "conversación mientras tanto. Solo una vigilancia a la vez."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "start | stop | status"},
+                "condition": {"type": "STRING", "description": "Qué detectar (para start), en lenguaje natural"},
+                "interval_secs": {"type": "INTEGER", "description": "Segundos entre comprobaciones (default 5, minimo 2)"},
+                "max_minutes": {"type": "INTEGER", "description": "Tiempo máximo vigilando antes de rendirse (default 30)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "cardtrader_watchlist",
+        "description": (
+            "Vigila el precio de una carta de CardTrader para avisar si sube o baja. "
+            "add = empezar a vigilarla, remove = dejar de vigilarla, list = ver la lista, "
+            "check = comprobar ahora mismo si alguna vigilada cambió de precio."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "add | remove | list | check"},
+                "name": {"type": "STRING", "description": "Nombre de la carta (para add/remove)"},
+            },
+            "required": ["action"]
+        }
+    },
+    {
         "name": "shutdown_jarvis",
         "description": (
             "Shuts down the assistant completely. "
@@ -1173,21 +1232,30 @@ TOOL_DECLARATIONS = [
     {
         "name": "personal_tools",
         "description": (
-            "Explicit personal utilities. Use when the user asks to search/list/delete memory, "
+            "Explicit personal utilities. Use when the user asks to remember/search/list/delete memory, "
             "manage quick notes, or read/write clipboard/history. "
-            "Actions: memory_list | memory_search | memory_forget | notes_add | notes_list | notes_search | "
-            "clipboard_get | clipboard_set | clipboard_history."
+            "Actions: memory_remember | memory_list | memory_search | memory_forget | notes_add | notes_list | "
+            "notes_search | clipboard_get | clipboard_set | clipboard_history."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "action": {
                     "type": "STRING",
-                    "description": "memory_list | memory_search | memory_forget | notes_add | notes_list | notes_search | clipboard_get | clipboard_set | clipboard_history"
+                    "description": "memory_remember | memory_list | memory_search | memory_forget | notes_add | notes_list | notes_search | clipboard_get | clipboard_set | clipboard_history"
                 },
                 "query": {"type": "STRING", "description": "Search text for memory_search, notes_search, or memory_forget"},
                 "category": {"type": "STRING", "description": "Memory category: identity | preferences | projects | relationships | wishes | notes"},
-                "key": {"type": "STRING", "description": "Memory key for memory_forget"},
+                "key": {"type": "STRING", "description": "Memory key for memory_remember or memory_forget"},
+                "value": {"type": "STRING", "description": "Value to save for memory_remember"},
+                "ttl_days": {
+                    "type": "INTEGER",
+                    "description": (
+                        "memory_remember only. Omit or 0 = permanent, remember forever "
+                        "(\"recuérdalo de por vida\"). A number = auto-expires that many days "
+                        "from now (\"solo para esta semana\" → 7, \"para este mes\" → 30)."
+                    ),
+                },
                 "title": {"type": "STRING", "description": "Optional note title for notes_add"},
                 "text": {"type": "STRING", "description": "Text for notes_add or clipboard_set"},
                 "body": {"type": "STRING", "description": "Alias for text"},
@@ -1367,7 +1435,20 @@ class JarvisLive:
 
             if not self.session:
                 continue
+
+            with self._speaking_lock:
+                speaking = self._is_speaking
+
+            # Daily voice journal — independent of 'proactive_enabled', its own
+            # once-a-day trigger. Checked every tick but only fires past the
+            # configured hour and once per calendar day (tracked on disk so a
+            # restart the same evening doesn't re-ask).
+            if not speaking:
+                await self._maybe_run_voice_journal()
+
             if not _get_config_flag("proactive_enabled"):
+                continue
+            if speaking:
                 continue
 
             try:
@@ -1379,11 +1460,6 @@ class JarvisLive:
             interval_seconds = interval_minutes * 60
             self._proactive.min_silence_secs = interval_seconds
             self._proactive.check_cooldown = interval_seconds
-
-            with self._speaking_lock:
-                speaking = self._is_speaking
-            if speaking:
-                continue
 
             if not self._proactive.should_trigger(self._last_user_speech):
                 continue
@@ -1403,6 +1479,39 @@ class JarvisLive:
                 self.ui.write_log("SYS: Check-in proactivo.")
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
+
+    async def _maybe_run_voice_journal(self) -> None:
+        """Fire the end-of-day voice journal prompt once per calendar day."""
+        from actions import app_settings
+        from datetime import datetime as _dt
+
+        if not _get_config_flag("voice_journal_enabled", True):
+            return
+        try:
+            journal_hour = max(0, min(23, int(app_settings.get("voice_journal_hour", 21))))
+        except (TypeError, ValueError):
+            journal_hour = 21
+
+        now = _dt.now()
+        if now.hour < journal_hour:
+            return
+        today_str = now.strftime("%Y-%m-%d")
+        if app_settings.get("voice_journal_last_date", "") == today_str:
+            return
+
+        # Mark first so a crash mid-prompt (or the model failing) doesn't
+        # retry every minute for the rest of the night.
+        app_settings.set("voice_journal_last_date", today_str)
+        try:
+            memory = await asyncio.to_thread(load_memory)
+            prompt = build_journal_prompt(memory)
+            await self.session.send_client_content(
+                turns={"parts": [{"text": prompt}]},
+                turn_complete=True,
+            )
+            self.ui.write_log("SYS: Diario de voz.")
+        except Exception as e:
+            print(f"[VoiceJournal] ⚠️ {e}")
 
     async def _send_startup_briefing(self) -> None:
         """
@@ -1447,6 +1556,15 @@ class JarvisLive:
                 self.ui.write_log(f"SYS: Briefing noticias falló: {e}")
         asyncio.create_task(_guarded_news())
 
+        city = _val("city")
+        async def _guarded_extras():
+            try:
+                await self._briefing_extras_phase(lang, city)
+            except Exception as e:
+                print(f"[Briefing] Fase 3 error: {e}")
+                self.ui.write_log(f"SYS: Briefing extra falló: {e}")
+        asyncio.create_task(_guarded_extras())
+
     async def _briefing_news_phase(self, lang: str) -> None:
         """
         Envía la fase 2 (noticias) ~1.5 s después de la fase 1 para que Gemini
@@ -1471,6 +1589,75 @@ class JarvisLive:
             turn_complete=True,
         )
         self.ui.write_log("SYS: Briefing fase 2 (noticias) enviado.")
+
+    async def _briefing_extras_phase(self, lang: str, city: str) -> None:
+        """
+        Fase 3 (~4s tras el saludo): calendario de hoy, ofertas Steam y
+        cambios de precio en la lista de vigilancia de CardTrader se
+        recopilan aquí de forma determinista (rápido, sin tool-calling);
+        el tiempo se delega a Gemini vía web_search porque no hay una fuente
+        propia que devuelva datos estructurados.
+        """
+        from actions import app_settings
+        if not _get_config_flag("morning_dashboard_enabled", True):
+            return
+
+        lang_str = f" Respond in {lang}." if lang else ""
+        await asyncio.sleep(4.0)
+        if not self.session:
+            return
+
+        facts: list[str] = []
+
+        try:
+            events = await asyncio.to_thread(productivity_tools_calendar_today)
+            if events:
+                titles = "; ".join(f"{e['start']}: {e['summary']}" for e in events[:5])
+                facts.append(f"Calendario de hoy ({len(events)} eventos): {titles}")
+            else:
+                facts.append("Calendario de hoy: sin eventos.")
+        except Exception:
+            pass  # Google Calendar not configured — just omit this section
+
+        try:
+            specials = await asyncio.to_thread(get_steam_specials, 5)
+            if specials:
+                top = "; ".join(
+                    f"{g['title']} -{g['discount_percent']}%" for g in specials
+                )
+                facts.append(f"Ofertas Steam destacadas: {top}")
+        except Exception:
+            pass
+
+        try:
+            changes = await asyncio.to_thread(_ct_watch_check)
+            if changes:
+                moved = "; ".join(
+                    f"{c['name']} {c['pct']:+.1f}%" for c in changes
+                )
+                facts.append(f"Cambios de precio en tu lista de vigilancia de CardTrader: {moved}")
+        except Exception:
+            pass
+
+        if not facts:
+            return  # nothing concrete to add; don't pad the briefing with fluff
+
+        facts_str = "\n".join(f"- {f}" for f in facts)
+        city_clause = f" for {city}" if city else ""
+        p3 = (
+            "[BRIEFING] You already have this data, no need to look it up:\n"
+            f"{facts_str}\n\n"
+            f"Also call web_search for today's weather{city_clause} (mode='search'). "
+            "Then give ONE short combined summary (2-3 sentences): weather, and only the "
+            "data points above that are actually noteworthy — skip empty/uninteresting ones "
+            "entirely (e.g. don't mention 'no calendar events' or 'no price changes' unless "
+            f"asked). Don't list this as bullet points, say it naturally.{lang_str}"
+        )
+        await self.session.send_client_content(
+            turns={"parts": [{"text": p3}]},
+            turn_complete=True,
+        )
+        self.ui.write_log("SYS: Briefing fase 3 (dashboard) enviado.")
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
@@ -1817,8 +2004,20 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "movies":
-                r = await loop.run_in_executor(None, lambda: movie_search_action(parameters=args))
-                result = r or "Done."
+                _action = (args.get("action") or "").lower().strip()
+                if _action == "play":
+                    query = (args.get("query") or "").strip()
+                    if not query:
+                        result = "¿Qué película o serie quieres ver?"
+                    else:
+                        kind = (args.get("kind") or "movie").strip().lower()
+                        # Drives the Movies panel on the Qt main thread; the
+                        # panel does the torrent lookup + streaming itself.
+                        self.ui.play_movie(query, kind)
+                        result = f"Reproduciendo «{query}» en modo Movies."
+                else:
+                    r = await loop.run_in_executor(None, lambda: movie_search_action(parameters=args))
+                    result = r or "Done."
 
             elif name == "utility_tools":
                 r = await loop.run_in_executor(None, lambda: utility_tools(parameters=args, speak=self.speak))
@@ -1863,6 +2062,90 @@ class JarvisLive:
 
             elif name == "cardtrader_catalog":
                 r = await loop.run_in_executor(None, lambda: cardtrader_catalog(parameters=args))
+                result = r or "Done."
+
+            elif name == "screen_translate":
+                action = str(args.get("action", "")).lower().strip()
+                if action == "start":
+                    self.ui.start_screen_translate(
+                        target_lang=str(args.get("target_lang") or "es"),
+                        interval_secs=float(args.get("interval_secs") or 6.0),
+                    )
+                    result = "Overlay de traducción activado."
+                elif action == "stop":
+                    self.ui.stop_screen_translate()
+                    result = "Overlay de traducción desactivado."
+                else:
+                    result = "Accion desconocida. Usa start o stop."
+
+            elif name == "screen_watch":
+                def _run_screen_watch():
+                    from actions import screen_watcher
+                    action = str(args.get("action", "")).lower().strip()
+                    if action == "start":
+                        condition = str(args.get("condition", "")).strip()
+                        if not condition:
+                            return "Necesito saber qué condición vigilar."
+
+                        def _on_trigger(cond: str, _img: bytes):
+                            self.ui.write_log(f"[ScreenWatch] Disparado: {cond}")
+                            self.speak(
+                                f"[AVISO VIGILANCIA DE PANTALLA — solo lee esto en voz alta] "
+                                f"Ha pasado esto que estabas vigilando: {cond}"
+                            )
+                        try:
+                            screen_watcher.start_watch(
+                                condition,
+                                on_trigger=_on_trigger,
+                                interval_secs=float(args.get("interval_secs") or 5),
+                                max_minutes=float(args.get("max_minutes") or 30),
+                            )
+                            return f"Vigilando: '{condition}'. Te aviso en cuanto pase."
+                        except RuntimeError as e:
+                            return str(e)
+                    if action == "stop":
+                        return screen_watcher.stop_watch()
+                    if action == "status":
+                        status = screen_watcher.get_status()
+                        if not status.get("watching"):
+                            return "No hay ninguna vigilancia activa."
+                        return (
+                            f"Vigilando: '{status['condition']}' "
+                            f"({status['remaining_seconds']}s restantes antes de rendirme)."
+                        )
+                    return "Accion desconocida. Usa start, stop o status."
+                r = await loop.run_in_executor(None, _run_screen_watch)
+                result = r or "Done."
+
+            elif name == "cardtrader_watchlist":
+                def _run_watchlist():
+                    action = str(args.get("action", "")).lower().strip()
+                    card_name = args.get("name", "")
+                    if action == "add":
+                        return _ct_watch_add(card_name)
+                    if action == "remove":
+                        return _ct_watch_remove(card_name)
+                    if action == "list":
+                        items = _ct_watch_list()
+                        if not items:
+                            return "No hay cartas en la lista de vigilancia."
+                        lines = [
+                            f"- {i.get('name')}: {(i.get('price_cents') or 0) / 100:.2f}{i.get('currency', 'EUR')}"
+                            for i in items
+                        ]
+                        return "Cartas vigiladas:\n" + "\n".join(lines)
+                    if action == "check":
+                        changes = _ct_watch_check()
+                        if not changes:
+                            return "Ninguna carta vigilada cambió de precio de forma notable."
+                        lines = [
+                            f"- {c['name']}: {c['old_cents']/100:.2f} -> {c['new_cents']/100:.2f}"
+                            f"{c['currency']} ({c['pct']:+.1f}%)"
+                            for c in changes
+                        ]
+                        return "Cambios de precio:\n" + "\n".join(lines)
+                    return "Accion desconocida. Usa add, remove, list o check."
+                r = await loop.run_in_executor(None, _run_watchlist)
                 result = r or "Done."
 
             elif name == "google_calendar":
@@ -2795,8 +3078,14 @@ def main():
                                 display = get_contact_name(chat_id) or chat_id.split('@')[0]
                         except Exception:
                             display = sender_nm or chat_id.split('@')[0]
-                        # Log in UI
+                        # Log in UI (always — quiet, just text, useful even for backlog)
                         ui.write_log(f"[WhatsApp] {display}: {body}")
+                        # Backlog from a WhatsApp Web reconnect sync (startup grace
+                        # window, a stale timestamp, or a burst dump) — the user has
+                        # likely already read these on their phone. Skip the floating
+                        # notification and the spoken readout; leave it in the chat UI.
+                        if entry.get('is_backlog'):
+                            return
                         # Floating desktop notification (clickable → opens chat).
                         try:
                             ui.show_whatsapp_notification({
@@ -3106,6 +3395,66 @@ def main():
                     def _call():
                         try:
                             p = {**(params or {})}
+                            a0 = action.lower()
+                            # Offline download/sync only touches actions.offline_library,
+                            # never the mpv/headless backend — handle it unconditionally so
+                            # it still works if _HEADLESS is False or ymod lacks 'play'.
+                            if a0 in ('download_playlist_offline', 'sync_playlist_offline'):
+                                pid = (
+                                    p.get('playlist_id')
+                                    or p.get('playlistId')
+                                    or p.get('query_or_id')
+                                    or p.get('query')
+                                    or ''
+                                )
+                                ptitle = p.get('title') or ''
+                                if pid:
+                                    from actions import offline_library as _off
+                                    _jv = globals().get('JARVIS_INSTANCE')
+                                    _cancel_ev = getattr(_jv, '_download_cancel_event', None) or threading.Event()
+                                    _cancel_ev.clear()
+                                    ui.set_download_state({
+                                        "active": True,
+                                        "percent": 0,
+                                        "label": "Preparando descarga offline",
+                                        "detail": ptitle or pid,
+                                        "can_cancel": True,
+                                    })
+
+                                    def _run_offline_sync(_pid=pid, _title=ptitle):
+                                        try:
+                                            _off.sync_playlist(
+                                                _pid,
+                                                title=_title,
+                                                progress_hook=ui.set_download_state,
+                                                cancel_event=_cancel_ev,
+                                            )
+                                        except Exception as _e:
+                                            ui.set_download_state({
+                                                "active": False,
+                                                "percent": 0,
+                                                "label": "Error en descarga offline",
+                                                "detail": str(_e)[:120],
+                                                "can_cancel": False,
+                                            })
+
+                                    threading.Thread(target=_run_offline_sync, daemon=True).start()
+                                return
+                            if a0 in ('remove_playlist_offline', 'unmark_offline'):
+                                pid = (
+                                    p.get('playlist_id')
+                                    or p.get('playlistId')
+                                    or p.get('query_or_id')
+                                    or p.get('query')
+                                    or ''
+                                )
+                                if pid:
+                                    from actions import offline_library as _off
+                                    _del = p.get('delete_files', False)
+                                    if not isinstance(_del, bool):
+                                        _del = str(_del).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
+                                    _off.unmark_offline(pid, delete_files=_del)
+                                return
                             if _HEADLESS and hasattr(ymod, 'play'):
                                 # map common actions to headless functions
                                 a = action.lower()
