@@ -165,7 +165,9 @@ class CrossfadeReadinessTests(unittest.TestCase):
 
         self.assertTrue(started)
         active_ready.assert_called_once_with(
-            ytmusic_headless._PIPE_PATHS[1], timeout=12.0
+            ytmusic_headless._PIPE_PATHS[1],
+            timeout=12.0,
+            cancel=ytmusic_headless._xfade_cancel,
         )
         fallback.assert_called_once_with("incoming", "Incoming", "Artist")
         incoming_process.terminate.assert_called_once_with()
@@ -183,6 +185,70 @@ class CrossfadeReadinessTests(unittest.TestCase):
                 ("fallback", "incoming"),
             ],
         )
+
+    def test_cancelled_crossfade_drops_the_incoming_track_without_promoting_it(self):
+        """A skip taken while a crossfade is preparing replaces it. If the fade
+        went on to promote its own track anyway, the user heard the song they
+        just skipped past start right after the one they asked for — one press,
+        two songs."""
+        outgoing_process = ytmusic_headless._procs[0]
+        incoming_process = ytmusic_headless._procs[1]
+        current_pipe = ytmusic_headless._PIPE_PATHS[0]
+        restored = []
+
+        def send(command, pipe=None):
+            if pipe == current_pipe and command[:2] == ["set_property", "volume"]:
+                restored.append(command[2])
+            return True
+
+        def ready_then_cancelled(*_args, **_kwargs):
+            # The skip lands while the incoming slot is warming up.
+            ytmusic_headless._xfade_cancel.set()
+            return False
+
+        with (
+            patch.object(ytmusic_headless, "_start_mpv", return_value=True),
+            patch.object(
+                ytmusic_headless, "_ipc_request", return_value={"error": "success"},
+            ),
+            patch.object(ytmusic_headless, "_send_command", side_effect=send),
+            patch.object(
+                ytmusic_headless,
+                "_wait_for_audio_ready",
+                side_effect=ready_then_cancelled,
+            ),
+            patch.object(ytmusic_headless, "_play_video") as fallback,
+            patch("actions.ytmusic_headless.threading.Thread", _ImmediateThread),
+        ):
+            started = ytmusic_headless._begin_crossfade_overlap(
+                "incoming", "Incoming", "Artist", "", 200
+            )
+
+        self.assertTrue(started)
+        fallback.assert_not_called()
+        incoming_process.terminate.assert_called_once_with()
+        outgoing_process.terminate.assert_not_called()
+        self.assertIsNone(ytmusic_headless._procs[1])
+        self.assertEqual(ytmusic_headless._active_slot, 0)
+        self.assertFalse(ytmusic_headless._xfade_in_progress)
+        self.assertEqual(ytmusic_headless._last_meta["videoId"], "outgoing")
+        self.assertEqual(restored, [ytmusic_headless._user_volume])
+
+    def test_a_new_transition_cancels_the_running_crossfade(self):
+        ytmusic_headless._xfade_in_progress = True
+        ytmusic_headless._xfade_cancel.clear()
+        self.addCleanup(ytmusic_headless._xfade_cancel.clear)
+
+        with patch.object(ytmusic_headless, "_send_command", return_value=True):
+            with patch.object(
+                ytmusic_headless, "_play_video", return_value="Reproduciendo 'B'.",
+            ):
+                ytmusic_headless._crossfade_transition(
+                    {"videoId": "b", "title": "B", "artists": "Artist"},
+                    allow_crossfade=True,
+                )
+
+        self.assertTrue(ytmusic_headless._xfade_cancel.is_set())
 
     def test_crossfade_starts_with_time_to_prepare_the_incoming_player(self):
         old_seconds = ytmusic_headless._crossfade_secs
@@ -256,6 +322,11 @@ class CrossfadeReadinessTests(unittest.TestCase):
             patch.object(ytmusic_headless, "_wait_for_audio_output_ready") as output_ready,
             patch.object(ytmusic_headless, "_wait_for_audio_ready", side_effect=audio_ready),
             patch.object(ytmusic_headless, "_play_video"),
+            # These tests are about fade sequencing. Going through the real
+            # loopback proxy would start an HTTP server here — and with
+            # threading.Thread patched below, its accept loop would run inline
+            # and never return.
+            patch.object(ytmusic_headless, "_playable_url", lambda _vid, url: url),
             patch("actions.ytmusic_headless.threading.Thread", _ImmediateThread),
         ):
             ytmusic_headless._begin_crossfade_overlap(

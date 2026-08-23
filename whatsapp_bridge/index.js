@@ -9,6 +9,16 @@ const {
   loadResolveSources,
   dedupeLinkedIdentityCandidates,
 } = require('./contact_resolver');
+const {
+  applyReaction,
+  applyRevoke,
+  messagesSince,
+  normalizeMessageRecord,
+  parseVcard,
+  upsertMessage,
+} = require('./message_contract');
+const { incrementUnread, reconcileUnread, setUnread } = require('./unread_state');
+const { createRequestDeduper, recordedSendResponse } = require('./request_deduper');
 
 const app = express();
 app.use(bodyParser.json());
@@ -75,6 +85,9 @@ const messageAcks = new Map();
 // full resync), so we track unread ourselves: increment on each incoming
 // message and reset when the chat is read (mark_read) or answered (fromMe).
 const unreadByChat = new Map();  // chatId -> unread count
+const unreadTouchedChats = new Set(); // chats updated during this bridge session
+const UNREAD_EVENT_MAX_AGE_MS = 90 * 1000;
+const sendRequestDeduper = createRequestDeduper(500);
 
 // Caches to avoid hammering WhatsApp servers with repeated lookups.
 const nameCache = new Map();        // id -> display name (or null)
@@ -91,7 +104,9 @@ function loadState() {
     const raw = fs.readFileSync(STATE_FILE, 'utf8');
     const data = JSON.parse(raw);
     if (Array.isArray(data.messages)) {
-      messages = data.messages.slice(-MAX_BUFFERED_MESSAGES);
+      messages = data.messages
+        .slice(-MAX_BUFFERED_MESSAGES)
+        .map(normalizeMessageRecord);
     }
     if (data.acks && typeof data.acks === 'object') {
       for (const [id, ack] of Object.entries(data.acks)) {
@@ -432,7 +447,37 @@ function matchScore(query, candidate) {
   return 0;
 }
 
+// Contact cards, polls and shared contacts out of one live wwebjs message.
+// These live next to messageBody() because the placeholder text it produces
+// for those types is derived from the very same payload.
+function messageContacts(m) {
+  const raw = m.vCards || (String(m.type || '').toLowerCase().includes('vcard') ? m.body : null);
+  if (!raw) return [];
+  return (Array.isArray(raw) ? raw : [raw]).map(parseVcard);
+}
+
+function messagePoll(m) {
+  if (!m.pollName && !Array.isArray(m.pollOptions)) return null;
+  return {
+    name: m.pollName || '',
+    options: Array.isArray(m.pollOptions) ? m.pollOptions : [],
+    allowMultipleAnswers: !!m.allowMultipleAnswers,
+  };
+}
+
 function messageBody(m) {
+  const type = String(m.type || '').toLowerCase();
+  if (type === 'revoked') return '[mensaje eliminado]';
+  // A vCard body IS the raw VCARD payload and a poll body is empty: used as-is
+  // they leak a wall of text (or nothing) into chat previews and quoted
+  // snippets. The structured `contacts`/`poll` fields carry the real detail.
+  if (type === 'vcard' || type === 'multi_vcard') {
+    const names = messageContacts(m).map(card => card.displayName).filter(Boolean);
+    return names.length ? `[contacto] ${names.join(', ')}` : '[contacto]';
+  }
+  if (type === 'poll_creation') {
+    return m.pollName ? `[encuesta] ${m.pollName}` : '[encuesta]';
+  }
   return m.body || (
     m.type === 'image'  ? '[imagen]' :
     m.type === 'video'  ? '[video]' :
@@ -500,7 +545,19 @@ async function serializeMessage(m, chatId = null) {
   }
   const authorName = m.author ? await safeContactName(m.author) : null;
   const quoted = await getQuotedInfo(m);
-  return {
+  let reactions = [];
+  if (m.hasReaction && typeof m.getReactions === 'function') {
+    try {
+      const groups = await m.getReactions() || [];
+      reactions = groups.flatMap(group => (group.senders || []).map(sender => ({
+        senderId: sender.senderId && (sender.senderId._serialized || sender.senderId),
+        reaction: sender.reaction || group.id || group.aggregateEmoji || '',
+      })));
+    } catch (e) {
+      console.error('getReactions failed', e);
+    }
+  }
+  return normalizeMessageRecord({
     id: messageId,
     from: m.from,
     to: m.to || chatId,
@@ -514,16 +571,44 @@ async function serializeMessage(m, chatId = null) {
     direction: m.fromMe ? 'out' : 'in',
     hasMedia: !!m.hasMedia,
     mediaUrl: m.hasMedia && messageId ? `/media?id=${encodeURIComponent(messageId)}` : null,
+    // Attachment metadata: without it a document bubble can only say
+    // "Documento", with no name, size or type to decide whether to open it.
+    fileName: (m._data && (m._data.filename || m._data.fileName)) || null,
+    fileSize: (m._data && (m._data.size || m._data.fileLength)) ?? null,
+    mimetype: m.mimetype || (m._data && m._data.mimetype) || null,
+    duration: m.duration ?? (m._data && m._data.duration) ?? null,
+    location: m.location || null,
+    contacts: messageContacts(m),
+    poll: messagePoll(m),
     mentionedIds: mentionedIds,
     mentions: mentions,
     quoted: quoted,
     ack: messageId && messageAcks.has(messageId) ? messageAcks.get(messageId) : (m.ack ?? null),
+    edited: !!(
+      m.latestEditSenderTimestampMs
+      || (m._data && m._data.latestEditSenderTimestampMs)
+    ),
+    revoked: String(m.type || '').toLowerCase() === 'revoked',
+    reactions,
     // whatsapp-web.js message timestamps are SECONDS; everything else in the
     // buffer/pending pipeline is milliseconds (Date.now()). Serving seconds
     // here made live-fetched history sort against buffered/optimistic entries
     // as if from 1970 — messages landed in the wrong spot. Normalize to ms.
-    timestamp: toMs(m.timestamp) || Date.now()
-  };
+    timestamp: toMs(m.timestamp) || Date.now(),
+    waTs: toMs(m.timestamp) || Date.now(),
+  });
+}
+
+async function serializeBufferedMessage(m, chatId = null, overrides = {}) {
+  const serialized = await serializeMessage(m, chatId);
+  const now = Date.now();
+  return normalizeMessageRecord({
+    ...serialized,
+    ...overrides,
+    // Polling order and WhatsApp send time are deliberately separate.
+    timestamp: overrides.timestamp ?? now,
+    waTs: overrides.waTs ?? serialized.sentAtMs ?? toMs(m.timestamp) ?? now,
+  });
 }
 
 // Normalize a WhatsApp timestamp to milliseconds. wwebjs hands out epoch
@@ -621,22 +706,10 @@ client.on('message', async (msg) => {
     // "/media?id=undefined", and getMessageById('undefined') throws "Invalid
     // serialized message id specified" (500) on transcribe/download. Rebuild
     // the canonical id like serializeMessage() does.
-    const messageId = serializeMsgId(msg.id);
-    const entry = {
-      id: messageId,
-      from: msg.from,
-      to: msg.to || null,
-      chatId: msg.fromMe ? msg.to : msg.from,
-      author: msg.author || null,
-      senderName: (msg._data && msg._data.notifyName) || null,
-      body: messageBody(msg),
-      type: msg.type || 'chat',
-      fromMe: !!msg.fromMe,
-      direction: msg.fromMe ? 'out' : 'in',
-      hasMedia: !!msg.hasMedia,
-      mediaUrl: msg.hasMedia && messageId ? `/media?id=${encodeURIComponent(messageId)}` : null,
-      mentionedIds: Array.isArray(msg.mentionedIds) ? msg.mentionedIds : [],
-      quoted: await getQuotedInfo(msg),
+    const entry = await serializeBufferedMessage(
+      msg,
+      msg.fromMe ? msg.to : msg.from,
+      {
       // `timestamp` is arrival order (Date.now()) — the Python manager's
       // /messages?since=<cursor> polling and unread/dedup logic depend on it
       // being monotonic with when WE processed the event, not the message's
@@ -648,18 +721,21 @@ client.on('message', async (msg) => {
       // list ordering/preview and in-conversation display, where showing
       // "just now" for a message actually sent hours ago is exactly the bug
       // being fixed here.
-      timestamp: Date.now(),
-      waTs: toMs(msg.timestamp) || Date.now(),
-    };
+        timestamp: Date.now(),
+        waTs: toMs(msg.timestamp) || Date.now(),
+      },
+    );
     console.log(`[MSG IN] from=${entry.from} author=${entry.author || '-'} name=${entry.senderName || '-'} type=${entry.type} body=${entry.body.slice(0,60)}`);;
     // System notices (encryption notice, business template updates) aren't
     // real messages: never buffer, never count as unread.
     if (isNoiseMessage(entry)) return;
-    messages.push(entry);
-    if (messages.length > MAX_BUFFERED_MESSAGES) messages.shift();
-    // Count this as unread for its chat (the `message` event is incoming only).
-    if (!msg.fromMe && entry.chatId) {
-      unreadByChat.set(entry.chatId, (unreadByChat.get(entry.chatId) || 0) + 1);
+    upsertMessage(messages, entry, MAX_BUFFERED_MESSAGES);
+    // Catch-up sync can re-emit old, already-read messages as "new" after
+    // startup. Only current messages may advance our provisional counter; the
+    // first live chat snapshot reconciles untouched/restored counters.
+    const messageAge = Date.now() - Number(entry.sentAtMs || entry.waTs || 0);
+    if (!msg.fromMe && entry.chatId && messageAge <= UNREAD_EVENT_MAX_AGE_MS) {
+      incrementUnread(unreadByChat, unreadTouchedChats, entry.chatId);
     }
     persistState();
   } catch (e) {
@@ -672,10 +748,8 @@ client.on('message', async (msg) => {
 client.on('message_create', async (msg) => {
   try {
     if (msg.fromMe && msg.to) {
-      if (unreadByChat.get(msg.to)) {
-        unreadByChat.set(msg.to, 0);
-        persistState();
-      }
+      setUnread(unreadByChat, unreadTouchedChats, msg.to, 0);
+      persistState();
 
       // Messages sent from the phone (or another linked device) only fire
       // this event, never 'message' (that one is incoming-only). Without
@@ -686,30 +760,15 @@ client.on('message_create', async (msg) => {
       // Rebuild via serializeMsgId (LID chats drop id._serialized) so mediaUrl
       // never becomes "/media?id=undefined". See the 'message' handler above.
       const id = serializeMsgId(msg.id);
-      if (id && !isNoiseMessage(msg) && !messages.some(m => m.id === id)) {
-        const entry = {
-          id,
-          from: msg.from,
-          to: msg.to,
-          chatId: msg.to,
-          author: msg.author || null,
-          senderName: (msg._data && msg._data.notifyName) || null,
-          body: messageBody(msg),
-          type: msg.type || 'chat',
-          fromMe: true,
-          direction: 'out',
-          hasMedia: !!msg.hasMedia,
-          mediaUrl: msg.hasMedia && id ? `/media?id=${encodeURIComponent(id)}` : null,
-          mentionedIds: Array.isArray(msg.mentionedIds) ? msg.mentionedIds : [],
-          quoted: await getQuotedInfo(msg),
+      if (id && !isNoiseMessage(msg)) {
+        const entry = await serializeBufferedMessage(msg, msg.to, {
           // See the identical comment in the 'message' handler above: keep
           // `timestamp` as arrival order for the polling cursor, `waTs` as
           // WhatsApp's real send time for display/ordering.
           timestamp: Date.now(),
           waTs: toMs(msg.timestamp) || Date.now(),
-        };
-        messages.push(entry);
-        if (messages.length > MAX_BUFFERED_MESSAGES) messages.shift();
+        });
+        upsertMessage(messages, entry, MAX_BUFFERED_MESSAGES);
         persistState();
       }
     }
@@ -729,16 +788,17 @@ function recordEdit(id, chatId, newBody) {
     entry.body = newBody;
     entry.edited = true;
   }
-  messages.push({
+  upsertMessage(messages, {
     id,
+    event: 'edit',
     type: 'edit',
     chatId: chatId || (entry && entry.chatId) || null,
     body: newBody,
     edited: true,
     fromMe: entry ? !!entry.fromMe : true,
     timestamp: Date.now(),
-  });
-  if (messages.length > MAX_BUFFERED_MESSAGES) messages.shift();
+    waTs: entry ? entry.waTs : Date.now(),
+  }, MAX_BUFFERED_MESSAGES);
   persistState();
 }
 
@@ -746,11 +806,76 @@ function recordEdit(id, chatId, newBody) {
 // made from another device (phone) that our own /edit endpoint never saw.
 client.on('message_edit', (msg, newBody) => {
   try {
-    const id = msg.id ? msg.id._serialized : null;
+    const id = serializeMsgId(msg.id);
     if (!id) return;
     recordEdit(id, msg.fromMe ? msg.to : msg.from, newBody);
   } catch (e) {
     console.error('message_edit processing failed', e);
+  }
+});
+
+function widText(value) {
+  if (!value) return null;
+  return String(value._serialized || value);
+}
+
+function recordRevoke(message) {
+  const id = message ? serializeMsgId(message.id) : null;
+  if (!id) return;
+  applyRevoke(messages, {
+    id,
+    chatId: message.fromMe ? message.to : message.from,
+    fromMe: !!message.fromMe,
+    timestamp: Date.now(),
+  }, MAX_BUFFERED_MESSAGES);
+  persistState();
+}
+
+client.on('message_revoke_everyone', (message, revokedMessage) => {
+  try {
+    recordRevoke(revokedMessage || message);
+  } catch (e) {
+    console.error('message_revoke_everyone processing failed', e);
+  }
+});
+
+client.on('message_revoke_me', (message) => {
+  try {
+    recordRevoke(message);
+  } catch (e) {
+    console.error('message_revoke_me processing failed', e);
+  }
+});
+
+client.on('message_reaction', (reaction) => {
+  try {
+    const messageId = reaction ? serializeMsgId(reaction.msgId) : null;
+    if (!messageId) return;
+    const remote = reaction.msgId && reaction.msgId.remote;
+    applyReaction(messages, {
+      messageId,
+      chatId: widText(remote),
+      senderId: widText(reaction.senderId),
+      reaction: reaction.reaction || '',
+      timestamp: Date.now(),
+      waTs: toMs(reaction.timestamp) || Date.now(),
+    }, MAX_BUFFERED_MESSAGES);
+    persistState();
+  } catch (e) {
+    console.error('message_reaction processing failed', e);
+  }
+});
+
+// Fires when unread state changes on any linked device. This is the
+// authoritative way to clear badges/pending entries after reading on phone.
+client.on('unread_count', (chat) => {
+  try {
+    const id = chat && chat.id && (chat.id._serialized || chat.id);
+    if (!id) return;
+    setUnread(unreadByChat, unreadTouchedChats, id.toString(), chat.unreadCount);
+    persistState();
+  } catch (e) {
+    console.error('unread_count processing failed', e);
   }
 });
 
@@ -776,7 +901,7 @@ app.get('/status', (req, res) => {
 });
 
 client.on('message_ack', (msg, ack) => {
-  const id = msg && msg.id ? msg.id._serialized : null;
+  const id = msg ? serializeMsgId(msg.id) : null;
   if (!id) return;
   messageAcks.set(id, ack);
   for (const entry of messages) {
@@ -790,8 +915,28 @@ client.on('message_ack', (msg, ack) => {
 
 app.get('/messages', (req, res) => {
   const since = parseInt(req.query.since || '0', 10);
-  const out = messages.filter(m => m.timestamp > since);
+  const out = messagesSince(messages, since);
   res.json({ ok: true, messages: out });
+});
+
+app.get('/unread_counts', async (req, res) => {
+  try {
+    if (!clientReady()) return res.json({ ok: true, ready: false, unread: {} });
+    const chats = await client.getChats();
+    const unread = {};
+    for (const chat of chats) {
+      const id = chat.id && (chat.id._serialized || chat.id);
+      const chatId = id ? id.toString() : '';
+      if (!chatId || ignoredId(chatId)) continue;
+      unread[chatId] = reconcileUnread(
+        unreadByChat, unreadTouchedChats, chatId, chat.unreadCount,
+      );
+    }
+    persistState();
+    res.json({ ok: true, ready: true, unread });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.toString() });
+  }
 });
 
 app.get('/chats', async (req, res) => {
@@ -863,7 +1008,7 @@ app.get('/chats', async (req, res) => {
         isGroup: !!c.isGroup,
         // whatsapp-web.js unreadCount is authoritative when it reflects a read
         // (e.g. on the phone); our own counter fills in live messages it misses.
-        unread: Math.max(c.unreadCount || 0, unreadByChat.get(id) || 0),
+        unread: reconcileUnread(unreadByChat, unreadTouchedChats, id, c.unreadCount),
         // Real WhatsApp send time (ms), not arrival order — see waTime().
         timestamp: last ? waTime(last) : toMs(c.timestamp || 0),
         preview: last ? messageBody(last) : '',
@@ -1162,8 +1307,11 @@ app.post('/send', requireToken, async (req, res) => {
   const to = ((req.body && req.body.to) || '').toString().trim();
   const body = ((req.body && req.body.body) || '').toString().trim();
   const quotedMessageId = ((req.body && req.body.quotedMessageId) || '').toString().trim() || null;
+  const clientRequestId = ((req.body && req.body.clientRequestId) || '').toString().trim().slice(0, 200);
   if (!to || !body) return res.status(400).json({ ok: false, error: 'missing to or body' });
   try {
+    const recorded = recordedSendResponse(messages, clientRequestId);
+    if (recorded) return res.json(recorded);
     if (!clientReady()) return res.status(503).json({ ok: false, ready: false, error: 'client not ready' });
     if (!to.includes('@') || ignoredId(to)) {
       return res.status(400).json({ ok: false, error: 'invalid recipient id' });
@@ -1180,18 +1328,37 @@ app.post('/send', requireToken, async (req, res) => {
       }
     }
     const sendOptions = quotedMessageId ? { quotedMessageId } : {};
-    const m = await client.sendMessage(to, body, sendOptions);
+    const m = await sendRequestDeduper.run(
+      clientRequestId,
+      () => client.sendMessage(to, body, sendOptions),
+    );
     // m.id._serialized puede venir undefined (bug conocido de IDs LID en
     // wwebjs) aunque el mensaje ya se haya entregado. Antes esto tiraba una
     // excepción al construir la respuesta y el catch externo devolvía
     // ok:false al instante, aunque WhatsApp ya lo había enviado.
-    const sentId = (m.id && m.id._serialized) || null;
+    const sentId = serializeMsgId(m.id);
     try {
       const fromId = client.info && client.info.wid ? client.info.wid._serialized : 'me';
-      const entry = {
+      let quoted = null;
+      if (quotedMessageId) {
+        try {
+          const q = await client.getMessageById(quotedMessageId);
+          if (q) {
+            const senderId = q.author || q.from;
+            quoted = {
+              id: serializeMsgId(q.id) || quotedMessageId,
+              body: messageBody(q).slice(0, 200),
+              fromMe: !!q.fromMe,
+              senderName: q.fromMe ? null : await safeContactName(senderId),
+              type: q.type || 'chat',
+            };
+          }
+        } catch (e) {}
+      }
+      const entry = await serializeBufferedMessage(m, to, {
         id: sentId,
-        from: fromId,
-        to: to,
+        from: m.from || fromId,
+        to,
         // Chat identity for consumers that group messages by chat (Python's
         // manager/UI). Without this, replies sent through this endpoint (e.g.
         // by Jarvis via voice command) were keyed by the bot's own JID instead
@@ -1199,33 +1366,17 @@ app.post('/send', requireToken, async (req, res) => {
         chatId: to,
         fromMe: true,
         type: 'chat',
-        body: body,
+        body,
+        clientRequestId: clientRequestId || null,
         timestamp: Date.now(),
-        direction: 'out',
         // Build the quoted preview from the id we already have rather than
         // relying on m.hasQuotedMsg, which isn't reliably populated on the
         // message object returned right after sending.
-        quoted: quotedMessageId ? await (async () => {
-          try {
-            const q = await client.getMessageById(quotedMessageId);
-            if (!q) return null;
-            const senderId = q.author || q.from;
-            return {
-              id: q.id ? q.id._serialized : quotedMessageId,
-              body: messageBody(q).slice(0, 200),
-              fromMe: !!q.fromMe,
-              senderName: q.fromMe ? null : await safeContactName(senderId),
-              type: q.type || 'chat',
-            };
-          } catch (e) {
-            return null;
-          }
-        })() : null,
-        ack: m.ack ?? 0
-      };
+        ...(quoted ? { quoted } : {}),
+        ack: m.ack ?? 0,
+      });
       if (entry.id) messageAcks.set(entry.id, entry.ack);
-      messages.push(entry);
-      if (messages.length > MAX_BUFFERED_MESSAGES) messages.shift();
+      upsertMessage(messages, entry, MAX_BUFFERED_MESSAGES);
       persistState();
     } catch (e) {
       console.error('failed to record outgoing message', e);
@@ -1241,8 +1392,11 @@ app.post('/send_media', requireToken, async (req, res) => {
   const to = ((req.body && req.body.to) || '').toString().trim();
   const filePath = ((req.body && req.body.path) || '').toString().trim();
   const caption = ((req.body && req.body.caption) || '').toString();
+  const clientRequestId = ((req.body && req.body.clientRequestId) || '').toString().trim().slice(0, 200);
   if (!to || !filePath) return res.status(400).json({ ok: false, error: 'missing to or path' });
   try {
+    const recorded = recordedSendResponse(messages, clientRequestId);
+    if (recorded) return res.json(recorded);
     if (!clientReady()) return res.status(503).json({ ok: false, ready: false, error: 'client not ready' });
     if (!to.includes('@') || ignoredId(to)) {
       return res.status(400).json({ ok: false, error: 'invalid recipient id' });
@@ -1258,32 +1412,38 @@ app.post('/send_media', requireToken, async (req, res) => {
     }
     const media = MessageMedia.fromFilePath(filePath);
     const options = caption ? { caption } : {};
-    const m = await client.sendMessage(to, media, options);
+    const m = await sendRequestDeduper.run(
+      clientRequestId,
+      () => client.sendMessage(to, media, options),
+    );
     try {
       const fromId = client.info && client.info.wid ? client.info.wid._serialized : 'me';
-      const entry = {
-        id: m.id ? m.id._serialized : null,
-        from: fromId,
-        to: to,
+      const messageId = serializeMsgId(m.id);
+      const entry = await serializeBufferedMessage(m, to, {
+        id: messageId,
+        from: m.from || fromId,
+        to,
         // See the /send handler above for why chatId/fromMe are needed here.
         chatId: to,
         fromMe: true,
         body: caption || `[${m.type || 'media'}]`,
+        caption,
+        clientRequestId: clientRequestId || null,
         type: m.type || 'document',
         timestamp: Date.now(),
-        direction: 'out',
         hasMedia: true,
-        mediaUrl: m.id ? `/media?id=${encodeURIComponent(m.id._serialized)}` : null,
+        mediaUrl: messageId ? `/media?id=${encodeURIComponent(messageId)}` : null,
+        fileName: media.filename || path.basename(filePath),
+        mimetype: media.mimetype || null,
         ack: m.ack ?? 0,
-      };
+      });
       if (entry.id) messageAcks.set(entry.id, entry.ack);
-      messages.push(entry);
-      if (messages.length > MAX_BUFFERED_MESSAGES) messages.shift();
+      upsertMessage(messages, entry, MAX_BUFFERED_MESSAGES);
       persistState();
     } catch (e) {
       console.error('failed to record outgoing media message', e);
     }
-    res.json({ ok: true, id: m.id ? m.id._serialized : null, to, type: m.type || 'document', ack: m.ack ?? 0 });
+    res.json({ ok: true, id: serializeMsgId(m.id), to, type: m.type || 'document', ack: m.ack ?? 0 });
   } catch (e) {
     console.error('send_media error', e);
     res.status(500).json({ ok: false, error: e.toString() });
@@ -1379,10 +1539,8 @@ app.post('/mark_read', requireToken, async (req, res) => {
     if (!clientReady()) return res.status(503).json({ ok: false, ready: false, error: 'client not ready' });
     const seen = await client.sendSeen(chatId);
     // Clear our own unread counter for this chat.
-    if (unreadByChat.get(chatId)) {
-      unreadByChat.set(chatId, 0);
-      persistState();
-    }
+    setUnread(unreadByChat, unreadTouchedChats, chatId, 0);
+    persistState();
     res.json({ ok: true, chatId, seen: seen !== false });
   } catch (e) {
     console.error('mark_read error', e);

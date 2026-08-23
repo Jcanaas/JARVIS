@@ -78,10 +78,19 @@ _MPV_EXE = "mpv"
 # Simple playlist: stores list of {videoId, title, artists} and current index
 _playlist: list = []
 _playlist_idx: int = 0
+_playback_transition_lock = threading.RLock()
 _autoplay_enabled: bool = True
 _autoplay_thread: Optional[threading.Thread] = None
 _autoplay_last_switch: float = 0.0
+# No automatic advance within this many seconds of the previous track change,
+# whoever started it (worker, user, phone).
+_AUTOPLAY_COOLDOWN_SECONDS: float = 6.0
 _job_handle = None
+_shutdown_event = threading.Event()
+_cleanup_lock = threading.Lock()
+_autoplay_start_lock = threading.Lock()
+_recovery_lock = threading.Lock()
+_reload_inflight: set[str] = set()
 
 # Crossfade: fade-out the last N seconds of a track, fade-in the next one.
 # 0 = disabled.
@@ -95,33 +104,65 @@ _crossfade_on_skip: bool = False   # apply crossfade also on manual next/previou
 _CROSSFADE_PREPARE_SECONDS: float = 8.0
 _user_volume: int = 100            # user's intended volume (0-100)
 _crossfade_fading_out: bool = False
+# Set to ask an in-flight crossfade to abandon the track it is fading in,
+# because a newer transition (a skip) has taken its place.
+_xfade_cancel = threading.Event()
 import atexit as _atexit
 
 def _cleanup_on_exit():
     global _shutting_down, _job_handle
-    _shutting_down = True
-    for slot in range(2):
-        try:
-            p = _procs[slot]
-            if p is not None and p.poll() is None:
-                if slot == _active_slot:
+    with _cleanup_lock:
+        _shutting_down = True
+        _shutdown_event.set()
+        # Ask both slots to exit. Waiting two seconds on an idle alternate slot
+        # before even requesting quit made every crossfade-enabled shutdown lag.
+        for slot, process in enumerate(list(_procs)):
+            try:
+                if process is not None and process.poll() is None:
                     _send_command(["quit"], pipe=_PIPE_PATHS[slot])
-                try:
-                    p.wait(timeout=2)
-                except Exception:
-                    pass
-                if p.poll() is None:
-                    p.terminate()
-            _procs[slot] = None
+            except Exception:
+                pass
+        for slot in range(2):
+            try:
+                p = _procs[slot]
+                if p is not None and p.poll() is None:
+                    try:
+                        p.wait(timeout=1.0)
+                    except Exception:
+                        pass
+                    if p.poll() is None:
+                        p.terminate()
+                        try:
+                            p.wait(timeout=0.5)
+                        except Exception:
+                            pass
+                    if p.poll() is None and hasattr(p, "kill"):
+                        p.kill()
+                _procs[slot] = None
+            except Exception:
+                _procs[slot] = None
+        try:
+            from actions import stream_proxy
+            stream_proxy.shutdown()
         except Exception:
             pass
-    try:
-        if _job_handle is not None:
-            import ctypes
-            ctypes.windll.kernel32.CloseHandle(_job_handle)
-            _job_handle = None
-    except Exception:
-        pass
+        worker = _autoplay_thread
+        if (
+            worker is not None
+            and worker is not threading.current_thread()
+            and worker.is_alive()
+        ):
+            try:
+                worker.join(timeout=1.0)
+            except Exception:
+                pass
+        try:
+            if _job_handle is not None:
+                import ctypes
+                ctypes.windll.kernel32.CloseHandle(_job_handle)
+                _job_handle = None
+        except Exception:
+            pass
 
 _atexit.register(_cleanup_on_exit)
 # Try to locate mpv.exe in the workspace root or tools folder, prefer that over PATH
@@ -170,6 +211,10 @@ _lock = threading.Lock()
 _mpv_start_locks = [threading.Lock() for _ in _PIPE_PATHS]
 _shutting_down = False
 _STREAM_TTL_SECONDS = 60 * 30  # 30 min — YouTube CDN URLs expire sooner than 2 h in practice
+# How long a play may wait for an in-flight stream resolution before falling
+# back to mpv's own yt-dlp hook. Must exceed a normal resolution (~2-4 s), or
+# the wait expires just before the answer arrives and the work is done twice.
+_STREAM_RESOLVE_WAIT = 9.0
 _stream_cache: dict[str, dict] = {}
 _stream_loading: set[str] = set()
 _stream_lock = threading.Lock()
@@ -189,8 +234,9 @@ _AUDIO_OPEN_GRACE_SECONDS = 6.0
 
 
 def _reset_reload_guard() -> None:
-    _reload_counts.clear()
-    _reload_givenup.clear()
+    with _recovery_lock:
+        _reload_counts.clear()
+        _reload_givenup.clear()
     _audio_reset_tried.clear()
 
 
@@ -632,9 +678,11 @@ def _start_mpv_locked(slot: int) -> bool:
     ytdlp_path = _locate_ytdlp()
     if ytdlp_path:
         args.append(f"--script-opts=ytdl_hook-ytdl_path={ytdlp_path}")
-    _cb_args = _cookie_browser_args()
-    if len(_cb_args) == 2:
-        args.append(f"--ytdl-raw-options=cookies-from-browser={_cb_args[1]}")
+    # No cookies-from-browser here on purpose. mpv's ytdl_hook has no
+    # "retry without cookies" pass, so a browser holding its cookie DB open
+    # ("Could not copy Chrome cookie database") made the hook fail outright and
+    # the track never played. We resolve streams ourselves (with a cookie retry
+    # when needed) and hand mpv a direct URL; the hook is only the fallback.
     try:
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         _create_windows_job_for_child(proc)
@@ -881,10 +929,13 @@ def _wait_for_audio_ready(
     *,
     timeout: float = 12.0,
     poll_interval: float = 0.1,
+    cancel: threading.Event | None = None,
 ) -> bool:
     """Condition-based wait used by crossfade; position 0.0 remains valid."""
     deadline = time.monotonic() + max(0.0, float(timeout))
     while not _shutting_down and time.monotonic() < deadline:
+        if cancel is not None and cancel.is_set():
+            return False
         snapshot = _read_mpv_playback_state(pipe=pipe)
         if _derive_playback_phase(
             snapshot,
@@ -892,7 +943,8 @@ def _wait_for_audio_ready(
             requested_playing=True,
         )["progressing"]:
             return True
-        time.sleep(max(0.01, float(poll_interval)))
+        if _shutdown_event.wait(max(0.01, float(poll_interval))):
+            return False
     return False
 
 
@@ -924,19 +976,25 @@ _YOUTUBE_STREAM_USER_AGENT = (
 )
 
 
+def _cookie_browser() -> Optional[str]:
+    """Browser yt-dlp can read YouTube cookies from, or None. Detection itself
+    is cached in actions.ytmusic."""
+    try:
+        from actions.ytmusic import _detect_cookie_browser
+        return _detect_cookie_browser()
+    except Exception:
+        return None
+
+
 def _cookie_browser_args() -> list:
     """--cookies-from-browser args, so YouTube's "sign in to confirm you're not
     a bot" check doesn't block stream resolution the same way it blocks
-    downloads."""
-    try:
-        from actions.ytmusic import _detect_cookie_browser
-        browser = _detect_cookie_browser()
-    except Exception:
-        browser = None
+    downloads. Only used on the retry pass — see _get_stream_url_and_duration."""
+    browser = _cookie_browser()
     return ["--cookies-from-browser", browser] if browser else []
 
 
-def _ytdlp_cmd(args: list) -> Optional[str]:
+def _ytdlp_cmd(args: list, use_cookies: bool = False) -> Optional[str]:
     """Run yt-dlp with given args; returns stdout on success, None on failure."""
     exe = _locate_ytdlp()
     bases = [exe] if exe else []
@@ -945,8 +1003,9 @@ def _ytdlp_cmd(args: list) -> Optional[str]:
     # just relaunch the whole app instead of running yt-dlp.
     if not getattr(sys, "frozen", False):
         bases.append([sys.executable, "-m", "yt_dlp"])
+    cookie_args = _cookie_browser_args() if use_cookies else []
     for base in bases:
-        cmd = (base if isinstance(base, list) else [base]) + _YTDLP_EXTRACTOR_ARGS + _cookie_browser_args() + args
+        cmd = (base if isinstance(base, list) else [base]) + _YTDLP_EXTRACTOR_ARGS + cookie_args + args
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
             if r.returncode == 0 and r.stdout.strip():
@@ -956,20 +1015,90 @@ def _ytdlp_cmd(args: list) -> Optional[str]:
     return None
 
 
+# Set once the yt-dlp package turns out not to be importable, so we stop paying
+# the import attempt on every resolution and go straight to the executable.
+_ytdlp_module_unavailable = False
+
+
+def _ytdlp_module_stream(url: str, use_cookies: bool = False) -> tuple[Optional[str], int]:
+    """Resolve a stream in-process with the yt-dlp library.
+
+    yt-dlp.exe is a PyInstaller one-file bundle: every invocation unpacks itself
+    to a temp dir before it starts working, which measured ~2 s of pure overhead
+    per track here (4.5 s total vs 2.2 s for the same extraction in-process).
+    That overhead was paid twice per song — once by our prefetch and again by
+    mpv's ytdl_hook — which is what turned starting a non-downloaded track into
+    a multi-second wait.
+    """
+    global _ytdlp_module_unavailable
+    if _ytdlp_module_unavailable:
+        return None, 0
+    try:
+        import yt_dlp
+    except Exception:
+        _ytdlp_module_unavailable = True
+        return None, 0
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "format": _format_for_quality(),
+        "socket_timeout": 15,
+    }
+    if use_cookies:
+        browser = _cookie_browser()
+        if not browser:
+            return None, 0
+        opts["cookiesfrombrowser"] = (browser,)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+    except Exception as exc:
+        _log(f"yt-dlp{' (cookies)' if use_cookies else ''}: {type(exc).__name__}: {str(exc)[:160]}")
+        return None, 0
+    stream = str(info.get("url") or "")
+    if not stream:
+        for entry in info.get("requested_downloads") or []:
+            if entry.get("url"):
+                stream = str(entry["url"])
+                break
+    try:
+        duration = int(float(info.get("duration") or 0))
+    except (TypeError, ValueError):
+        duration = 0
+    return (stream or None), duration
+
+
 def _get_stream_url_and_duration(url: str) -> tuple[Optional[str], int]:
-    """Returns (stream_url, duration_seconds). duration may be 0 on failure."""
-    # Force audio-only stream at the user's preferred quality
-    out = _ytdlp_cmd(["--format", _format_for_quality(),
-                      "--print", "%(url)s\t%(duration)s", "--no-playlist", url])
-    if out:
-        parts = out.splitlines()[0].split("\t")
-        if len(parts) == 2:
-            stream, dur_s = parts[0].strip(), parts[1].strip()
-            try:
-                return stream, int(float(dur_s))
-            except Exception:
-                return stream, 0
-    # Fallback: just get URL with -g
+    """Returns (stream_url, duration_seconds). duration may be 0 on failure.
+
+    Cookieless first: reading cookies out of a running browser costs seconds and
+    fails outright while the browser holds its DB lock ("Could not copy Chrome
+    cookie database"), which made *every* attempt fail even though anonymous
+    resolution works fine. Cookies are only worth their price on the retry, when
+    the anonymous attempt is the one that got refused.
+    """
+    fmt = _format_for_quality()
+    passes = [False] + ([True] if _cookie_browser() else [])
+    for use_cookies in passes:
+        stream, duration = _ytdlp_module_stream(url, use_cookies)
+        if stream:
+            return stream, duration
+        out = _ytdlp_cmd(
+            ["--format", fmt, "--print", "%(url)s\t%(duration)s", "--no-playlist", url],
+            use_cookies=use_cookies,
+        )
+        if out:
+            parts = out.splitlines()[0].split("\t")
+            if len(parts) == 2:
+                stream, dur_s = parts[0].strip(), parts[1].strip()
+                try:
+                    return stream, int(float(dur_s))
+                except Exception:
+                    return stream, 0
+    # Last resort: looser format selector, in case the preferred one simply
+    # isn't offered for this track.
     out2 = _ytdlp_cmd(["--format", "bestaudio/best", "-g", "--no-playlist", url])
     if out2:
         return out2.splitlines()[0].strip(), 0
@@ -980,6 +1109,40 @@ def _get_stream_url_and_duration(url: str) -> tuple[Optional[str], int]:
 def _get_stream_url(url: str) -> Optional[str]:
     s, _ = _get_stream_url_and_duration(url)
     return s
+
+
+def _playable_url(vid: str, stream_url: str) -> str:
+    """Wrap a CDN stream in the loopback proxy mpv can actually read.
+
+    YouTube answers ``403 Forbidden`` to the open-ended ``Range: bytes=0-`` that
+    ffmpeg opens every stream with (and to any bounded range over ~1 MiB), so
+    handing mpv the CDN URL directly means the track never starts — it retries,
+    falls back to its own yt-dlp run, fails the same way, and the app spends
+    tens of seconds getting nowhere. The proxy answers mpv's open range and
+    fetches upstream in chunks the CDN accepts.
+    """
+    stream_url = str(stream_url or "").strip()
+    if not stream_url:
+        return ""
+    if not stream_url.lower().startswith(("http://", "https://")):
+        return stream_url          # local file
+    try:
+        from actions import stream_proxy
+    except Exception:
+        return stream_url
+    vid = str(vid or "").strip()
+
+    def _resolve_again() -> tuple[Optional[str], int]:
+        _invalidate_cached_stream(vid)
+        return _resolve_stream_for_video(vid)
+
+    try:
+        return stream_proxy.serve(
+            stream_url, resolver=_resolve_again if vid else None
+        ) or stream_url
+    except Exception as exc:
+        _log(f"proxy de streaming no disponible ({exc}); uso la URL directa")
+        return stream_url
 
 
 def _video_page_url(vid: str) -> str:
@@ -1058,7 +1221,7 @@ def warmup() -> bool:
 
 
 def prefetch_tracks(tracks, start_index: int = 0, count: int = 4) -> dict:
-    """Warm MPV and resolve at most the first candidate in the background."""
+    """Warm MPV and resolve the next few candidates in the background."""
     try:
         start = max(0, int(start_index or 0))
     except Exception:
@@ -1083,6 +1246,10 @@ def prefetch_tracks(tracks, start_index: int = 0, count: int = 4) -> dict:
                     continue
             except Exception:
                 pass
+            # Only the first candidate: this runs on every selection change, so
+            # resolving further ahead would fire a burst of extractions at
+            # YouTube for a list the user is merely scrolling through. The
+            # successor is warmed on track load instead (_prefetch_next_tracks).
             _prefetch_video(vid)
             return {"scheduled": 1}
     return {"scheduled": 0}
@@ -1125,40 +1292,59 @@ def _is_authoritative_playback_sample(slot: int) -> bool:
 def _reload_current_stream(vid: str, title: str, artists: str, bad_url: str = ""):
     """Reload the track using the YouTube Music URL (mpv yt-dlp hook re-resolves).
     bad_url is ignored (kept for call-site compatibility) — we no longer pass CDN URLs."""
+    if _shutting_down or _shutdown_event.is_set():
+        return
     with _lock:
         if _last_meta.get("videoId") != vid:
             return  # user already switched to another track
-    n = _reload_counts.get(vid, 0)
-    if n >= _MAX_RELOADS_PER_TRACK:
-        if vid not in _reload_givenup:
-            _reload_givenup.add(vid)
-            _log(
-                f"'{title}': la reproducción no avanza tras {n} reintentos. "
-                "Comprueba tu conexión a internet o intenta cambiar la calidad de audio "
-                "en Ajustes (p.ej. de 'Máxima' a 'Opus ~160 kbps')."
-            )
-        return
-    _reload_counts[vid] = n + 1
-    _invalidate_cached_stream(vid)
-    _log(f"'{title}': reintentando carga via yt-dlp hook (intento {n + 1})")
-    yt_url = _video_page_url(vid)
-    with _lock:
-        if _last_meta.get("videoId") != vid:
+    with _recovery_lock:
+        if vid in _reload_inflight:
+            _log(f"'{title}': recuperación ya en curso; omito solicitud duplicada")
             return
-    response = _ipc_request(["loadfile", yt_url, "replace"])
-    if not response or response.get("error") != "success":
-        _log(f"'{title}': mpv rechazó la recarga")
-        return
-    with _lock:
-        _last_meta.update({
-            "position": 0,
-            "playing": True,
-            "ready": False,
-            "buffering": False,
-            "state": "loading",
-            "_sampled_at": time.monotonic(),
-            "_started": False,
-        })
+        n = _reload_counts.get(vid, 0)
+        if n >= _MAX_RELOADS_PER_TRACK:
+            if vid not in _reload_givenup:
+                _reload_givenup.add(vid)
+                _log(
+                    f"'{title}': la reproducción no avanza tras {n} reintentos. "
+                    "Comprueba tu conexión a internet o intenta cambiar la calidad de audio "
+                    "en Ajustes (p.ej. de 'Máxima' a 'Opus ~160 kbps')."
+                )
+            return
+        _reload_inflight.add(vid)
+        _reload_counts[vid] = n + 1
+    try:
+        _invalidate_cached_stream(vid)
+        _log(f"'{title}': reintentando carga (intento {n + 1})")
+        # Re-resolve ourselves rather than leaving it to mpv's ytdl_hook: the
+        # hook opens the CDN URL with an open-ended range, which YouTube now
+        # refuses, so that path cannot recover a track on its own.
+        fresh_url, _fresh_dur = _resolve_stream_for_video(vid)
+        yt_url = _playable_url(vid, fresh_url) if fresh_url else _video_page_url(vid)
+        with _lock:
+            if _last_meta.get("videoId") != vid:
+                return
+        if _shutting_down or _shutdown_event.is_set():
+            return
+        response = _ipc_request(["loadfile", yt_url, "replace"])
+        if not response or response.get("error") != "success":
+            _log(f"'{title}': mpv rechazó la recarga")
+            return
+        with _lock:
+            if _last_meta.get("videoId") != vid:
+                return
+            _last_meta.update({
+                "position": 0,
+                "playing": True,
+                "ready": False,
+                "buffering": False,
+                "state": "loading",
+                "_sampled_at": time.monotonic(),
+                "_started": False,
+            })
+    finally:
+        with _recovery_lock:
+            _reload_inflight.discard(vid)
 
 
 def _play_video(vid: str, title: str, artists: str) -> str:
@@ -1186,13 +1372,19 @@ def _play_video(vid: str, title: str, artists: str) -> str:
         source_kind = "local file"
         stream_duration = 0  # mpv reports the real duration once loaded
     else:
-        # Consume a stream resolved while the user browsed. If it is still in
-        # flight, wait briefly instead of launching a second yt-dlp subprocess via
-        # the MPV hook. Expired/missing cache falls back to the page URL.
+        # Consume a stream resolved while the user browsed. If nothing is cached
+        # or in flight, start the resolution here and wait for it: handing the
+        # page URL to mpv's ytdl_hook instead costs exactly the same yt-dlp work
+        # and caches nothing, so the old 3.5 s cap (shorter than a typical 4 s
+        # resolution) threw away the prefetch and paid for it twice on every
+        # single track.
         cached_url, stream_duration = _cached_stream(vid)
         if not cached_url:
-            cached_url, stream_duration = _wait_cached_stream(vid, timeout=3.5)
-        source_url = cached_url or _video_page_url(vid)
+            _prefetch_video(vid)   # no-op when a resolution is already running
+            cached_url, stream_duration = _wait_cached_stream(
+                vid, timeout=_STREAM_RESOLVE_WAIT
+            )
+        source_url = _playable_url(vid, cached_url) if cached_url else _video_page_url(vid)
         source_kind = "prefetched stream" if cached_url else "yt-dlp hook"
     _log(f"▶ loadfile '{title}' slot={_active_slot} dur={stream_duration}s ({source_kind})")
     response = _ipc_request(["loadfile", source_url, "replace"])
@@ -1231,7 +1423,8 @@ def _verify_stream_started(vid: str, title: str, artists: str):
     First check at t=12s (yt-dlp hook resolution takes up to ~8s); if pos is
     near 0 but eof/idle not set (buffering stall), do a second check at t=20s."""
     def worker():
-        time.sleep(12.0)
+        if _shutdown_event.wait(12.0):
+            return
         with _lock:
             if _last_meta.get("videoId") != vid:
                 return
@@ -1252,7 +1445,8 @@ def _verify_stream_started(vid: str, title: str, artists: str):
             _reload_current_stream(vid, title, artists, "")
             return
         # pos near 0 but mpv hasn't reported eof/idle yet — wait more then reload
-        time.sleep(8.0)
+        if _shutdown_event.wait(8.0):
+            return
         with _lock:
             if _last_meta.get("videoId") != vid:
                 return
@@ -1320,7 +1514,7 @@ def _begin_crossfade_overlap(
 
     # Pause before load so resolution/opening does not consume the first seconds
     # of the incoming track at volume zero.
-    next_yt_url = next_url or _video_page_url(next_vid)
+    next_yt_url = _playable_url(next_vid, next_url) if next_url else _video_page_url(next_vid)
     _send_command(["set_property", "volume", 0], pipe=alt_pipe)
     _send_command(["set_property", "pause", True], pipe=alt_pipe)
     response = _ipc_request(["loadfile", next_yt_url, "replace"], pipe=alt_pipe)
@@ -1331,12 +1525,35 @@ def _begin_crossfade_overlap(
 
     cf_dur   = max(1.0, float(_crossfade_secs))
     cur_pipe = _cur_pipe()
+    _xfade_cancel.clear()
     _xfade_in_progress = True
     _crossfade_fading_out = False
     _autoplay_last_switch = time.time()
 
     def _fade():
         global _active_slot, _xfade_in_progress, _crossfade_fading_out
+
+        def _drop_incoming_slot():
+            """Kill the slot we were fading in and give the outgoing one its
+            volume back."""
+            try:
+                proc = _procs[alt_slot]
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
+            _procs[alt_slot] = None
+            _send_command(["set_property", "volume", _user_volume], pipe=cur_pipe)
+
+        def _cancelled() -> bool:
+            """A newer transition replaced this one. Let go of the incoming
+            track without promoting it: promoting it would play a track the
+            user already skipped past, right after the one they asked for."""
+            if not _xfade_cancel.is_set():
+                return False
+            _log("XFADE: abandonado — otra transición tomó el relevo")
+            _drop_incoming_slot()
+            return True
 
         def _abort_and_fallback(reason: str):
             global _xfade_in_progress, _crossfade_fading_out
@@ -1368,7 +1585,9 @@ def _begin_crossfade_overlap(
             # create its decoder/audio output for a file loaded while paused; waiting
             # first caused an intermittent timeout followed by a direct track switch.
             _send_command(["set_property", "pause", False], pipe=alt_pipe)
-            if not _wait_for_audio_ready(alt_pipe, timeout=12.0):
+            if not _wait_for_audio_ready(alt_pipe, timeout=12.0, cancel=_xfade_cancel):
+                if _cancelled():
+                    return
                 _abort_and_fallback("la pista entrante no inició")
                 return
 
@@ -1378,10 +1597,13 @@ def _begin_crossfade_overlap(
             _send_command(["set_property", "pause", True], pipe=alt_pipe)
             _send_command(["seek", 0, "absolute"], pipe=alt_pipe)
             while not _shutting_down:
+                if _cancelled():
+                    return
                 outgoing = _read_mpv_playback_state(pipe=cur_pipe)
                 if _crossfade_window_ready(outgoing, cf_dur):
                     break
-                time.sleep(0.1)
+                if _shutdown_event.wait(0.1):
+                    return
             if _shutting_down:
                 return
 
@@ -1395,13 +1617,18 @@ def _begin_crossfade_overlap(
             # crossfades into a hard cut — the alt slot was already confirmed alive in
             # invariant 1, so a plain "not yet progressing" is not fatal by itself.
             _send_command(["set_property", "pause", False], pipe=alt_pipe)
-            resumed = _wait_for_audio_ready(alt_pipe, timeout=8.0)
+            resumed = _wait_for_audio_ready(alt_pipe, timeout=8.0, cancel=_xfade_cancel)
             if not resumed:
+                if _cancelled():
+                    return
                 resumed_snapshot = _read_mpv_playback_state(pipe=alt_pipe)
                 if not _mpv_audio_ready(resumed_snapshot):
                     _abort_and_fallback("la pista entrante no reanudó")
                     return
                 _log("XFADE: aviso — resume lento tras rebobinar, sigo con el fade (AO ya vivo)")
+
+            if _cancelled():
+                return
 
             incoming = _read_mpv_playback_state(pipe=alt_pipe)
             outgoing = _read_mpv_playback_state(pipe=cur_pipe)
@@ -1432,13 +1659,15 @@ def _begin_crossfade_overlap(
             for i in range(steps + 1):
                 if _shutting_down:
                     break
+                if _cancelled():
+                    return
                 progress = i / steps          # 0.0 → 1.0
                 vol_out  = int(_user_volume * (1.0 - progress))
                 vol_in   = int(_user_volume * progress)
                 _send_command(["set_property", "volume", vol_out], pipe=cur_pipe)
                 _send_command(["set_property", "volume", vol_in],  pipe=alt_pipe)
-                if fade_dur > 0:
-                    time.sleep(fade_dur / steps)
+                if fade_dur > 0 and _shutdown_event.wait(fade_dur / steps):
+                    return
 
             if _shutting_down:
                 return
@@ -1479,6 +1708,11 @@ def _begin_crossfade_overlap(
                 })
         except Exception as exc:
             _log(f"XFADE: excepción no controlada en _fade(): {exc!r}")
+            if not _shutting_down:
+                try:
+                    _abort_and_fallback(f"error interno: {exc}")
+                except Exception as fallback_exc:
+                    _log(f"XFADE: también falló el cambio directo: {fallback_exc!r}")
         finally:
             _crossfade_fading_out = False
             _xfade_in_progress = False
@@ -1487,11 +1721,35 @@ def _begin_crossfade_overlap(
     return True
 
 
+def _autoplay_decision(
+    pos: float, dur: float, eof: bool, eof_seen: bool, now: float
+) -> str:
+    """End-of-track decision: "advance", "silence" or "none".
+
+    Split out of the polling loop so the rule is stated once and can be checked
+    without an mpv process. The cooldown covers *every* recent track change, not
+    only the ones this worker started: a manual skip that lands inside the
+    outgoing track's near-end window would otherwise be followed immediately by
+    an automatic advance, i.e. one press skipping two songs.
+    """
+    if eof_seen:
+        return "none"
+    margin = _crossfade_trigger_margin() if _crossfade_enabled else 1.5
+    near_end = dur > 0 and pos >= dur - margin
+    if not (eof or near_end):
+        return "none"
+    if now - _autoplay_last_switch <= _AUTOPLAY_COOLDOWN_SECONDS:
+        return "none"
+    if eof and pos < 1.0 and not near_end:
+        # EOF at position ~0 means the stream never really started; advancing
+        # would silently drop the track instead of retrying it.
+        return "silence"
+    return "advance"
+
+
 def _ensure_autoplay_worker() -> None:
     """Start the combined position-poller + autoplay thread if not running."""
     global _autoplay_thread
-    if _autoplay_thread is not None and _autoplay_thread.is_alive():
-        return
 
     def _worker():
         global _autoplay_last_switch, _crossfade_fading_out
@@ -1504,7 +1762,7 @@ def _ensure_autoplay_worker() -> None:
         _stall_since   = None   # monotonic time when pos last changed
         _ao_failure_since = None
 
-        while not _shutting_down:
+        while not _shutting_down and not _shutdown_event.is_set():
             try:
                 polled_slot = _active_slot
                 proc = _procs[polled_slot]
@@ -1516,7 +1774,8 @@ def _ensure_autoplay_worker() -> None:
                     # position/duration over the new track's metadata: that made
                     # the seek bar jump to the end and back for one polling tick.
                     if not _is_authoritative_playback_sample(polled_slot):
-                        time.sleep(0.05)
+                        if _shutdown_event.wait(0.05):
+                            return
                         continue
                     pos = snapshot.get("time-pos")
                     dur = snapshot.get("duration")
@@ -1529,6 +1788,26 @@ def _ensure_autoplay_worker() -> None:
                         # While the alternate slot is only preloading, the active
                         # slot remains authoritative. Once the volume ramps begin,
                         # metadata has switched to the incoming track.
+
+                    # The track changed while this IPC read was in flight, so the
+                    # snapshot describes the track we just left. Reset the local
+                    # polling state and DISCARD the sample: publishing it would
+                    # show the old track's position under the new title, and
+                    # feeding its near-the-end position to the autoplay check
+                    # below made a manual skip advance a second time — the famous
+                    # "I pressed next once and it jumped two songs".
+                    if current_vid != _last_vid:
+                        _log(f"worker: nueva pista detectada '{current_vid[:8]}' (era '{_last_vid[:8]}')")
+                        _last_vid = current_vid
+                        _poll_pos = 0.0
+                        _poll_dur = 0.0
+                        _eof_seen = False
+                        _stall_pos = None
+                        _stall_since = None
+                        if _shutdown_event.wait(0.05):
+                            return
+                        continue
+
                     if not _crossfade_fading_out:
                         phase = _apply_mpv_playback_state(snapshot)
                     else:
@@ -1537,14 +1816,6 @@ def _ensure_autoplay_worker() -> None:
                             was_ready=True,
                             requested_playing=not bool(paused),
                         )
-
-                    # When the track changes, reset all local polling state
-                    if current_vid != _last_vid:
-                        _log(f"worker: nueva pista detectada '{current_vid[:8]}' (era '{_last_vid[:8]}')")
-                        _last_vid = current_vid
-                        _poll_pos = 0.0
-                        _poll_dur = 0.0
-                        _eof_seen = False
 
                     if pos is not None:
                         _poll_pos = float(pos)
@@ -1636,24 +1907,20 @@ def _ensure_autoplay_worker() -> None:
 
                     # --- Autoplay: advance on eof-reached OR near end ---
                     if _autoplay_enabled and _playlist and not _xfade_in_progress:
-                        cf_margin = _crossfade_trigger_margin() if _crossfade_enabled else 1.5
-                        eof_hit  = bool(eof)
-                        near_end = _poll_dur > 0 and _poll_pos >= _poll_dur - cf_margin
-                        if (eof_hit or near_end) and not _eof_seen:
-                            now = time.time()
-                            cooldown_ok = now - _autoplay_last_switch > 6.0
-                            _log(f"autoplay trigger: eof={eof_hit} near_end={near_end} "
-                                 f"pos={_poll_pos:.1f} dur={_poll_dur:.1f} cooldown_ok={cooldown_ok}")
-                            if cooldown_ok:
-                                if eof_hit and _poll_pos < 1.0 and not near_end:
-                                    _log("  → EOF en pos~0 (stream inválido), silenciando hasta retry")
-                                    _eof_seen = True
-                                else:
-                                    _log(f"  → avanzando a siguiente pista")
-                                    _eof_seen = True
-                                    _autoplay_last_switch = now
-                                    _crossfade_fading_out = False
-                                    next()
+                        now = time.time()
+                        decision = _autoplay_decision(
+                            _poll_pos, _poll_dur, bool(eof), _eof_seen, now
+                        )
+                        if decision == "silence":
+                            _log("autoplay: EOF en pos~0 (stream inválido), silenciando hasta retry")
+                            _eof_seen = True
+                        elif decision == "advance":
+                            _log(f"autoplay: avanzando a siguiente pista "
+                                 f"(pos={_poll_pos:.1f}/{_poll_dur:.1f} eof={bool(eof)})")
+                            _eof_seen = True
+                            _autoplay_last_switch = now
+                            _crossfade_fading_out = False
+                            next()
                 else:
                     with _lock:
                         _last_meta.update({
@@ -1665,10 +1932,20 @@ def _ensure_autoplay_worker() -> None:
                         })
             except Exception as exc:
                 _log(f"worker: error sondeando mpv: {exc}")
-            time.sleep(0.8)
+            if _shutdown_event.wait(0.8):
+                return
 
-    _autoplay_thread = threading.Thread(target=_worker, daemon=True)
-    _autoplay_thread.start()
+    with _autoplay_start_lock:
+        if _shutting_down or _shutdown_event.is_set():
+            return
+        if _autoplay_thread is not None and _autoplay_thread.is_alive():
+            return
+        _autoplay_thread = threading.Thread(
+            target=_worker,
+            name="jarvis-music-autoplay",
+            daemon=True,
+        )
+        _autoplay_thread.start()
 
 
 def set_autoplay(enabled: bool = True) -> str:
@@ -1695,6 +1972,35 @@ def show_queue(limit: int = 20) -> str:
     if len(_playlist) > lim:
         lines.append(f"... y {len(_playlist)-lim} más")
     return "\n".join(lines)
+
+
+def queue_snapshot(limit: int = 20) -> list[dict]:
+    """Structured up-next list (title/artists/videoId) starting at the
+    currently playing track — for the LAN dashboard's Música screen.
+    Read-only: just slices the module-level _playlist, no lock needed."""
+    try:
+        lim = max(1, min(300, int(limit)))
+    except Exception:
+        lim = 20
+    # Anchor on the audible track: if a transition started but never finished,
+    # _playlist_idx points somewhere the user isn't, and the "up next" list
+    # would show a stretch of the playlist unrelated to what's playing.
+    anchor = _playing_playlist_index()
+    if anchor is None:
+        anchor = _playlist_idx
+    items = _playlist[anchor:anchor + lim]
+    return [
+        {
+            "title": t.get("title", ""),
+            "artists": t.get("artists", ""),
+            "videoId": t.get("videoId", ""),
+            "thumbnail": t.get("thumbnail", ""),
+            # Absolute _playlist index — jump_to() takes an absolute index,
+            # not a position within this (current-track-relative) snapshot.
+            "index": anchor + offset,
+        }
+        for offset, t in enumerate(items)
+    ]
 
 
 def list_playlists(limit: int | None = None) -> str:
@@ -1730,6 +2036,7 @@ def _build_playlist_from_tracks(tracks, shuffle: bool = False) -> list:
             "videoId": vid,
             "title": t.get("title", ""),
             "artists": _artists_text(t.get("artists")),
+            "thumbnail": t.get("thumbnail", ""),
         })
     if shuffle and out:
         random.shuffle(out)
@@ -1740,10 +2047,25 @@ def _load_and_play_playlist(items: list, start_idx: int = 0) -> str:
     global _playlist, _playlist_idx
     if not items:
         return "La lista está vacía."
-    _playlist = items
-    _playlist_idx = max(0, min(int(start_idx), len(_playlist) - 1))
-    cur = _playlist[_playlist_idx]
-    return _play_video(cur["videoId"], cur["title"], cur["artists"])
+    with _playback_transition_lock:
+        # Whatever a running crossfade was fading in belongs to the playlist we
+        # are replacing; it must not surface over the new selection.
+        _cancel_crossfade()
+        old_playlist = _playlist
+        old_idx = _playlist_idx
+        _playlist = items
+        _playlist_idx = max(0, min(int(start_idx), len(_playlist) - 1))
+        cur = _playlist[_playlist_idx]
+        try:
+            result = _play_video(cur["videoId"], cur["title"], cur["artists"])
+        except Exception:
+            _playlist = old_playlist
+            _playlist_idx = old_idx
+            raise
+        if not _transition_succeeded(result):
+            _playlist = old_playlist
+            _playlist_idx = old_idx
+        return result
 
 
 def add_to_queue(video_id: str = "", title: str = "", artists: str = "") -> str:
@@ -1837,11 +2159,29 @@ def play(query: str) -> str:
                 "videoId": vid,
                 "title":   r.get("title", ""),
                 "artists": r.get("artists", ""),
+                "thumbnail": r.get("thumbnail", ""),
             })
     if not new_pl:
         return f"No se pudo obtener URL para '{query}'."
 
     return _load_and_play_playlist(new_pl, 0)
+
+
+def _cancel_crossfade(timeout: float = 1.5) -> bool:
+    """Stop an in-flight crossfade and wait for its thread to let go.
+
+    The waiting matters: that thread writes volumes on both slots, so starting
+    the replacement track before it notices would let it ramp the slot we just
+    loaded down to silence.
+    """
+    if not _xfade_in_progress:
+        return True
+    _log("XFADE: cancelando la transición en curso (llegó otra)")
+    _xfade_cancel.set()
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while _xfade_in_progress and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return not _xfade_in_progress
 
 
 def _crossfade_transition(t: dict, allow_crossfade: bool = True) -> str:
@@ -1867,9 +2207,70 @@ def _crossfade_transition(t: dict, allow_crossfade: bool = True) -> str:
         ):
             return f"Crossfade → '{t['title']}'."
     # Fallback: instant switch at full volume
+    # A crossfade still in flight is heading for a track the user has now
+    # skipped past; letting it finish would promote that track over this one a
+    # moment later, which is the second, unasked-for skip.
+    _cancel_crossfade()
     _log(f"cambio directo → '{t['title']}'")
     _send_command(["set_property", "volume", _user_volume])
     return _play_video(t["videoId"], t["title"], t["artists"])
+
+
+def _transition_succeeded(result: str) -> bool:
+    return result.startswith("Crossfade ") or result.startswith("Reproduciendo ")
+
+
+def _playing_playlist_index() -> int | None:
+    """Index in _playlist of the track mpv is ACTUALLY playing, or None.
+
+    _playlist_idx is advanced optimistically the moment a transition starts,
+    and a crossfade only reports that it *began* (the fade itself completes on
+    a background thread). If that thread later gives up, playback stays on the
+    old track while _playlist_idx points somewhere else — the queue then shows
+    a completely different position than what you hear, and jumping to the
+    track you can hear is refused as "already playing". Trusting the live
+    videoId instead of the bookkeeping index resolves that disagreement.
+    """
+    with _lock:
+        vid = str(_last_meta.get("videoId") or "")
+    if not vid:
+        return None
+    for i, item in enumerate(_playlist):
+        if item.get("videoId") == vid:
+            return i
+    return None
+
+
+def _navigate_playlist(delta: int, manual: bool) -> str:
+    global _playlist_idx, _crossfade_fading_out, _autoplay_last_switch
+    with _playback_transition_lock:
+        if not _playlist:
+            return "No hay lista de reproducción."
+        # Re-anchor on reality before moving, so "next" from a desynced state
+        # advances from the audible track rather than from a stale index.
+        actual = _playing_playlist_index()
+        if actual is not None and actual != _playlist_idx:
+            _playlist_idx = actual
+        old_idx = _playlist_idx
+        old_fading = _crossfade_fading_out
+        _playlist_idx = (_playlist_idx + delta) % len(_playlist)
+        _crossfade_fading_out = False
+        allow = (not manual) or _crossfade_on_skip
+        try:
+            result = _crossfade_transition(_playlist[_playlist_idx], allow_crossfade=allow)
+        except Exception:
+            _playlist_idx = old_idx
+            _crossfade_fading_out = old_fading
+            raise
+        if not _transition_succeeded(result):
+            _playlist_idx = old_idx
+            _crossfade_fading_out = old_fading
+        else:
+            # The autoplay worker debounces its own advances with this stamp.
+            # A skip it did not initiate has to count too, otherwise the worker
+            # is free to fire a second advance right after the user's own.
+            _autoplay_last_switch = time.time()
+        return result
 
 
 def next(manual: bool = False) -> str:
@@ -1879,24 +2280,33 @@ def next(manual: bool = False) -> str:
     skips only crossfade when the user enabled 'crossfade on skip'. Auto-advance
     from the playback worker passes manual=False and always crossfades if enabled.
     """
-    global _playlist_idx, _crossfade_fading_out
-    if not _playlist:
-        return "No hay lista de reproducción."
-    _playlist_idx = (_playlist_idx + 1) % len(_playlist)
-    _crossfade_fading_out = False
-    allow = (not manual) or _crossfade_on_skip
-    return _crossfade_transition(_playlist[_playlist_idx], allow_crossfade=allow)
+    return _navigate_playlist(1, manual)
 
 
 def previous(manual: bool = False) -> str:
     """Skip to previous track in playlist. See next() for the manual flag."""
-    global _playlist_idx, _crossfade_fading_out
+    return _navigate_playlist(-1, manual)
+
+
+def jump_to(index: int, manual: bool = True) -> str:
+    """Jump directly to an arbitrary track in the current playlist (e.g. the
+    LAN dashboard's "up next" queue list, tap-to-play). Reuses
+    _navigate_playlist's crossfade-transition/rollback-on-failure logic —
+    just computes the delta from the current position instead of assuming
+    ±1, so it plays exactly like a next()/previous() to that spot."""
     if not _playlist:
         return "No hay lista de reproducción."
-    _playlist_idx = (_playlist_idx - 1) % len(_playlist)
-    _crossfade_fading_out = False
-    allow = (not manual) or _crossfade_on_skip
-    return _crossfade_transition(_playlist[_playlist_idx], allow_crossfade=allow)
+    idx = max(0, min(int(index), len(_playlist) - 1))
+    # Measure the jump from the track that is actually audible, not from the
+    # bookkeeping index — those disagree whenever a transition was started but
+    # never completed, and using the stale one both jumps to the wrong track
+    # and wrongly refuses a jump to the one you can hear.
+    current = _playing_playlist_index()
+    if current is None:
+        current = _playlist_idx
+    if idx == current:
+        return "Ya está sonando esa canción."
+    return _navigate_playlist(idx - current, manual)
 
 
 def pause() -> bool:
@@ -1921,10 +2331,21 @@ def resume() -> bool:
 
 
 def toggle_play() -> bool:
-    return _send_command(["cycle", "pause"]) 
+    """Flip play/pause and publish the new state immediately.
+
+    "cycle pause" left _last_meta untouched, so anything reading current()
+    right after a toggle (the phone re-polls the moment its button is tapped)
+    still saw the previous state and rendered the button snapping back.
+    """
+    paused = _get_mpv_property("pause")
+    if paused is None:
+        with _lock:
+            paused = not bool(_last_meta.get("playing", False))
+    return resume() if bool(paused) else pause()
 
 
 def stop() -> bool:
+    _cancel_crossfade()
     ok = _send_command(["stop"])
     if ok:
         with _lock:
@@ -2015,6 +2436,21 @@ def play_from_file(file_path: str, shuffle: bool = False) -> str:
 def current() -> dict:
     with _lock:
         base = dict(_last_meta)
+    # _last_meta only tracks playback transport state (title/position/etc) —
+    # the real per-track thumbnail lives on the _playlist entry itself, so
+    # look it up there instead of synthesizing one from the video ID (a raw
+    # YouTube video-frame thumbnail, wrong aspect ratio for square album art).
+    thumb = ""
+    try:
+        if 0 <= _playlist_idx < len(_playlist) and _playlist[_playlist_idx].get("videoId") == base.get("videoId"):
+            thumb = _playlist[_playlist_idx].get("thumbnail", "") or ""
+    except Exception:
+        thumb = ""
+    base["thumbnail"] = thumb
+    # The user's intended level, straight from the backend: remote clients would
+    # otherwise read it off the desktop window, which learns about a volume
+    # change one GUI-thread hop later than the change itself.
+    base["volume"] = int(_user_volume)
     active_proc = _procs[_active_slot]
     if active_proc is None or active_proc.poll() is not None:
         base["playing"] = False

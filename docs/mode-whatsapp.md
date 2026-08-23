@@ -30,6 +30,52 @@ La primera vez que abres el modo WhatsApp, Jarvis muestra un código QR para vin
 | **Código QR** | Se muestra en el panel si no hay sesión activa — escanea con el teléfono |
 | **Indicador de estado** | Verde: conectado · Naranja: reconectando · Rojo: sin sesión |
 
+Los contadores y la lista de pendientes se reconcilian con el estado de no leídos de WhatsApp. El historial recuperado al conectar no se considera automáticamente pendiente de respuesta, y leer o responder desde otro dispositivo limpia ese estado.
+
+Al abrir un chat con mensajes sin leer, la conversación se sitúa en el primer no leído con un separador verde. Si la página cargada no llega tan atrás, no se pinta separador en vez de marcarlo en un sitio incorrecto.
+
+### Atajos de teclado
+
+| Atajo | Acción |
+|-------|--------|
+| `Ctrl+F` | Abre/cierra la búsqueda dentro de la conversación abierta |
+| `Ctrl+K` | Foco en la búsqueda de la lista de chats |
+| `Intro` (en la búsqueda) | Salta al siguiente resultado |
+| `Mayús+Intro` (en la búsqueda) | Salta al resultado anterior |
+| `Esc` (en la búsqueda) | Cierra la búsqueda |
+| `Esc` (en el compositor) | Cancela responder/editar |
+| `Mayús+Intro` (en el compositor) | Salto de línea sin enviar |
+
+La búsqueda dentro de la conversación solo encuentra mensajes ya cargados en pantalla (hasta 800, o los que traiga la paginación al subir) — no dispara una búsqueda contra el histórico completo del bridge.
+
+Los envíos distinguen entre **enviando**, **confirmando** y **no enviado**. Si la petición HTTP agota el tiempo pero WhatsApp puede seguir procesándola, la interfaz conserva el mensaje como “confirmando”; desde su menú contextual se puede comprobar o reintentar usando la misma clave idempotente, sin producir un segundo envío.
+
+---
+
+## Tipos de mensaje
+
+| Tipo | Cómo se muestra |
+|------|-----------------|
+| Texto | Burbuja con menciones resueltas a nombre |
+| Respuesta (cita) | Bloque con autor y extracto; clic salta al original cuando el mensaje citado tiene id |
+| Imagen · vídeo · sticker · GIF | Miniatura; imágenes en visor propio, vídeo en el reproductor del sistema |
+| Audio · nota de voz | Reproductor en línea con velocidad y transcripción opcional |
+| Documento | Nombre de archivo, tamaño y tipo MIME, con botón de abrir |
+| Ubicación | Tarjeta con nombre, dirección, coordenadas y enlace al mapa |
+| Contacto / vCard | Tarjeta con nombre y teléfonos (una por contacto en los multi-vCard) |
+| Encuesta | Pregunta y opciones |
+| Reacciones | Resumen de emojis agrupados bajo la burbuja |
+| Edición | El cuerpo se actualiza en su sitio y se marca «editado» |
+| Borrado / revocación | Queda «[mensaje eliminado]» en cursiva; se descarta el contenido original |
+| Adjunto con texto | El texto se muestra como pie del adjunto |
+
+### No soportado (y por qué)
+
+- **Votos de las encuestas**: el bridge no expone los recuentos, así que la tarjeta muestra la pregunta y las opciones sin porcentajes inventados. Votar se hace desde el teléfono.
+- **Reproducción de vídeo dentro de la app**: se abre en el reproductor del sistema.
+- **Pedidos, pagos, productos, listas y mensajes interactivos**: se identifican por nombre («[Pedido]», «[Pago]», …) pero no se renderiza su contenido.
+- **Tipos nuevos de WhatsApp**: se muestran con su nombre técnico entre corchetes en lugar de una burbuja vacía, para que un tipo sin soporte se vea como tal.
+
 ---
 
 ## Primera configuración
@@ -104,10 +150,10 @@ Cuando le pides a Jarvis que envíe un mensaje con intención ("dile que...", "r
 
 El bridge es un proceso Node.js (`whatsapp_bridge/`) que corre en segundo plano. Jarvis lo gestiona automáticamente:
 
-- Se inicia cuando abres el modo WhatsApp
+- Se inicia junto con Jarvis para poder recibir mensajes y actualizar el contador aunque el modo no esté abierto
 - Se reinicia automáticamente si falla
 - Se cierra cuando cierras Jarvis
-- Los logs están en `logs/node.log` y `logs/node.err`
+- Los logs están en `%LOCALAPPDATA%\Jarvis\logs\bridge.log` en Windows
 
 ### Diagnóstico
 
@@ -115,14 +161,14 @@ Si el QR no aparece o la conexión falla:
 
 ```powershell
 # Ver logs del bridge en tiempo real
-Get-Content .\logs\node.err -Tail 50 -Wait
-Get-Content .\logs\node.log -Tail 50 -Wait
+Get-Content "$env:LOCALAPPDATA\Jarvis\logs\bridge.log" -Tail 50 -Wait
 ```
 
 ---
 
 ## Privacidad
 
-- Los mensajes se procesan **localmente** — no se envían a ningún servidor externo más allá de WhatsApp Web.
-- La sesión se guarda en `whatsapp_bridge/.wwebjs_auth/` (no en git, en `.gitignore`).
-- El historial de conversaciones no se almacena en Jarvis — solo se carga bajo demanda desde WhatsApp Web.
+- El bridge y la interfaz procesan los mensajes localmente. Las funciones manuales de IA y las opciones de traducción o transcripción automática usan Google Gemini y envían allí el texto o audio necesario.
+- La traducción y transcripción automáticas están desactivadas por defecto y se activan por separado en **Ajustes → WhatsApp → Procesamiento con IA**.
+- La sesión se guarda en `%LOCALAPPDATA%\Jarvis\whatsapp_bridge\` en Windows, fuera del repositorio.
+- Para permitir sincronización y recuperación tras reinicios, el bridge conserva localmente un buffer de hasta 1000 mensajes y Jarvis guarda los pendientes durante un máximo de 24 horas.

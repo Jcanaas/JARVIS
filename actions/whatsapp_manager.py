@@ -11,12 +11,21 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from .whatsapp import fetch_messages, is_ignored_message, resolve_contact, send_whatsapp, transcribe_message_audio
+from .whatsapp import (
+    fetch_messages,
+    get_unread_counts,
+    is_ignored_message,
+    resolve_contact,
+    send_whatsapp,
+    transcribe_message_audio,
+)
+from .whatsapp_contract import apply_message_update, normalize_message
 
 from actions.paths import RESOURCE_DIR, DATA_DIR
 ROOT = RESOURCE_DIR
@@ -33,6 +42,31 @@ def _extract_youtube_id(body: str) -> str:
     return match.group(1) if match else ""
 
 
+def _event_seen_key(message: Dict[str, Any], message_id: str) -> str:
+    event = str(message.get("event") or message.get("type") or "message").lower()
+    if event in {"edit", "revoke", "reaction"} or str(message.get("type") or "").lower() == "revoked":
+        reaction = message.get("reaction") if isinstance(message.get("reaction"), dict) else {}
+        detail = f":{reaction.get('senderId') or ''}:{reaction.get('reaction') or ''}"
+        return f"{event}:{message_id}:{message.get('timestamp') or 0}{detail}"
+    return message_id
+
+
+def _classify_backlog(
+    message_age_s: float,
+    *,
+    in_startup_window: bool,
+    is_flood: bool,
+    backlog_age_s: float = 90.0,
+    startup_recent_s: float = 5.0,
+) -> bool:
+    """Classify sync/reconnect traffic without dropping a truly live message."""
+    return bool(
+        is_flood
+        or message_age_s > backlog_age_s
+        or (in_startup_window and message_age_s > startup_recent_s)
+    )
+
+
 def _load_pending() -> Dict[str, Any]:
     if not PENDING_FILE.exists():
         return {}
@@ -44,6 +78,88 @@ def _load_pending() -> Dict[str, Any]:
 
 def _save_pending(data: Dict[str, Any]):
     PENDING_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _pending_entry_from_message(message: Dict[str, Any], is_backlog: bool) -> Dict[str, Any]:
+    """Add pending-workflow state without rebuilding the message payload.
+
+    ``from`` has historically meant "chat id" in the pending subsystem, while
+    it means the actual sender on the bridge.  Keep that alias temporarily for
+    compatibility, expose the real value as ``sourceFrom``, and preserve the
+    complete canonical record for consumers migrating to ``chatId``.
+    """
+    canonical = dict(normalize_message(message))
+    chat_id = canonical.get("chatId") or canonical.get("from")
+    canonical.update({
+        "sourceFrom": canonical.get("from"),
+        "from": chat_id,
+        "chatId": chat_id,
+        "draft": canonical.get("draft"),
+        "sent": bool(canonical.get("sent", False)),
+        "is_backlog": bool(is_backlog),
+    })
+    return canonical
+
+
+def _is_actionable_pending(entry: Dict[str, Any]) -> bool:
+    """Whether an event represents an incoming message that needs attention."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("fromMe") or entry.get("sent") or entry.get("is_backlog"):
+        return False
+    event = str(entry.get("event") or "message").lower()
+    msg_type = str(entry.get("type") or "chat").lower()
+    return event == "message" and msg_type not in {"edit", "revoked", "reaction"}
+
+
+def _apply_pending_update(
+    pending: Dict[str, Dict[str, Any]], update: Dict[str, Any],
+) -> bool:
+    """Apply a bridge update event to pending state; return whether it changed."""
+    message_id = str(update.get("id") or "")
+    event = str(update.get("event") or update.get("type") or "").lower()
+    if not message_id:
+        return False
+    if event == "revoke" or str(update.get("type") or "").lower() == "revoked":
+        return pending.pop(message_id, None) is not None
+    original = pending.get(message_id)
+    if original is None or event not in {"edit", "reaction"}:
+        return False
+    pending[message_id] = dict(apply_message_update(original, update))
+    return True
+
+
+def _reconcile_pending_entries(
+    pending: Dict[str, Dict[str, Any]], unread_by_chat: Dict[str, int],
+) -> Dict[str, Dict[str, Any]]:
+    """Keep only actionable entries covered by each chat's unread count.
+
+    Chats absent from ``unread_by_chat`` are left alone: an incomplete bridge
+    snapshot must never erase a legitimate pending message.
+    """
+    actionable = {
+        str(message_id): dict(entry)
+        for message_id, entry in (pending or {}).items()
+        if _is_actionable_pending(entry)
+    }
+    grouped: Dict[str, List[tuple[str, Dict[str, Any]]]] = {}
+    for message_id, entry in actionable.items():
+        chat_id = str(entry.get("chatId") or entry.get("from") or "").strip()
+        grouped.setdefault(chat_id, []).append((message_id, entry))
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for chat_id, entries in grouped.items():
+        if chat_id not in unread_by_chat:
+            result.update(entries)
+            continue
+        try:
+            unread = max(0, int(unread_by_chat.get(chat_id) or 0))
+        except (TypeError, ValueError):
+            unread = 0
+        entries.sort(key=lambda item: int(item[1].get("sentAtMs") or item[1].get("waTs") or item[1].get("timestamp") or 0))
+        if unread:
+            result.update(entries[-unread:])
+    return result
 
 
 class WhatsAppManager:
@@ -59,6 +175,10 @@ class WhatsAppManager:
         startup_grace_secs: float = 15.0,
         backlog_age_secs: float = 90.0,
         flood_threshold: int = 4,
+        auto_translate: Optional[bool] = None,
+        auto_transcribe: Optional[bool] = None,
+        unread_fetcher=None,
+        unread_sync_interval: float = 5.0,
     ):
         self.poll_interval = poll_interval
         # Startup flood guard: WhatsApp Web re-syncing on connect can dump a
@@ -72,6 +192,13 @@ class WhatsAppManager:
         self._startup_deadline = time.monotonic() + max(0.0, startup_grace_secs)
         self.backlog_age_secs = backlog_age_secs
         self.flood_threshold = flood_threshold
+        # None follows the live app setting. Explicit booleans are useful for
+        # tests/embedded callers and never write user preferences themselves.
+        self.auto_translate = auto_translate
+        self.auto_transcribe = auto_transcribe
+        self._unread_fetcher = unread_fetcher or get_unread_counts
+        self._unread_sync_interval = max(1.0, float(unread_sync_interval))
+        self._last_unread_sync = 0.0
         # "Responder esto" reminder: nudge once per message if an incoming
         # message sits unanswered (not in _pending as sent) past this long.
         self.on_unanswered_reminder = on_unanswered_reminder
@@ -84,7 +211,7 @@ class WhatsAppManager:
         # This avoids stale IDs from previous sessions blocking new messages.
         self._seen: set = set()
         # _pending still used for list_pending() but not for dedup
-        self._pending = _load_pending()
+        self._pending = _reconcile_pending_entries(_load_pending(), {})
         # Purge entries older than 24 h so the file doesn't grow forever
         cutoff = int(time.time() * 1000) - 24 * 3600 * 1000
         self._pending = {k: v for k, v in self._pending.items()
@@ -125,7 +252,7 @@ class WhatsAppManager:
                     new_entries = []
                     msg_map = {}  # Map message IDs to bridge messages for audio transcription
                     newest_timestamp = self._last_ts
-                    edit_entries = []
+                    update_entries = []
                     with self._lock:
                         for m in msgs:
                             if is_ignored_message(m):
@@ -137,22 +264,22 @@ class WhatsAppManager:
                                 newest_timestamp = max(newest_timestamp, int(m.get("timestamp") or 0))
                             except (TypeError, ValueError):
                                 pass
-                            # Edit events reuse the original message's id (so its
+                            # Update events reuse the original message's id (so its
                             # timestamp/order in the pending store doesn't change),
                             # which means they'd be skipped by the dedup check below
                             # if handled as normal messages. Handle them separately:
                             # patch the stored body and notify edit listeners.
-                            if str(m.get('type') or '').lower() == 'edit':
-                                pending_entry = self._pending.get(mid)
-                                if pending_entry is not None:
-                                    pending_entry['body'] = m.get('body') or ''
-                                    pending_entry['edited'] = True
-                                edit_entries.append({
-                                    'id': mid,
-                                    'from': m.get('chatId'),
-                                    'body': m.get('body') or '',
-                                    'edited': True,
-                                })
+                            event = str(m.get('event') or m.get('type') or '').lower()
+                            if event in {'edit', 'revoke', 'reaction', 'revoked'}:
+                                update_key = _event_seen_key(m, mid)
+                                if update_key in self._seen:
+                                    continue
+                                self._seen.add(update_key)
+                                _apply_pending_update(self._pending, m)
+                                update_entry = dict(normalize_message(m))
+                                update_entry['id'] = mid
+                                update_entry['from'] = update_entry.get('chatId') or m.get('chatId')
+                                update_entries.append(update_entry)
                                 continue
                             # deduplicate using session-only _seen set
                             if mid in self._seen:
@@ -166,46 +293,20 @@ class WhatsAppManager:
                                 ) / 1000.0
                             except (TypeError, ValueError):
                                 msg_age_s = 0.0
-                            is_backlog = (
-                                time.monotonic() < self._startup_deadline
-                                or msg_age_s > self.backlog_age_secs
+                            is_backlog = _classify_backlog(
+                                msg_age_s,
+                                in_startup_window=time.monotonic() < self._startup_deadline,
+                                is_flood=False,
+                                backlog_age_s=self.backlog_age_secs,
                             )
-                            entry = {
-                                'id': mid,
-                                # 'from' is used throughout as "the chat this
-                                # message belongs to", not "who sent it". The
-                                # bridge already computes that correctly as
-                                # chatId (msg.fromMe ? msg.to : msg.from); for
-                                # our own outgoing messages msg.from is *our*
-                                # JID, which would point every self-sent message
-                                # (phone or Jarvis) at the wrong chat and make
-                                # an already-open conversation never refresh.
-                                'from': m.get('chatId') or m.get('from'),
-                                'author': m.get('author') or None,
-                                'authorName': m.get('authorName') or None,
-                                'senderName': m.get('senderName') or None,
-                                'body': m.get('body') or '',
-                                'type': m.get('type', 'chat'),
-                                'timestamp': m.get('timestamp'),
-                                'fromMe': from_me,
-                                'ack': m.get('ack'),
-                                # Preserve media metadata so the chat UI can render
-                                # the inline player/transcription for audio, images,
-                                # etc. (without these the bubble shows only "[nota de
-                                # voz]" and similar placeholders).
-                                'hasMedia': bool(m.get('hasMedia') or m.get('mediaUrl')),
-                                'mediaUrl': m.get('mediaUrl') or None,
-                                'mentionedIds': m.get('mentionedIds') or [],
-                                'mentions': m.get('mentions') or {},
-                                'quoted': m.get('quoted') or None,
-                                'draft': None,
-                                'sent': False,
-                                'is_backlog': is_backlog,
-                            }
-                            self._pending[mid] = entry
+                            entry = _pending_entry_from_message(m, is_backlog=is_backlog)
+                            entry['id'] = mid
+                            entry['fromMe'] = from_me
+                            if _is_actionable_pending(entry):
+                                self._pending[mid] = entry
                             new_entries.append(entry)
                             msg_map[mid] = m  # Store bridge message for transcription
-                        if new_entries or edit_entries:
+                        if new_entries or update_entries:
                             _save_pending(self._pending)
                         # Advance only to data actually received. Advancing to "now"
                         # could skip a message arriving between the HTTP response and
@@ -217,15 +318,21 @@ class WhatsAppManager:
                     # whole tick as backlog even if individual ages looked fresh.
                     incoming = [e for e in new_entries if not e.get('fromMe')]
                     if len(incoming) > self.flood_threshold:
-                        for entry in incoming:
-                            entry['is_backlog'] = True
+                        with self._lock:
+                            changed_pending = False
+                            for entry in incoming:
+                                entry['is_backlog'] = True
+                                if self._pending.pop(entry['id'], None) is not None:
+                                    changed_pending = True
+                            if changed_pending:
+                                _save_pending(self._pending)
                     # notify outside lock
-                    for edit_entry in edit_entries:
+                    for update_entry in update_entries:
                         for listener in list(self._edit_listeners):
                             try:
-                                listener(edit_entry)
+                                listener(update_entry)
                             except Exception as e:
-                                print(f"[WA] edit listener error: {e}", file=sys.stderr)
+                                print(f"[WA] update listener error: {e}", file=sys.stderr)
                     if self.on_new_message:
                         for entry in new_entries:
                             print(f"[WA] {entry.get('from')} → {entry.get('body','')[:60]}", file=sys.stderr)
@@ -238,7 +345,7 @@ class WhatsAppManager:
                     # Shared queue: a YouTube/YT Music link in an incoming chat
                     # gets queued in the headless music player automatically.
                     for entry in new_entries:
-                        if not entry.get('fromMe') and entry.get('body'):
+                        if not entry.get('fromMe') and not entry.get('is_backlog') and entry.get('body'):
                             video_id = _extract_youtube_id(entry['body'])
                             if video_id:
                                 threading.Thread(
@@ -248,7 +355,7 @@ class WhatsAppManager:
                                 ).start()
                     # Auto-translate incoming foreign-language text (don't block polling)
                     for entry in new_entries:
-                        if not entry.get('fromMe') and entry.get('body'):
+                        if self._should_auto_translate(entry):
                             threading.Thread(
                                 target=self._translate_entry_text,
                                 args=(entry,),
@@ -256,8 +363,7 @@ class WhatsAppManager:
                             ).start()
                     # Transcribe audio asynchronously (don't block polling)
                     for entry in new_entries:
-                        msg_type = str(entry.get('type') or '').lower()
-                        if msg_type in {'audio', 'ptt'}:
+                        if self._should_auto_transcribe(entry):
                             bridge_msg = msg_map.get(entry['id'])
                             if bridge_msg:
                                 threading.Thread(
@@ -286,8 +392,56 @@ class WhatsAppManager:
                 _backoff = min(_backoff * 2, 60.0)
                 time.sleep(_backoff)
                 continue
+            self._sync_pending_unread()
             self._check_unanswered()
             time.sleep(self.poll_interval)
+
+    def _sync_pending_unread(self, force: bool = False) -> bool:
+        now = time.monotonic()
+        if not force and now - self._last_unread_sync < self._unread_sync_interval:
+            return False
+        self._last_unread_sync = now
+        try:
+            counts = self._unread_fetcher()
+        except Exception as exc:
+            print(f"[WA] unread sync error: {exc}", file=sys.stderr)
+            return False
+        if counts is None:
+            return False
+        with self._lock:
+            reconciled = _reconcile_pending_entries(self._pending, counts)
+            if reconciled == self._pending:
+                return False
+            removed = set(self._pending) - set(reconciled)
+            self._pending = reconciled
+            self._reminded.difference_update(removed)
+            _save_pending(self._pending)
+        return True
+
+    @staticmethod
+    def _privacy_setting(key: str, override: Optional[bool]) -> bool:
+        if override is not None:
+            return bool(override)
+        from actions import app_settings
+
+        return bool(app_settings.get(key, False))
+
+    def _should_auto_translate(self, entry: Dict[str, Any]) -> bool:
+        if entry.get("fromMe") or not self._privacy_setting(
+            "whatsapp_auto_translate", self.auto_translate,
+        ):
+            return False
+        if str(entry.get("type") or "chat").lower() != "chat":
+            return False
+        body = str(entry.get("body") or "").strip()
+        return bool(body and not (body.startswith("[") and body.endswith("]")))
+
+    def _should_auto_transcribe(self, entry: Dict[str, Any]) -> bool:
+        if entry.get("fromMe") or not self._privacy_setting(
+            "whatsapp_auto_transcribe", self.auto_transcribe,
+        ):
+            return False
+        return str(entry.get("type") or "").lower() in {"audio", "ptt"}
 
     def _check_unanswered(self) -> None:
         """Fire on_unanswered_reminder once per message left unanswered too long.
@@ -330,8 +484,9 @@ class WhatsAppManager:
             if transcript:
                 entry['transcription'] = transcript
                 with self._lock:
-                    self._pending[entry['id']] = entry
-                    _save_pending(self._pending)
+                    if entry['id'] in self._pending:
+                        self._pending[entry['id']] = entry
+                        _save_pending(self._pending)
                 print(f"[WA] transcribed: {entry.get('from')} → {transcript[:100]}", file=sys.stderr)
             else:
                 print(f"[WA] transcription failed for {entry.get('id')}", file=sys.stderr)
@@ -361,8 +516,9 @@ class WhatsAppManager:
             if translation:
                 entry['translation'] = translation
                 with self._lock:
-                    self._pending[entry['id']] = entry
-                    _save_pending(self._pending)
+                    if entry['id'] in self._pending:
+                        self._pending[entry['id']] = entry
+                        _save_pending(self._pending)
         except Exception as e:
             import sys
             print(f"[WA] translation error: {e}", file=sys.stderr)
@@ -435,7 +591,7 @@ class WhatsAppManager:
     def _schedule_auto_reply(self, entry: Dict[str, Any]):
         # Never auto-reply to our own outgoing messages (the poller also feeds
         # messages sent from the phone into the manager).
-        if entry.get("fromMe"):
+        if entry.get("fromMe") or entry.get("is_backlog"):
             return
         chat_id = str(entry.get("from") or "").strip()
         if not chat_id:
@@ -533,7 +689,7 @@ class WhatsAppManager:
 
     def list_pending(self) -> List[Dict[str, Any]]:
         with self._lock:
-            return [v for v in self._pending.values() if not v.get('sent')]
+            return [v for v in self._pending.values() if _is_actionable_pending(v)]
 
     def get(self, message_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:

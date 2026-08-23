@@ -38,7 +38,7 @@ if _keys.is_file():
     datas.append((str(_keys), "config"))
 
 binaries = []
-for name in ("mpv.exe", "mpv.com", "d3dcompiler_43.dll", "yt-dlp.exe"):
+for name in ("mpv.exe", "mpv.com", "d3dcompiler_43.dll", "yt-dlp.exe", "ffmpeg.exe"):
     p = ROOT / name
     if p.is_file():
         binaries.append((str(p), "."))
@@ -72,7 +72,7 @@ hiddenimports = []
 _collect_pkgs = [
     "googleapiclient", "google_auth_oauthlib", "google.auth", "google.oauth2",
     "google.genai",
-    "yt_dlp", "qrcode", "comtypes", "pycaw", "duckduckgo_search",
+    "yt_dlp", "qrcode", "comtypes", "pycaw", "duckduckgo_search", "flask",
     "youtube_transcript_api", "pptx", "dateutil", "bs4",
     # ytmusicapi needs its locales/ (gettext .mo files) — without them every
     # YTMusic() call dies at init in the frozen build.

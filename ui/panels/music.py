@@ -58,6 +58,8 @@ class MusicModePanelV2(QWidget):
         self._thumb_pixmap_cache: dict[tuple[str, int], QPixmap] = {}
         self._playlist_tracks_cache: dict[str, tuple[float, list[dict]]] = {}
         self._playlist_request = 0
+        self._search_request = 0
+        self._page_request = 0
         self._library_playlists_cache: list[dict] | None = None
         self._thumb_loading: set[str] = set()
         self._thumb_rows: dict[str, set[int]] = {}
@@ -70,12 +72,19 @@ class MusicModePanelV2(QWidget):
         self._details_loading_key: tuple[str, str, str] = ("", "", "")
         self._detail_render_fingerprint: tuple = ()
         self._detail_render_track_key: tuple[str, str] = ("", "")
+        # Painting the details pane can resolve a cover from cache, which asks
+        # for another paint from inside the first one. See _render_now_playing.
+        self._rendering_now_playing = False
+        self._pending_now_playing_render = False
         self._details_visible_once = False
         self._artist_page_data: dict = {}
         self._artist_image_targets: dict[str, list[tuple[object, int]]] = {}
         self._artist_page_open = False
         self._table_revision = 0
         self._playing_mark_revision = -1
+        self._pending_playback_token = 0
+        self._pending_playback: dict | None = None
+        self._retry_operation: tuple[str, object] | None = None
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._shutdown_thumb_executor)
@@ -91,6 +100,7 @@ class MusicModePanelV2(QWidget):
         search_row = QHBoxLayout()
         search_row.setSpacing(10)
         self.query_input = SearchGlowInput("Buscar playlists, canciones o artistas")
+        self.query_input.setAccessibleName("Buscar en música")
         self.query_input.returnPressed.connect(self.search)
         search_row.addWidget(self.query_input, stretch=1)
         root.addLayout(search_row)
@@ -212,7 +222,8 @@ class MusicModePanelV2(QWidget):
         self._hdr_menu_btn = QPushButton("⋯")
         self._hdr_menu_btn.setObjectName("MusicHeaderMenuBtn")
         self._hdr_menu_btn.setToolTip("Opciones")
-        self._hdr_menu_btn.setFixedSize(32, 32)
+        self._hdr_menu_btn.setAccessibleName("Opciones de música")
+        self._hdr_menu_btn.setFixedSize(40, 40)
         self._hdr_menu_btn.clicked.connect(self._show_header_menu)
         corner_col.addWidget(self._hdr_menu_btn, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         corner_col.addStretch()
@@ -233,6 +244,8 @@ class MusicModePanelV2(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setAccessibleName("Biblioteca de música")
+        self.table.setToolTip("Doble clic o Intro para reproducir una canción")
         self.table.setIconSize(QSize(44, 44))
         self.table.cellClicked.connect(self._select_row)
         self.table.cellDoubleClicked.connect(self._activate_row)
@@ -242,11 +255,26 @@ class MusicModePanelV2(QWidget):
 
         self.status = QLabel("Listo")
         self.status.setObjectName("MusicStatus")
+        self.status.setAccessibleName("Estado de carga de la biblioteca")
+        self.status.setTextFormat(Qt.TextFormat.RichText)
+        self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.status.setOpenExternalLinks(False)
+        self.status.linkActivated.connect(
+            lambda link: self._retry_last_operation() if link == "retry" else None
+        )
         self.status.setVisible(False)
-        browse_layout.addWidget(self.status)
 
         self.artist_page = self._build_artist_page()
         self.music_content_stack.addWidget(self.artist_page)
+        # Keep loading and playback feedback independent and visible in both
+        # browse and artist views. A library refresh must never hide a playback
+        # error or pending command.
+        left_layout.addWidget(self.status)
+        self.playback_status = QLabel("")
+        self.playback_status.setObjectName("MusicPlaybackStatus")
+        self.playback_status.setAccessibleName("Estado del comando de reproducción")
+        self.playback_status.setVisible(False)
+        left_layout.addWidget(self.playback_status)
 
         self.details_panel = QFrame()
         self.details_panel.setObjectName("NowPlayingPanel")
@@ -255,6 +283,7 @@ class MusicModePanelV2(QWidget):
         details_layout.setSpacing(10)
         self.details_heading = QLabel("REPRODUCIENDO")
         self.details_heading.setObjectName("NowPlayingHeading")
+        self.details_heading.setAccessibleName("Estado: reproduciendo")
         details_layout.addWidget(self.details_heading)
         self.detail_cover = _SquareArtworkLabel()
         self.detail_cover.setObjectName("NowPlayingCover")
@@ -448,12 +477,14 @@ class MusicModePanelV2(QWidget):
                 font-size: 12px;
                 font-weight: 700;
             }}
-            QLabel#MusicStatus {{
+            QLabel#MusicStatus, QLabel#MusicPlaybackStatus {{
                 color: rgba(255, 255, 255, 0.58);
                 background: transparent;
                 padding: 8px 4px 0 4px;
                 font-size: 12px;
             }}
+            QLabel#MusicPlaybackStatus[state="pending"] {{ color: {C.PRI}; }}
+            QLabel#MusicPlaybackStatus[state="error"] {{ color: {C.RED}; }}
             QFrame#NowPlayingPanel {{
                 background: rgba(10, 12, 26, 0.90);
                 border: 1px solid rgba(182, 196, 255, 0.12);
@@ -720,6 +751,8 @@ class MusicModePanelV2(QWidget):
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setAccessibleName("Canciones del artista")
+        table.setToolTip("Doble clic o Intro para reproducir una canción")
         table.setIconSize(QSize(42, 42))
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -888,13 +921,13 @@ class MusicModePanelV2(QWidget):
         tracks = list(self._artist_page_data.get(key) or [])
         if not (0 <= row < len(tracks)):
             return
-        playable = self._audio_tracks_from_data(tracks)
+        playable, playable_index = self._playable_tracks_with_selection(tracks, row)
         if playable:
             self._send_playback("play_tracks", {
                 "tracks": playable,
-                "start_index": row,
+                "start_index": playable_index,
                 "shuffle": False,
-            })
+            }, playback_data=tracks[row])
 
     def _audio_tracks_from_data(self, tracks: list[dict]) -> list[dict]:
         return [
@@ -907,6 +940,16 @@ class MusicModePanelV2(QWidget):
             if item.get("videoId")
         ]
 
+    def _playable_tracks_with_selection(
+        self, tracks: list[dict], selected_index: int
+    ) -> tuple[list[dict], int]:
+        selected_index = max(0, int(selected_index or 0))
+        playable = self._audio_tracks_from_data(tracks)
+        playable_index = sum(
+            1 for item in tracks[:selected_index] if item.get("videoId")
+        )
+        return playable, min(playable_index, max(0, len(playable) - 1))
+
     def _open_artist_album_item(self, item: QListWidgetItem):
         data = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(data, dict):
@@ -915,7 +958,7 @@ class MusicModePanelV2(QWidget):
     def _play_artist_video_item(self, item: QListWidgetItem):
         data = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(data, dict) and data.get("videoId"):
-            self._send_playback("play_track", data)
+            self._send_playback("play_track", data, playback_data=data)
 
     def _open_related_artist_item(self, item: QListWidgetItem):
         data = item.data(Qt.ItemDataRole.UserRole)
@@ -923,8 +966,9 @@ class MusicModePanelV2(QWidget):
             self._open_artist_page(data)
 
     def _run(self, op: str, fn):
+        self._retry_operation = (op, fn)
         self.status.setVisible(True)
-        self.status.setText("Cargando...")
+        self.status.setText("Cargando…")
 
         def worker():
             try:
@@ -937,6 +981,18 @@ class MusicModePanelV2(QWidget):
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _retry_last_operation(self) -> None:
+        operation = self._retry_operation
+        if not operation:
+            return
+        op, fn = operation
+        self._run(op, fn)
+
+    def _show_empty_state(self, message: str) -> None:
+        self.status.setText(self._esc(message))
+        self.status.setAccessibleDescription(message)
+        self.status.setVisible(True)
 
     def _safe_text(self, value) -> str:
         if value is None:
@@ -1135,7 +1191,13 @@ class MusicModePanelV2(QWidget):
         if not raw:
             self.detail_cover.setPixmap(QPixmap())
             self.detail_cover.setText("♪")
-            self._ensure_thumb_async(data)
+            # Ask for exactly the image this widget reads. Handing the whole
+            # record over made it fall back to `artistThumbnail`, whose arrival
+            # fills in keys the cover never looks at — so the cover stayed empty
+            # and asked again, forever.
+            cover_url = str(data.get("thumbnail") or data.get("cover") or "").strip()
+            if cover_url:
+                self._ensure_thumb_async({"thumbnail": cover_url})
             return
         pix = QPixmap()
         pix.loadFromData(raw)
@@ -1350,7 +1412,11 @@ class MusicModePanelV2(QWidget):
     def _add_song_row(self, row: int, data: dict, index: int):
         self.table.insertRow(row)
         self.table.setRowHeight(row, 58)
-        number = "▶" if data.get("_playing") else str(index + 1)
+        number = (
+            "▶" if data.get("_playing")
+            else "Ⅱ" if data.get("_current_track")
+            else str(index + 1)
+        )
         self.table.setItem(row, 0, self._item(number, data, Qt.AlignmentFlag.AlignCenter))
         title = self._safe_text(data.get("title") or "(sin titulo)")
         artists = self._safe_text(data.get("artists"))
@@ -1384,6 +1450,13 @@ class MusicModePanelV2(QWidget):
         self.shuffle_btn.setVisible(is_playlist)
         self._refresh_offline_button()
         self.status.setVisible(False)
+        if not self._items:
+            if table_kind == "playlist_tracks":
+                self._show_empty_state("Esta playlist no contiene canciones disponibles.")
+            elif table_kind == "recommendations":
+                self._show_empty_state("No hay recomendaciones disponibles por ahora.")
+            else:
+                self._show_empty_state("No se encontraron canciones.")
         self._prefetch_thumbnails()
         self._prefetch_audio_streams(0, 4)
         self._restore_playing_selection()
@@ -1407,6 +1480,13 @@ class MusicModePanelV2(QWidget):
         self._set_header("Playlists", "Tu biblioteca de YouTube Music", "Playlists", {})
         self.shuffle_btn.setVisible(False)
         self.status.setVisible(False)
+        if not self._items:
+            if not self.filter_row.isHidden():
+                self._show_empty_state("No se encontraron playlists.")
+            else:
+                self._show_empty_state(
+                    "No hay playlists en tu biblioteca. Usa el buscador para encontrar música."
+                )
         self._prefetch_thumbnails()
 
     def _show_artists(self, items: list[dict]):
@@ -1427,6 +1507,8 @@ class MusicModePanelV2(QWidget):
         self._set_header("Artistas", "Resultados de la busqueda", "Busqueda", {})
         self.shuffle_btn.setVisible(False)
         self.status.setVisible(False)
+        if not self._items:
+            self._show_empty_state("No se encontraron artistas.")
         self._prefetch_thumbnails()
 
     # ------------------------------------------------------------------
@@ -1643,6 +1725,8 @@ class MusicModePanelV2(QWidget):
     def load_recommendations(self, force: bool = False):
         if self._artist_page_open and not force:
             return
+        self._search_request += 1
+        self._page_request += 1
         self._show_browse_content()
         self.filter_row.setVisible(False)
         self._set_active_section("recommendations")
@@ -1652,6 +1736,8 @@ class MusicModePanelV2(QWidget):
     def load_playlists(self, force: bool = False):
         if self._artist_page_open and not force:
             return
+        self._search_request += 1
+        self._page_request += 1
         self._show_browse_content()
         self.filter_row.setVisible(False)
         self._set_active_section("playlists")
@@ -1682,18 +1768,25 @@ class MusicModePanelV2(QWidget):
         if not query:
             self.load_playlists(force=True)
             return
+        self._search_request += 1
+        self._page_request += 1
+        request = self._search_request
         self.section_row.setVisible(False)
 
         def _load():
-            ytmod = __import__(
-                "actions.ytmusic",
-                fromlist=["search_songs", "search_playlists", "search_artists"],
-            )
-            return {
-                "songs": ytmod.search_songs(query, limit=40),
-                "playlists": ytmod.search_playlists(query, limit=40),
-                "artists": ytmod.search_artists(query, limit=30),
-            }
+            try:
+                ytmod = __import__(
+                    "actions.ytmusic",
+                    fromlist=["search_songs", "search_playlists", "search_artists"],
+                )
+                results = {
+                    "songs": ytmod.search_songs(query, limit=40),
+                    "playlists": ytmod.search_playlists(query, limit=40),
+                    "artists": ytmod.search_artists(query, limit=30),
+                }
+                return {"request": request, "query": query, "results": results}
+            except Exception as exc:
+                return {"request": request, "query": query, "error": exc}
 
         self._set_header(f"Buscar: {query}", "Filtra por canciones, playlists o artistas", "Busqueda", {})
         self._run("search_all", _load)
@@ -1736,7 +1829,8 @@ class MusicModePanelV2(QWidget):
             return
         selected_row = -1
         for row in range(self.table.rowCount()):
-            if self._row_data(row).get("_playing"):
+            data = self._row_data(row)
+            if data.get("_current_track") or data.get("_playing"):
                 selected_row = row
                 break
         selection_model = self.table.selectionModel()
@@ -1810,9 +1904,12 @@ class MusicModePanelV2(QWidget):
         pid = data.get("playlistId") or data.get("browseId") or ""
         if not pid:
             return
+        self._search_request += 1
+        self._page_request += 1
         self._current_playlist = dict(data)
         self._table_kind = "playlist_tracks"
         self._playlist_request += 1
+        request = self._playlist_request
         self._set_header(self._playlist_title(data), self._playlist_meta(data), "Lista", data)
         # Offline playlists: verify against YouTube Music and pull any tracks
         # added since the last visit, in the background.
@@ -1825,11 +1922,15 @@ class MusicModePanelV2(QWidget):
             return
 
         def _load():
-            return __import__("actions.ytmusic", fromlist=["list_playlist_tracks"]).list_playlist_tracks(
-                query_or_id=pid,
-                limit=self._PLAYLIST_FIRST_PAGE,
-                shuffle=False,
-            )
+            try:
+                tracks = __import__("actions.ytmusic", fromlist=["list_playlist_tracks"]).list_playlist_tracks(
+                    query_or_id=pid,
+                    limit=self._PLAYLIST_FIRST_PAGE,
+                    shuffle=False,
+                )
+                return {"request": request, "playlist_id": pid, "tracks": tracks}
+            except Exception as exc:
+                return {"request": request, "playlist_id": pid, "error": exc}
 
         self._run("playlist_tracks", _load)
 
@@ -1873,18 +1974,17 @@ class MusicModePanelV2(QWidget):
         self._restore_playing_selection()
 
     def _play_song(self, data: dict):
-        self._mark_playing_row(
-            self._safe_text(data.get("title")),
-            self._safe_text(data.get("artists")),
-        )
         if self._table_kind in {"playlist_tracks", "album_tracks", "artist_tracks", "recommendations"}:
-            tracks = self._audio_tracks_from_items(0, None)
+            selected_index = int(data.get("_index", 0) or 0)
+            tracks, playable_index = self._playable_tracks_with_selection(
+                self._items, selected_index
+            )
             if tracks:
                 self._send_playback("play_tracks", {
                     "tracks": tracks,
-                    "start_index": int(data.get("_index", 0) or 0),
+                    "start_index": playable_index,
                     "shuffle": False,
-                })
+                }, playback_data=data)
                 return
         if self._current_playlist and self._table_kind == "playlist_tracks":
             playlist_id = self._current_playlist.get("playlistId") or self._current_playlist.get("browseId") or ""
@@ -1894,18 +1994,20 @@ class MusicModePanelV2(QWidget):
                     "limit": 1000,
                     "start_index": int(data.get("_index", 0) or 0),
                     "shuffle": False,
-                })
+                }, playback_data=data)
                 return
         if data.get("videoId"):
             self._send_playback("play_track", {
                 "videoId": data.get("videoId", ""),
                 "title": data.get("title", ""),
                 "artists": data.get("artists", ""),
-            })
+            }, playback_data=data)
             return
         query = f"{data.get('title', '')} {data.get('artists', '')}".strip()
         if query:
-            self._send_playback("play", {"query": query, "type": "song"})
+            self._send_playback(
+                "play", {"query": query, "type": "song"}, playback_data=data
+            )
 
     def _play_current_playlist_shuffled(self):
         if self._table_kind != "playlist_tracks":
@@ -1915,15 +2017,11 @@ class MusicModePanelV2(QWidget):
             return
         random.shuffle(tracks)
         first = tracks[0]
-        self._mark_playing_row(
-            self._safe_text(first.get("title")),
-            self._safe_text(first.get("artists")),
-        )
         self._send_playback("play_tracks", {
             "tracks": tracks,
             "start_index": 0,
             "shuffle": False,
-        })
+        }, playback_data=first)
 
     # ------------------------------------------------------------------
     # Offline playlists
@@ -1944,12 +2042,9 @@ class MusicModePanelV2(QWidget):
             return False
 
     def _is_current_syncing(self) -> bool:
-        pid = self._current_playlist_id()
-        if not pid:
-            return False
         try:
-            from actions.offline_library import is_syncing
-            return is_syncing(pid)
+            from actions.offline_library import any_syncing
+            return any_syncing()
         except Exception:
             return False
 
@@ -2046,16 +2141,159 @@ class MusicModePanelV2(QWidget):
     def _maybe_autosync_offline(self):
         """When opening an offline playlist, verify/download missing tracks."""
         pid = self._current_playlist_id()
-        if not pid or not self._is_current_offline():
+        if not pid or not self._is_current_offline() or self._is_current_syncing():
             return
         title = self._playlist_title(self._current_playlist or {})
         self._send_playback("sync_playlist_offline", {"playlist_id": pid, "title": title})
 
-    def _send_playback(self, action: str, params: dict | None = None):
+    def _send_playback(
+        self,
+        action: str,
+        params: dict | None = None,
+        playback_data: dict | None = None,
+    ):
         win = self.window()
         cb = getattr(win, "on_playback_command", None)
-        if cb:
-            threading.Thread(target=cb, args=(action, params or {}), daemon=True).start()
+        if not cb:
+            return None
+        token = self._begin_playback_request(playback_data) if playback_data else None
+        try:
+            future = cb(action, params or {})
+        except Exception as exc:
+            if token is not None:
+                self._result_sig.emit(
+                    "playback_command", {"token": token, "error": str(exc)}
+                )
+            return None
+        if token is not None and hasattr(future, "add_done_callback"):
+            def _done(done_future, request_token=token):
+                try:
+                    result = done_future.result()
+                    payload = {"token": request_token, "result": result}
+                except Exception as exc:
+                    payload = {"token": request_token, "error": str(exc)}
+                try:
+                    self._result_sig.emit("playback_command", payload)
+                except RuntimeError:
+                    pass
+
+            future.add_done_callback(_done)
+        return future
+
+    def _set_playback_status(self, text: str, state: str = "") -> None:
+        self.playback_status.setProperty("state", state)
+        self.playback_status.style().unpolish(self.playback_status)
+        self.playback_status.style().polish(self.playback_status)
+        self.playback_status.setText(text)
+        self.playback_status.setVisible(bool(text))
+
+    def _begin_playback_request(self, data: dict) -> int:
+        self._clear_pending_playback()
+        self._pending_playback_token += 1
+        token = self._pending_playback_token
+        clean_data = dict(data or {})
+        self._pending_playback = {"token": token, "data": clean_data}
+        title = self._safe_text(clean_data.get("title")) or "la canción"
+        self._set_playback_status(f"Iniciando «{title}»…", "pending")
+        self._mark_pending_row(clean_data)
+        return token
+
+    def _mark_pending_row(self, target: dict) -> None:
+        target_video = self._safe_text(target.get("videoId")).strip()
+        target_title = self._safe_text(target.get("title")).strip().lower()
+        target_artists = self._safe_text(target.get("artists")).strip().lower()
+        for row in range(self.table.rowCount()):
+            data = self._row_data(row)
+            video_matches = target_video and (
+                self._safe_text(data.get("videoId")).strip() == target_video
+            )
+            metadata_matches = (
+                not target_video
+                and self._safe_text(data.get("title")).strip().lower() == target_title
+                and (
+                    not target_artists
+                    or target_artists
+                    in self._safe_text(data.get("artists")).strip().lower()
+                )
+            )
+            pending = bool(video_matches or metadata_matches)
+            data["_pending_playback"] = pending
+            self._set_row_data(row, data)
+            if pending:
+                number_item = self.table.item(row, 0)
+                if number_item:
+                    number_item.setText("…")
+
+    def _clear_pending_playback(self) -> None:
+        self._pending_playback = None
+        for row in range(self.table.rowCount()):
+            data = self._row_data(row)
+            if not data.pop("_pending_playback", False):
+                continue
+            self._set_row_data(row, data)
+            number_item = self.table.item(row, 0)
+            if number_item:
+                number_item.setText(
+                    "▶" if data.get("_playing")
+                    else "Ⅱ" if data.get("_current_track")
+                    else str(int(data.get("_index", row) or row) + 1)
+                )
+
+    def _handle_playback_command_result(self, payload: dict) -> None:
+        pending = self._pending_playback or {}
+        token = payload.get("token")
+        if token != pending.get("token"):
+            return
+        result = payload.get("result")
+        error = str(payload.get("error") or "").strip()
+        failed = result is not None and not getattr(result, "ok", False)
+        if failed:
+            error = str(getattr(result, "message", "") or "").strip()
+            if not error:
+                error = "El backend rechazó la operación."
+        if error:
+            self._clear_pending_playback()
+            self._restore_playing_selection()
+            self._set_playback_status(
+                f"No se pudo iniciar la reproducción: {error}", "error"
+            )
+            return
+        self._set_playback_status("Orden aceptada. Esperando confirmación…", "pending")
+        QTimer.singleShot(6000, lambda t=token: self._expire_playback_request(t))
+
+    def _expire_playback_request(self, token: int) -> None:
+        pending = self._pending_playback or {}
+        if pending.get("token") != token:
+            return
+        self._clear_pending_playback()
+        self._restore_playing_selection()
+        self._set_playback_status(
+            "El reproductor no confirmó el inicio. Puedes volver a intentarlo.",
+            "error",
+        )
+
+    def _confirm_pending_playback(
+        self, title: str, artists: str, video_id: str = ""
+    ) -> None:
+        pending = self._pending_playback or {}
+        data = pending.get("data") or {}
+        expected_video = self._safe_text(data.get("videoId")).strip()
+        actual_video = self._safe_text(video_id).strip()
+        if expected_video and actual_video:
+            matches = expected_video == actual_video
+        else:
+            matches = (
+                self._safe_text(data.get("title")).strip().lower()
+                == self._safe_text(title).strip().lower()
+                and (
+                    not self._safe_text(data.get("artists")).strip()
+                    or self._safe_text(data.get("artists")).strip().lower()
+                    in self._safe_text(artists).strip().lower()
+                )
+            )
+        if matches:
+            self._clear_pending_playback()
+            self._set_playback_status("", "")
 
     # Below this width the details rail is hidden completely.  It must never
     # reflow underneath the library: doing so makes the panel jump vertically
@@ -2133,10 +2371,17 @@ class MusicModePanelV2(QWidget):
             f" font-size: {26 if narrow else 34}px;"
         )
 
-    def update_now_playing(self, title: str, artists: str, playing: bool = True):
+    def update_now_playing(
+        self,
+        title: str,
+        artists: str,
+        playing: bool = True,
+        video_id: str = "",
+    ):
         title = self._safe_text(title).strip()
         artists = self._safe_text(artists).strip()
         if not title:
+            self._clear_confirmed_playback()
             self._now_playing_data = {}
             self._now_playing_key = ("", "")
             self._detail_render_fingerprint = ()
@@ -2146,28 +2391,55 @@ class MusicModePanelV2(QWidget):
             self._details_visible_once = False
             return
 
+        self._set_playback_heading(playing)
+
         key = (title.lower(), artists.lower())
         track_changed = key != self._now_playing_key
-        matched = self._find_matching_track(title, artists)
+        playback_state_changed = (
+            bool(self._now_playing_data.get("_playing")) != bool(playing)
+        )
+        self._confirm_pending_playback(title, artists, video_id)
+        matched = self._find_matching_track(title, artists, video_id=video_id)
         data = dict(matched or {"title": title, "artists": artists, "_kind": "song"})
         data["_playing"] = bool(playing)
         if key == self._now_playing_key:
             kept = {k: v for k, v in self._now_playing_data.items() if v not in ("", None, [])}
-            self._now_playing_data = {**data, **kept}
+            self._now_playing_data = {**kept, **data}
         else:
             self._now_playing_data = data
         self._now_playing_key = key
         self._update_details_visibility()
         self._details_visible_once = True
-        if track_changed or self._playing_mark_revision != self._table_revision:
-            self._mark_playing_row(title, artists)
+        if (
+            track_changed
+            or playback_state_changed
+            or self._playing_mark_revision != self._table_revision
+        ):
+            self._mark_playing_row(
+                title, artists, video_id=video_id, playing=playing
+            )
         self._ensure_thumb_async(self._now_playing_data)
         self._render_now_playing()
         detail_key = self._details_key(self._now_playing_data)
         if not self._now_playing_data.get("_details_loaded") and self._details_loading_key != detail_key:
             self._load_now_playing_details(self._now_playing_data)
 
-    def _find_matching_track(self, title: str, artists: str) -> dict:
+    def _set_playback_heading(self, playing: bool) -> None:
+        if playing:
+            self.details_heading.setText("REPRODUCIENDO")
+            self.details_heading.setAccessibleName("Estado: reproduciendo")
+        else:
+            self.details_heading.setText("EN PAUSA")
+            self.details_heading.setAccessibleName("Estado: en pausa")
+
+    def _find_matching_track(
+        self, title: str, artists: str, video_id: str = ""
+    ) -> dict:
+        video_id = self._safe_text(video_id).strip()
+        if video_id:
+            for item in self._items:
+                if self._safe_text(item.get("videoId")).strip() == video_id:
+                    return item
         title_n = title.strip().lower()
         artists_n = artists.strip().lower()
         for item in self._items:
@@ -2185,31 +2457,65 @@ class MusicModePanelV2(QWidget):
             self._safe_text(data.get("artists")).strip().lower(),
         )
 
-    def _mark_playing_row(self, title: str, artists: str):
+    def _mark_playing_row(
+        self,
+        title: str,
+        artists: str,
+        video_id: str = "",
+        playing: bool = True,
+    ):
         title_n = title.strip().lower()
         artists_n = artists.strip().lower()
+        video_id = self._safe_text(video_id).strip()
         if self._table_kind not in {
-            "songs", "playlist_tracks", "search_songs", "album_tracks", "artist_tracks"
+            "songs", "playlist_tracks", "search_songs", "album_tracks",
+            "artist_tracks", "recommendations",
         }:
             return
         self._playing_mark_revision = self._table_revision
         selected_row = -1
         for row in range(self.table.rowCount()):
             data = self._row_data(row)
-            is_playing = self._safe_text(data.get("title")).strip().lower() == title_n
-            if is_playing and artists_n:
-                is_playing = artists_n in self._safe_text(data.get("artists")).strip().lower()
-            data["_playing"] = is_playing
+            if video_id:
+                is_playing = self._safe_text(data.get("videoId")).strip() == video_id
+            else:
+                is_playing = self._safe_text(data.get("title")).strip().lower() == title_n
+                if is_playing and artists_n:
+                    is_playing = artists_n in self._safe_text(data.get("artists")).strip().lower()
+            data["_current_track"] = is_playing
+            data["_playing"] = is_playing and bool(playing)
             self._set_row_data(row, data)
             number_item = self.table.item(row, 0)
             if number_item:
-                number_item.setText("▶" if is_playing else str(int(data.get("_index", row) or row) + 1))
+                number_item.setText(
+                    "▶" if is_playing and playing
+                    else "Ⅱ" if is_playing
+                    else str(int(data.get("_index", row) or row) + 1)
+                )
             if is_playing and selected_row < 0:
                 selected_row = row
         self.table.clearSelection()
         if selected_row >= 0:
             self.table.selectRow(selected_row)
             self.table.setCurrentCell(selected_row, 1)
+
+    def _clear_confirmed_playback(self) -> None:
+        if self._table_kind not in {
+            "songs", "playlist_tracks", "search_songs", "album_tracks",
+            "artist_tracks", "recommendations",
+        }:
+            return
+        for row in range(self.table.rowCount()):
+            data = self._row_data(row)
+            data["_current_track"] = False
+            data["_playing"] = False
+            self._set_row_data(row, data)
+            if data.get("_pending_playback"):
+                continue
+            number_item = self.table.item(row, 0)
+            if number_item:
+                number_item.setText(str(int(data.get("_index", row) or row) + 1))
+        self.table.clearSelection()
 
     def _load_now_playing_details(self, data: dict):
         self._detail_request += 1
@@ -2227,10 +2533,16 @@ class MusicModePanelV2(QWidget):
                     album_id=data.get("albumId", ""),
                     artist_id=data.get("artistId", ""),
                 )
-                self._result_sig.emit("now_playing_details", {"token": token, "key": request_key, "details": result})
+                # Keep the fast preview on screen while the full-size cover is
+                # downloaded.  Publishing its URL with the metadata first
+                # invalidates the preview's source URL and produces a blank
+                # cover until the network request finishes.
+                metadata = dict(result or {})
+                full_cover_url = metadata.pop("thumbnail", "")
+                self._result_sig.emit("now_playing_details", {"token": token, "key": request_key, "details": metadata})
                 images = {}
-                if result.get("thumbnail"):
-                    raw_url = result.get("thumbnail", "")
+                if full_cover_url:
+                    raw_url = full_cover_url
                     images["thumbnail"] = raw_url
                     images["thumb_b64"] = self._fetch_thumb_b64(raw_url)
                     cached = self._thumb_cache.get(str(raw_url or "").strip())
@@ -2256,16 +2568,35 @@ class MusicModePanelV2(QWidget):
         data = self._now_playing_data or {}
         if not data:
             return
+        if self._rendering_now_playing:
+            # _set_detail_cover asks for a missing cover, _ensure_thumb_async can
+            # answer straight from the memory cache, and _apply_thumb re-renders —
+            # all inside this call. When the keys it fills in are not the ones
+            # the cover reads (a track with only an artist image), the two bounce
+            # off each other until RecursionError, with the GUI thread spinning
+            # flat out the whole time: the app crawls and playback commands queue
+            # up behind it. Coalesce into one re-render after this one returns.
+            self._pending_now_playing_render = True
+            return
         fp = self._detail_fingerprint(data)
         if fp == self._detail_render_fingerprint:
             return
         scroll = self.details_scroll.verticalScrollBar()
         same_track = self._detail_render_track_key == self._now_playing_key
         previous_scroll = scroll.value() if same_track else 0
-        self._set_detail_cover(data)
-        self.details.setText(self._render_details_html(data))
+        self._rendering_now_playing = True
+        try:
+            self._set_detail_cover(data)
+            self.details.setText(self._render_details_html(data))
+        finally:
+            self._rendering_now_playing = False
         self._detail_render_fingerprint = fp
         self._detail_render_track_key = self._now_playing_key
+        if self._pending_now_playing_render:
+            self._pending_now_playing_render = False
+            # Off this call stack, and only if something actually changed —
+            # the fingerprint check above stops it from looping.
+            QTimer.singleShot(0, self._render_now_playing)
         if same_track:
             QTimer.singleShot(0, lambda: scroll.setValue(min(previous_scroll, scroll.maximum())))
         else:
@@ -2352,13 +2683,20 @@ class MusicModePanelV2(QWidget):
         album_name = self._safe_text(data.get("album") or data.get("title")).strip()
         if not album_id and not album_name:
             return
+        self._search_request += 1
+        self._page_request += 1
+        request = self._page_request
         self._show_browse_content()
         self.filter_row.setVisible(False)
         self._set_header(album_name or "Album", "Cargando album...", "Album", data)
 
         def _load():
-            ytmod = __import__("actions.ytmusic", fromlist=["get_album_details"])
-            return ytmod.get_album_details(query=album_name, browse_id=album_id)
+            try:
+                ytmod = __import__("actions.ytmusic", fromlist=["get_album_details"])
+                result = ytmod.get_album_details(query=album_name, browse_id=album_id)
+                return {"request": request, "data": result}
+            except Exception as exc:
+                return {"request": request, "error": exc}
 
         self._run("album_page", _load)
 
@@ -2367,12 +2705,19 @@ class MusicModePanelV2(QWidget):
         artist_name = self._safe_text(data.get("artistName") or data.get("artists")).strip()
         if not artist_id and not artist_name:
             return
+        self._search_request += 1
+        self._page_request += 1
+        request = self._page_request
         self.filter_row.setVisible(False)
         self._show_artist_loading(artist_name or "Artista", data)
 
         def _load():
-            ytmod = __import__("actions.ytmusic", fromlist=["get_artist_details"])
-            return ytmod.get_artist_details(query=artist_name, browse_id=artist_id)
+            try:
+                ytmod = __import__("actions.ytmusic", fromlist=["get_artist_details"])
+                result = ytmod.get_artist_details(query=artist_name, browse_id=artist_id)
+                return {"request": request, "data": result}
+            except Exception as exc:
+                return {"request": request, "error": exc}
 
         self._run("artist_page", _load)
 
@@ -2397,6 +2742,9 @@ class MusicModePanelV2(QWidget):
         self._render_now_playing()
 
     def _handle_result(self, op: str, result):
+        if op == "playback_command":
+            self._handle_playback_command_result(result or {})
+            return
         if op == "now_playing_details":
             self._merge_now_playing_details(result)
             return
@@ -2407,14 +2755,47 @@ class MusicModePanelV2(QWidget):
             "library_playlists", "playlist_tracks", "search_all", "recommendations"
         }:
             return
+        if op == "search_all" and isinstance(result, dict) and "request" in result:
+            if result.get("request") != self._search_request:
+                return
+            if result.get("error"):
+                error = result["error"]
+                result = error if isinstance(error, Exception) else RuntimeError(str(error))
+            else:
+                result = dict(result.get("results") or {})
+        if op in {"album_page", "artist_page"} and isinstance(result, dict) and "request" in result:
+            if result.get("request") != self._page_request:
+                return
+            if result.get("error"):
+                error = result["error"]
+                result = error if isinstance(error, Exception) else RuntimeError(str(error))
+            else:
+                result = result.get("data") or {}
+        if op == "playlist_tracks" and isinstance(result, dict) and "request" in result:
+            current_pid = self._current_playlist_id()
+            if (
+                result.get("request") != self._playlist_request
+                or str(result.get("playlist_id") or "") != current_pid
+                or self._table_kind != "playlist_tracks"
+            ):
+                return
+            if result.get("error"):
+                error = result["error"]
+                result = error if isinstance(error, Exception) else RuntimeError(str(error))
+            else:
+                result = list(result.get("tracks") or [])
         if isinstance(result, Exception):
             self.status.setVisible(True)
-            self.status.setText("Error")
+            detail = self._esc(str(result) or type(result).__name__)
+            self.status.setText(
+                "No se pudo cargar el contenido. "
+                f"<span style='color:#FCA5A5'>{detail}</span> · "
+                "<a href='retry'>Reintentar</a>"
+            )
+            self.status.setAccessibleDescription(
+                f"No se pudo cargar el contenido: {str(result)}. Activa Reintentar para probar de nuevo."
+            )
             self.table.setRowCount(0)
-            self.table.setColumnCount(1)
-            self.table.setHorizontalHeaderLabels(["Error"])
-            self.table.insertRow(0)
-            self.table.setItem(0, 0, QTableWidgetItem(str(result)))
             return
         if op == "album_page":
             data = dict(result or {}) if isinstance(result, dict) else {}
@@ -3471,7 +3852,8 @@ class _MusicFloatWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(360, 104)
+        self.setAccessibleName("Reproductor de música flotante")
+        self.setFixedSize(388, 124)
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 10)
@@ -3479,7 +3861,8 @@ class _MusicFloatWindow(QWidget):
 
         # Album art
         self._art_lbl = QLabel()
-        self._art_lbl.setFixedSize(76, 76)
+        self._art_lbl.setAccessibleName("Portada de la canción actual")
+        self._art_lbl.setFixedSize(96, 96)
         self._art_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._art_lbl.setStyleSheet(
             "background: rgba(94,130,255,0.07); border-radius: 10px;"
@@ -3497,26 +3880,30 @@ class _MusicFloatWindow(QWidget):
         top.setSpacing(4)
         top.setContentsMargins(0, 0, 0, 0)
         self._title = QLabel("— Ninguna canción —")
+        self._title.setAccessibleName("Canción actual")
         self._title.setStyleSheet(
             "color: #DCE1FF; font-size: 11px; font-weight: bold; background: transparent;"
         )
         self._title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         top.addWidget(self._title, stretch=1)
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(18, 18)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.clicked.connect(lambda: self._cb.get("close", lambda: None)())
-        close_btn.setStyleSheet(
+        self._close_btn = QPushButton("✕")
+        self._close_btn.setAccessibleName("Cerrar reproductor flotante")
+        self._close_btn.setToolTip("Cerrar reproductor flotante")
+        self._close_btn.setFixedSize(30, 30)
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.clicked.connect(lambda: self._cb.get("close", lambda: None)())
+        self._close_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none;"
             " color: rgba(175,200,230,0.40); font-size: 13px; padding: 0; }"
             "QPushButton:hover { color: #B6C4FF; }"
             "QPushButton:pressed { color: #5E82FF; }"
         )
-        top.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        top.addWidget(self._close_btn, alignment=Qt.AlignmentFlag.AlignTop)
         right.addLayout(top)
 
         # Artist
         self._artist = QLabel("")
+        self._artist.setAccessibleName("Artista de la canción actual")
         self._artist.setStyleSheet(
             "color: rgba(182,196,255,0.75); font-size: 10px; background: transparent;"
         )
@@ -3526,6 +3913,7 @@ class _MusicFloatWindow(QWidget):
         self._seek = QSlider(Qt.Orientation.Horizontal)
         self._seek.setRange(0, 100000)
         self._seek.setValue(0)
+        self._seek.setAccessibleName("Posición de reproducción")
         self._seek.setCursor(Qt.CursorShape.PointingHandCursor)
         self._seek.setFixedHeight(14)
         self._seek.setStyleSheet(
@@ -3545,21 +3933,22 @@ class _MusicFloatWindow(QWidget):
         ctrl.setSpacing(4)
         ctrl.setContentsMargins(0, 0, 0, 0)
         self._time_lbl = QLabel("--:-- / --:--")
+        self._time_lbl.setAccessibleName("Tiempo de reproducción")
         self._time_lbl.setStyleSheet(
             "color: rgba(180,210,240,0.45); font-size: 9px; background: transparent;"
         )
         ctrl.addWidget(self._time_lbl)
         ctrl.addStretch()
         self._prev_btn = _MediaBtn(_MediaBtn.PREV)
-        self._prev_btn.setFixedSize(26, 26)
+        self._prev_btn.setFixedSize(32, 32)
         self._prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._prev_btn.clicked.connect(lambda: self._cb.get("prev", lambda: None)())
         self._play_btn = _MediaBtn(_MediaBtn.PLAY)
-        self._play_btn.setFixedSize(30, 30)
+        self._play_btn.setFixedSize(36, 36)
         self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._play_btn.clicked.connect(lambda: self._cb.get("toggle", lambda: None)())
         self._next_btn = _MediaBtn(_MediaBtn.NEXT)
-        self._next_btn.setFixedSize(26, 26)
+        self._next_btn.setFixedSize(32, 32)
         self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._next_btn.clicked.connect(lambda: self._cb.get("next", lambda: None)())
         ctrl.addWidget(self._prev_btn)

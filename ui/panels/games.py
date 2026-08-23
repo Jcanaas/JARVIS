@@ -6,8 +6,14 @@ is rewired to the same download flow. The detail view itself is a bespoke
 Steam-store-style layout (media viewer + thumbnail strip + trailers on the
 left, reviews/tags/developer sidebar on the right) rather than the
 Movies/Anime poster-and-synopsis layout.
+
+``GamesHubPanel`` at the bottom of this file is what the app actually shows:
+Juegos (this panel), Emuladores and Mi biblioteca (both in
+ui/panels/emulators.py) behind one tab strip.
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
@@ -562,3 +568,132 @@ class GamesModePanel(MoviesModePanel):
             self._set_status(f"⬇ Descarga añadida: «{game.title}» — ver panel de descargas")
         except Exception as exc:
             self._set_status(f"Error iniciando descarga: {exc}")
+        else:
+            # Record it now rather than when the torrent completes: the download
+            # manager owns that lifecycle and has no library hook, and a card
+            # pointing at a folder that is still filling up is more useful than
+            # no card at all.
+            try:
+                from actions import game_library as gl
+                gl.add_game(
+                    game.title, Path(dest) / game.title,
+                    poster_url=game.poster_url,
+                    header_url=getattr(game, "header_url", ""),
+                )
+            except Exception:
+                pass
+
+
+class GamesHubPanel(QWidget):
+    """Tab strip over Juegos / Emuladores / Mi biblioteca.
+
+    The three panels are independent widgets rather than views inside one
+    class: Juegos is a MoviesModePanel subclass (with its whole VLC stack for
+    trailers), while the other two are plain grids. Only the tab strip is
+    shared, and the two heavier tabs are built the first time they are opened
+    so entering Juegos costs nothing extra.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("GamesHub")
+        self.setStyleSheet("QWidget#GamesHub { background:#071115; }")
+        self.setAutoFillBackground(True)
+
+        root = QVBoxLayout(self)
+        # No horizontal padding here: each tab's panel already applies its own
+        # 16px gutter, and stacking the two indented the content past the tabs.
+        root.setContentsMargins(0, 12, 0, 0)
+        root.setSpacing(0)
+
+        tabs_row = QHBoxLayout()
+        tabs_row.setSpacing(8)
+        tabs_row.setContentsMargins(16, 0, 16, 4)
+        self._tab_buttons: list[QPushButton] = []
+        for index, label in enumerate(("Juegos", "Emuladores", "Mi biblioteca")):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setChecked(index == 0)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFixedHeight(38)
+            button.setStyleSheet("""
+                QPushButton {
+                    background:#141d22; color:#9aa6ab; border:1px solid #22303a;
+                    border-radius:12px; padding:0 22px;
+                    font-size:10pt; font-weight:700; font-family:Inter;
+                }
+                QPushButton:checked {
+                    background:#1d3a4d; color:#eaf7ff; border-color:#3f7fa8;
+                }
+                QPushButton:hover:!checked { background:#1a262d; color:#d5e4ec; }
+            """)
+            button.clicked.connect(lambda _=False, i=index: self.show_tab(i))
+            self._tab_buttons.append(button)
+            tabs_row.addWidget(button)
+        tabs_row.addStretch(1)
+        root.addLayout(tabs_row)
+
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet("background:transparent;")
+        self.games_panel = GamesModePanel(parent=self)
+        self._stack.addWidget(self.games_panel)
+        # Placeholders keep the stack indices aligned with the tab indices
+        # before the real panels are constructed on first use.
+        self.emulators_panel = None
+        self.library_panel = None
+        for _ in range(2):
+            filler = QWidget()
+            filler.setStyleSheet("background:transparent;")
+            self._stack.addWidget(filler)
+        root.addWidget(self._stack, 1)
+
+    def show_tab(self, index: int):
+        for i, button in enumerate(self._tab_buttons):
+            button.setChecked(i == index)
+
+        if index == 1:
+            self._ensure_emulators()
+        elif index == 2:
+            if self.library_panel is None:
+                from .emulators import LibraryModePanel
+                self.library_panel = LibraryModePanel(parent=self)
+                self.library_panel.play_rom_requested.connect(self._play_rom)
+                self._swap(2, self.library_panel)
+            else:
+                # New downloads may have landed while the user was elsewhere.
+                self.library_panel.refresh()
+
+        self._stack.setCurrentIndex(index)
+
+    def _ensure_emulators(self):
+        if self.emulators_panel is None:
+            from .emulators import EmulatorsModePanel
+            self.emulators_panel = EmulatorsModePanel(parent=self)
+            self._swap(1, self.emulators_panel)
+        return self.emulators_panel
+
+    def _play_rom(self, path: str, title: str, console_id: str):
+        """A ROM picked in Mi biblioteca plays on the Emuladores tab's core."""
+        panel = self._ensure_emulators()
+        self.show_tab(1)
+        panel.play_file(path, title, console_id)
+
+    def _swap(self, index: int, widget: QWidget):
+        placeholder = self._stack.widget(index)
+        self._stack.insertWidget(index, widget)
+        if placeholder is not None:
+            self._stack.removeWidget(placeholder)
+            placeholder.deleteLater()
+
+    def hideEvent(self, event):
+        # Leaving Games mode must not leave a core burning a CPU core and
+        # playing audio over whatever the user switched to. The session is
+        # paused, not torn down, so coming back resumes the same game.
+        if self.emulators_panel is not None:
+            self.emulators_panel.pause_playback()
+        super().hideEvent(event)
+
+    def assistant_play(self, *args, **kwargs):
+        """Forwarded so the AI assistant can still drive the Juegos tab."""
+        self.show_tab(0)
+        return self.games_panel.assistant_play(*args, **kwargs)

@@ -11,3 +11,11 @@ Priority order:
 Only fall back to grep/read if the graph doesn't surface enough context.
 
 Disabled graphify in favor of codebase-memory.
+
+## Ajustes que "no se guardan"
+
+Antes de tocar `actions/app_settings.py` por un reporte de "los ajustes se
+resetean/no se guardan": lee [`NOTE_settings_persistence.md`](NOTE_settings_persistence.md)
+entero primero. Ya nos pasó tres veces por causas distintas (caché de
+escritura obsoleto, build de PyInstaller vieja, ACL sin permiso de
+escritura) y las tres están documentadas ahí con el fix aplicado.

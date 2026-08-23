@@ -371,7 +371,14 @@ def take_screenshot():
 
 def lock_screen():
     if _OS == "Windows":
-        pyautogui.hotkey("win", "l")
+        # Win+L cannot be triggered by synthetic input: Windows reserves that
+        # combination for real hardware so malware can't fake (or intercept)
+        # the secure attention sequence. pyautogui.hotkey("win", "l") is
+        # therefore silently ignored — call the API directly instead.
+        import ctypes
+        if ctypes.windll.user32.LockWorkStation():
+            return
+        pyautogui.hotkey("win", "l")  # last resort; usually a no-op
     elif _OS == "Darwin":
         subprocess.run(["pmset", "displaysleepnow"], capture_output=True)
     else:

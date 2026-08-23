@@ -296,6 +296,29 @@ class SettingsModePanel(QWidget):
         )
         l.addWidget(notif_card)
 
+        ai_card, ai_body = self._make_card("PROCESAMIENTO CON IA")
+        self._wa_translate_switch = ToggleSwitch(
+            bool(app_settings.get("whatsapp_auto_translate", False))
+        )
+        self._wa_translate_switch.toggled.connect(self._on_wa_auto_translate)
+        self._add_row(
+            ai_body, "Traducir mensajes automáticamente",
+            "Envía el texto recibido a Google Gemini para detectar el idioma y, "
+            "si hace falta, traducirlo. Desactivado por defecto.",
+            self._wa_translate_switch, first=True,
+        )
+        self._wa_transcribe_switch = ToggleSwitch(
+            bool(app_settings.get("whatsapp_auto_transcribe", False))
+        )
+        self._wa_transcribe_switch.toggled.connect(self._on_wa_auto_transcribe)
+        self._add_row(
+            ai_body, "Transcribir audios automáticamente",
+            "Envía las notas de voz recibidas a Google Gemini para transcribirlas. "
+            "Desactivado por defecto; la transcripción manual sigue disponible.",
+            self._wa_transcribe_switch,
+        )
+        l.addWidget(ai_card)
+
         rules_title = QLabel("Reglas de respuesta automática")
         rules_title.setStyleSheet(
             f"color: {C.TEXT}; background: transparent; font-size: 13px; font-weight: 700; border: none;"
@@ -1564,8 +1587,70 @@ class SettingsModePanel(QWidget):
         )
 
         l.addWidget(card)
+
+        dash_card, dash_body = self._make_card("DASHBOARD REMOTO")
+        self._lan_dashboard_switch = ToggleSwitch(bool(app_settings.get("lan_dashboard_enabled", False)))
+        self._lan_dashboard_switch.toggled.connect(self._on_lan_dashboard_toggled)
+        self._add_row(
+            dash_body, "Panel accesible desde el móvil",
+            "Abre un panel web solo-LAN (protegido con token) para ver el log de "
+            "JARVIS desde tu teléfono, en la misma red WiFi.",
+            self._lan_dashboard_switch, first=True,
+        )
+
+        self._lan_dashboard_public_switch = ToggleSwitch(bool(app_settings.get("lan_dashboard_public_mode", False)))
+        self._lan_dashboard_public_switch.toggled.connect(self._on_lan_dashboard_public_toggled)
+        self._add_row(
+            dash_body, "Acceso remoto (IP pública)",
+            "El QR usará la IP pública del router en vez de la IP local. "
+            "Tienes que abrir/redirigir tú el puerto en el router hacia este "
+            "PC — esta app no lo hace por ti.",
+            self._lan_dashboard_public_switch,
+        )
+
+        qr_btn = QPushButton("  Mostrar código QR")
+        qr_btn.setIcon(_line_icon("plus", C.PRI, 16))
+        qr_btn.setIconSize(QSize(15, 15))
+        qr_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        qr_btn.setFixedHeight(36)
+        qr_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PRI_GHO}; color: {C.PRI};
+                border: 1px solid rgba(182,196,255,0.45); border-radius: 18px;
+                padding: 0 18px; font-size: 13px; font-weight: 700;
+            }}
+            QPushButton:hover {{ background: rgba(94,130,255,0.18); }}
+        """)
+        qr_btn.clicked.connect(self._on_show_lan_dashboard_qr)
+        self._add_row(
+            dash_body, "Emparejar teléfono",
+            "Muestra la URL y el QR para escanear desde el móvil.",
+            qr_btn,
+        )
+        l.addWidget(dash_card)
+
         l.addStretch(1)
         return w
+
+    def _on_lan_dashboard_toggled(self, checked: bool) -> None:
+        app_settings.set("lan_dashboard_enabled", bool(checked))
+        if checked:
+            from actions import lan_dashboard
+            lan_dashboard.start_dashboard()
+
+    def _on_lan_dashboard_public_toggled(self, checked: bool) -> None:
+        app_settings.set("lan_dashboard_public_mode", bool(checked))
+
+    def _on_show_lan_dashboard_qr(self) -> None:
+        from actions import lan_dashboard
+        from ..widgets.dashboard_qr_dialog import DashboardQrDialog
+        if not app_settings.get("lan_dashboard_enabled", False):
+            self._lan_dashboard_switch.setChecked(True)
+            app_settings.set("lan_dashboard_enabled", True)
+        url = lan_dashboard.start_dashboard()
+        public = bool(app_settings.get("lan_dashboard_public_mode", False))
+        dlg = DashboardQrDialog(url, parent=self, public=public)
+        dlg.exec()
 
     # -- handlers ---------------------------------------------------------
     @staticmethod
@@ -1618,6 +1703,12 @@ class SettingsModePanel(QWidget):
 
     def _on_wa_notifications(self, checked: bool) -> None:
         app_settings.set("whatsapp_notifications", bool(checked))
+
+    def _on_wa_auto_translate(self, checked: bool) -> None:
+        app_settings.set("whatsapp_auto_translate", bool(checked))
+
+    def _on_wa_auto_transcribe(self, checked: bool) -> None:
+        app_settings.set("whatsapp_auto_transcribe", bool(checked))
 
     def _on_wa_notif_duration(self, _index: int) -> None:
         try:
@@ -1698,7 +1789,7 @@ class SettingsModePanel(QWidget):
         win = self.window()
         cb = getattr(win, "on_playback_command", None)
         if cb:
-            threading.Thread(target=cb, args=(action, params or {}), daemon=True).start()
+            cb(action, params or {})
 
 
 class WhatsAppToast(QWidget):

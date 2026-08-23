@@ -12,6 +12,8 @@ from typing import List, Dict, Any, Optional
 import unicodedata
 import re
 
+from .whatsapp_contract import WhatsAppMessage, normalize_messages
+
 BRIDGE_URL = "http://127.0.0.1:3000"
 _BRIDGE_TOKEN = None
 
@@ -212,6 +214,7 @@ def send_whatsapp(
     body: str,
     timeout: int = 45,
     quoted_message_id: Optional[str] = None,
+    client_request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Enviar mensaje. `to` debe ser en formato WhatsApp (e.g. 5511999999999@c.us).
 
@@ -227,11 +230,20 @@ def send_whatsapp(
     payload = {"to": to, "body": body}
     if quoted_message_id:
         payload["quotedMessageId"] = quoted_message_id
+    if client_request_id:
+        payload["clientRequestId"] = str(client_request_id)
     resp = requests.post(url, json=payload, headers=_request_headers(), timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("ok"):
-        raise WhatsAppError(str(data.get("error") or "WhatsApp no confirmó el envío."))
+    return _write_response_data(resp, "WhatsApp no confirmó el envío.")
+
+
+def _write_response_data(resp, fallback: str) -> Dict[str, Any]:
+    """Preserve the bridge's useful error instead of exposing a generic HTTP error."""
+    try:
+        data = resp.json() if resp.content else {}
+    except Exception:
+        data = {}
+    if not resp.ok or not data.get("ok"):
+        raise WhatsAppError(str(data.get("error") or fallback))
     return data
 
 def edit_whatsapp_message(message_id: str, new_body: str, timeout: int = 10) -> Dict[str, Any]:
@@ -259,6 +271,7 @@ def send_whatsapp_media(
     file_path: str,
     caption: str = "",
     timeout: int = 60,
+    client_request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Enviar un archivo (imagen, documento, audio, etc.) por WhatsApp.
 
@@ -277,23 +290,50 @@ def send_whatsapp_media(
         raise WhatsAppError(f"El archivo no existe: {file_path}")
     resp = requests.post(
         f"{BRIDGE_URL}/send_media",
-        json={"to": to, "path": file_path, "caption": caption},
+        json={
+            "to": to,
+            "path": file_path,
+            "caption": caption,
+            **({"clientRequestId": str(client_request_id)} if client_request_id else {}),
+        },
         headers=_request_headers(),
         timeout=timeout,
     )
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("ok"):
-        raise WhatsAppError(str(data.get("error") or "WhatsApp no confirmó el envío del archivo."))
-    return data
+    return _write_response_data(resp, "WhatsApp no confirmó el envío del archivo.")
 
 
-def fetch_messages(since_ms: int = 0, timeout: int = 10) -> List[Dict[str, Any]]:
+def fetch_messages(since_ms: int = 0, timeout: int = 10) -> List[WhatsAppMessage]:
     url = f"{BRIDGE_URL}/messages"
     resp = requests.get(url, params={"since": since_ms}, headers=_request_headers(), timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
-    return [m for m in data.get('messages', []) if not is_ignored_message(m)]
+    return [m for m in normalize_messages(data.get("messages")) if not is_ignored_message(m)]
+
+
+def get_unread_counts(timeout: int = 10) -> Optional[Dict[str, int]]:
+    """Return the bridge's current unread count per chat, or None if unavailable."""
+    try:
+        resp = requests.get(
+            f"{BRIDGE_URL}/unread_counts",
+            headers=_request_headers(),
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ready", True) or not data.get("ok", True):
+            return None
+        raw_counts = data.get("unread")
+        if not isinstance(raw_counts, dict):
+            return None
+        counts: Dict[str, int] = {}
+        for chat_id, value in raw_counts.items():
+            try:
+                counts[str(chat_id)] = max(0, int(value or 0))
+            except (TypeError, ValueError):
+                counts[str(chat_id)] = 0
+        return counts
+    except Exception:
+        return None
 
 
 def get_contact_name(chat_id: str, timeout: int = 2) -> Optional[str]:
@@ -366,7 +406,7 @@ def get_conversation(
     limit: int = 50,
     timeout: int = 25,
     strict: bool = False,
-) -> List[Dict[str, Any]]:
+) -> List[WhatsAppMessage]:
     """Devuelve el historial de mensajes con `contact` (nombre o chatId) via /chat_messages del bridge."""
     if not contact:
         return []
@@ -395,21 +435,16 @@ def get_conversation(
             return []
         if not data.get("ok", True):
             raise WhatsAppError(str(data.get("error") or "No se pudo cargar la conversación."))
-        msgs = data.get('messages', [])
-        msgs = [m for m in msgs if not is_ignored_message(m)]
-        # Normalize timestamps to ms before sorting: bridges predating the
-        # toMs() fix serve live-fetched history in epoch seconds while
-        # buffered/optimistic entries are ms, which scrambled message order.
-        for m in msgs:
-            try:
-                ts = int(m.get('timestamp') or 0)
-                if 0 < ts < 10**12:
-                    m['timestamp'] = ts * 1000
-            except Exception:
-                pass
-        # sort by timestamp ascending
+        msgs = [
+            message
+            for message in normalize_messages(data.get("messages"))
+            if not is_ignored_message(message)
+        ]
+        # Conversation order follows WhatsApp's real send time. ``timestamp``
+        # is the bridge observation cursor for live events and may be much
+        # newer after a reconnect/catch-up sync.
         try:
-            msgs.sort(key=lambda x: int(x.get('timestamp', 0)))
+            msgs.sort(key=lambda x: int(x.get("sentAtMs") or x.get("waTs") or x.get("timestamp") or 0))
         except Exception:
             pass
         if limit and len(msgs) > limit:

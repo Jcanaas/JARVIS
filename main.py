@@ -466,6 +466,41 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "monitor_subscribe",
+        "description": (
+            "Subscribe to a topic for daily news monitoring — checks once a day "
+            "and proactively alerts the user if something new comes up. Use for "
+            "phrases like 'monitor X for me', 'let me know if anything new happens with X'."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "topic": {"type": "STRING", "description": "Topic to monitor, e.g. 'F1', 'Python releases'"}
+            },
+            "required": ["topic"]
+        }
+    },
+    {
+        "name": "monitor_unsubscribe",
+        "description": "Stop daily news monitoring for a topic the user is currently subscribed to.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "topic": {"type": "STRING", "description": "Topic to stop monitoring"}
+            },
+            "required": ["topic"]
+        }
+    },
+    {
+        "name": "monitor_list_topics",
+        "description": "List the topics currently subscribed to for daily news monitoring.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
         "name": "movies",
         "description": (
             "Search and stream movies or TV shows via torrents. "
@@ -687,7 +722,8 @@ TOOL_DECLARATIONS = [
             "list_playlist_tracks | playlist_tracks | playlist_names | track_names | download_playlist_audio | download_audio_tracks | "
             "download_liked_audio | download_liked_songs_audio | download_status | download_status_verbose | playlist_preview | "
             "download_pause | download_resume | download_cancel_all | open_download_folder | retry_failed_downloads | download_resume_failed | "
-            "cleanup_partial_downloads | set_default_quality | download_selected_range | download_playlist_range | queue_playlist_download."
+            "cleanup_partial_downloads | retag_downloads | fix_music_metadata | set_default_quality | download_selected_range | "
+            "download_playlist_range | queue_playlist_download."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -1445,6 +1481,7 @@ class JarvisLive:
             # restart the same evening doesn't re-ask).
             if not speaking:
                 await self._maybe_run_voice_journal()
+                await self._maybe_run_background_monitor()
 
             if not _get_config_flag("proactive_enabled"):
                 continue
@@ -1512,6 +1549,36 @@ class JarvisLive:
             self.ui.write_log("SYS: Diario de voz.")
         except Exception as e:
             print(f"[VoiceJournal] ⚠️ {e}")
+
+    async def _maybe_run_background_monitor(self) -> None:
+        """Check subscribed topics for news once per calendar day, alert on
+        anything genuinely new. See actions/background_monitor.py."""
+        from actions import app_settings
+        from actions import background_monitor
+        from datetime import datetime as _dt
+
+        topics = app_settings.get("monitor_topics", [])
+        if not topics:
+            return
+
+        today_str = _dt.now().strftime("%Y-%m-%d")
+        if app_settings.get("monitor_last_check_date", "") == today_str:
+            return
+
+        # Mark first — a crash mid-check shouldn't retry every minute.
+        app_settings.set("monitor_last_check_date", today_str)
+        try:
+            new_by_topic = await asyncio.to_thread(background_monitor.check_all_topics)
+            if not new_by_topic:
+                return
+            prompt = background_monitor.build_alert_prompt(new_by_topic)
+            await self.session.send_client_content(
+                turns={"parts": [{"text": prompt}]},
+                turn_complete=True,
+            )
+            self.ui.write_log("SYS: Alerta de monitor de temas.")
+        except Exception as e:
+            print(f"[BackgroundMonitor] ⚠️ {e}")
 
     async def _send_startup_briefing(self) -> None:
         """
@@ -2003,6 +2070,18 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args))
                 result = r or "Done."
 
+            elif name == "monitor_subscribe":
+                from actions import background_monitor
+                result = background_monitor.subscribe(args.get("topic", ""))
+
+            elif name == "monitor_unsubscribe":
+                from actions import background_monitor
+                result = background_monitor.unsubscribe(args.get("topic", ""))
+
+            elif name == "monitor_list_topics":
+                from actions import background_monitor
+                result = background_monitor.list_topics()
+
             elif name == "movies":
                 _action = (args.get("action") or "").lower().strip()
                 if _action == "play":
@@ -2175,7 +2254,27 @@ class JarvisLive:
                     import actions.ytmusic_headless as _hl
                     _action = args.get('action', '').lower()
                     _to_bool = lambda v: str(v).strip().lower() in ('1', 'true', 'yes', 'y', 'on', 'si', 'sí') if not isinstance(v, bool) else v
-                    if _action == 'play':
+                    _controller = getattr(self.ui, 'playback_controller', None)
+                    _serialized_actions = {
+                        'play', 'pause', 'play_pause', 'resume', 'play_resume',
+                        'toggle_play', 'toggle', 'stop', 'next', 'next_track',
+                        'previous', 'prev', 'previous_track', 'volume', 'seek',
+                        'play_playlist',
+                    }
+                    if _controller is not None and _action in _serialized_actions:
+                        _command_result = await loop.run_in_executor(
+                            None,
+                            lambda: _controller.execute(_action, args),
+                        )
+                        if not _command_result.ok:
+                            r = _command_result.message or "No se pudo ejecutar la orden."
+                        else:
+                            r = (
+                                _command_result.value
+                                if _command_result.value is not None
+                                else _command_result.message
+                            )
+                    elif _action == 'play':
                         _q = args.get('query') or args.get('q') or ''
                         # play() is now fast (search_songs only, mpv resolves stream internally)
                         r = await loop.run_in_executor(None, lambda: _hl.play(_q))
@@ -2189,9 +2288,9 @@ class JarvisLive:
                     elif _action == 'stop':
                         r = await loop.run_in_executor(None, _hl.stop)
                     elif _action in ('next', 'next_track'):
-                        r = await loop.run_in_executor(None, _hl.next)
+                        r = await loop.run_in_executor(None, lambda: _hl.next(manual=True))
                     elif _action in ('previous', 'prev', 'previous_track'):
-                        r = await loop.run_in_executor(None, _hl.previous)
+                        r = await loop.run_in_executor(None, lambda: _hl.previous(manual=True))
                     elif _action == 'volume':
                         lvl = int(args.get('level', 50))
                         r = await loop.run_in_executor(None, lambda: _hl.volume(lvl))
@@ -2264,6 +2363,26 @@ class JarvisLive:
                         _kind = args.get('kind') or 'audio'
                         removed = await loop.run_in_executor(None, lambda: _cleanup_partial_downloads(_kind))
                         r = f"Removed {len(removed)} partial download file(s)."
+                    elif _action in ('retag_downloads', 'fix_music_metadata'):
+                        from actions.ytmusic import retag_downloads as _retag_downloads
+                        _out = args.get('output_dir') or args.get('path') or ''
+                        self._download_cancel_event.clear()
+                        self.ui.set_download_state({
+                            "active": True,
+                            "percent": 0,
+                            "label": "Reparando metadatos",
+                            "detail": "Buscando archivos",
+                            "can_cancel": True,
+                        })
+                        self.speak("Reparo los metadatos de la música descargada, sir. Puede tardar un rato.")
+                        r = await loop.run_in_executor(
+                            None,
+                            lambda: _retag_downloads(
+                                output_dir=_out,
+                                progress_hook=self.ui.set_download_state,
+                                cancel_event=self._download_cancel_event,
+                            )
+                        )
                     elif _action in ('set_default_quality',):
                         from actions.ytmusic import set_default_quality as _set_default_quality
                         _aq = args.get('audio_quality') or args.get('quality') or ''
@@ -2985,6 +3104,13 @@ class JarvisLive:
             backoff = min(backoff * 2, 60.0)
 
 def main():
+    # Must be the very first thing main() does: marks this process as a real
+    # running instance of the app, so actions.app_settings.set() will actually
+    # persist. Without this flag, any stray script/test/agent importing
+    # actions.app_settings directly is refused instead of silently writing
+    # into the real user's config — see NOTE_settings_persistence.md.
+    os.environ["JARVIS_REAL_SESSION"] = "1"
+
     from actions.single_instance import is_already_running, focus_existing_window
     if is_already_running():
         print("[JARVIS] Ya hay una instancia en ejecución; la traigo al frente.")
@@ -2999,6 +3125,9 @@ def main():
 
     ui = JarvisUI("face.png")
     ui._app.aboutToQuit.connect(stop_bridge)
+
+    from actions import lan_dashboard as _lan_dashboard_mod
+    _lan_dashboard_mod.set_ui(ui)
 
     # create WhatsApp manager early so it can poll messages; callback set later
     try:
@@ -3046,6 +3175,11 @@ def main():
         jarvis = JarvisLive(ui)
         # expose jarvis instance globally so playback handlers can call speak if needed
         globals()['JARVIS_INSTANCE'] = jarvis
+        # lan_dashboard can't reach JARVIS_INSTANCE via `import main` — when run
+        # as `python main.py` this module is `__main__`, not `main`, so that
+        # import would load a fresh, empty copy. Hand it the reference directly.
+        from actions import lan_dashboard as _lan_dashboard_mod2
+        _lan_dashboard_mod2.set_jarvis(jarvis)
         ui.on_download_cancel = jarvis.request_download_cancel
         # connect whatsapp manager to jarvis.speak to announce incoming messages
         try:
@@ -3410,6 +3544,8 @@ def main():
                                 ptitle = p.get('title') or ''
                                 if pid:
                                     from actions import offline_library as _off
+                                    if not _off.reserve_sync(pid):
+                                        return "No se puede iniciar: ya hay una sincronización offline en curso."
                                     _jv = globals().get('JARVIS_INSTANCE')
                                     _cancel_ev = getattr(_jv, '_download_cancel_event', None) or threading.Event()
                                     _cancel_ev.clear()
@@ -3428,6 +3564,7 @@ def main():
                                                 title=_title,
                                                 progress_hook=ui.set_download_state,
                                                 cancel_event=_cancel_ev,
+                                                _reserved=True,
                                             )
                                         except Exception as _e:
                                             ui.set_download_state({
@@ -3438,8 +3575,16 @@ def main():
                                                 "can_cancel": False,
                                             })
 
-                                    threading.Thread(target=_run_offline_sync, daemon=True).start()
-                                return
+                                    try:
+                                        threading.Thread(
+                                            target=_run_offline_sync,
+                                            name=f"jarvis-offline-sync-{str(pid)[:12]}",
+                                            daemon=True,
+                                        ).start()
+                                    except Exception:
+                                        _off.release_sync(pid)
+                                        raise
+                                return True
                             if a0 in ('remove_playlist_offline', 'unmark_offline'):
                                 pid = (
                                     p.get('playlist_id')
@@ -3453,45 +3598,62 @@ def main():
                                     _del = p.get('delete_files', False)
                                     if not isinstance(_del, bool):
                                         _del = str(_del).lower() in ('1', 'true', 'yes', 'on', 'si', 'sí')
-                                    _off.unmark_offline(pid, delete_files=_del)
-                                return
+                                    result = _off.unmark_offline(pid, delete_files=_del)
+                                    if result.get("busy"):
+                                        return "No se puede quitar mientras la playlist se está sincronizando."
+                                    if result.get("unsafe_path"):
+                                        return "No se borraron archivos: la carpeta registrada está fuera del directorio musical administrado."
+                                    if result.get("delete_error"):
+                                        return f"No se pudieron borrar los archivos: {result['delete_error']}"
+                                return True
                             if _HEADLESS and hasattr(ymod, 'play'):
                                 # map common actions to headless functions
                                 a = action.lower()
                                 if a == 'play':
                                     q = p.get('query') or p.get('q') or ''
-                                    ymod.play(q)
+                                    return ymod.play(q)
                                 elif a in ('pause', 'play_pause'):
-                                    ymod.pause()
+                                    return ymod.pause()
                                 elif a in ('resume', 'play_resume'):
-                                    ymod.resume()
+                                    return ymod.resume()
                                 elif a in ('toggle_play', 'toggle'):
-                                    ymod.toggle_play()
+                                    return ymod.toggle_play()
                                 elif a == 'stop':
-                                    ymod.stop()
+                                    return ymod.stop()
                                 elif a == 'volume':
-                                    lvl = p.get('level') or p.get('level') or p.get('volume')
+                                    from actions.playback_controller import parameter_value
+                                    lvl = parameter_value(p, 'level', 'volume')
                                     if lvl is not None:
                                         lvl_i = int(lvl)
-                                        ymod.volume(lvl_i)
+                                        result = ymod.volume(lvl_i)
                                         try:
-                                            self.ui.set_music_volume(lvl_i)
+                                            ui.set_music_volume(lvl_i)
                                         except Exception:
                                             pass
+                                        return result
+                                    return False
                                 elif a == 'seek':
-                                    sec = p.get('seconds') or p.get('pos') or p.get('seek') or p.get('position')
+                                    from actions.playback_controller import parameter_value
+                                    sec = parameter_value(p, 'seconds', 'pos', 'seek', 'position')
                                     if sec is not None:
-                                        ymod.seek(int(sec))
+                                        return ymod.seek(int(sec))
+                                    return False
                                 elif a in ('next', 'next_track'):
                                     try:
-                                        ymod.next(manual=True)
+                                        return ymod.next(manual=True)
                                     except TypeError:
-                                        ymod.next()
+                                        return ymod.next()
                                 elif a in ('previous', 'prev', 'previous_track'):
                                     try:
-                                        ymod.previous(manual=True)
+                                        return ymod.previous(manual=True)
                                     except TypeError:
-                                        ymod.previous()
+                                        return ymod.previous()
+                                elif a in ('jump_to', 'jump', 'play_index'):
+                                    from actions.playback_controller import parameter_value
+                                    idx = parameter_value(p, 'index', 'idx')
+                                    if idx is None:
+                                        return False
+                                    return ymod.jump_to(int(idx))
                                 elif a == 'play_playlist':
                                     q = (
                                         p.get('query')
@@ -3505,7 +3667,7 @@ def main():
                                     if not isinstance(shf, bool):
                                         shf = str(shf).strip().lower() in ('1', 'true', 'yes', 'y', 'on', 'si', 'sí')
                                     start = int(p.get('start_index', 0) or 0)
-                                    ymod.play_playlist(q, lim, shf, start)
+                                    return ymod.play_playlist(q, lim, shf, start)
                                 elif a == 'play_tracks':
                                     tracks = p.get('tracks') or []
                                     start = int(p.get('start_index', 0) or 0)
@@ -3513,10 +3675,10 @@ def main():
                                     if not isinstance(shf, bool):
                                         shf = str(shf).strip().lower() in ('1', 'true', 'yes', 'y', 'on', 'si', 'sí')
                                     if hasattr(ymod, 'play_tracks'):
-                                        ymod.play_tracks(tracks, start, shf)
+                                        return ymod.play_tracks(tracks, start, shf)
                                 elif a == 'play_track':
                                     if hasattr(ymod, 'play_track'):
-                                        ymod.play_track(
+                                        return ymod.play_track(
                                             p.get('videoId') or p.get('video_id') or '',
                                             p.get('title') or '',
                                             p.get('artists') or '',
@@ -3593,10 +3755,13 @@ def main():
                                     if not error and video_id == _last_like_video[0]:
                                         _last_like_state[0] = liked
                                     ui.set_playback_like_state(video_id, liked, error)
+                                    if error:
+                                        return f"No se pudo cambiar Me gusta: {error}"
+                                    return True
                                 else:
                                     # unknown action: try generic ymod method
                                     if hasattr(ymod, a):
-                                        getattr(ymod, a)(**p)
+                                        return getattr(ymod, a)(**p)
                             else:
                                 # GUI backend: call existing `ytmusic` function
                                 params_obj = {'action': action}
@@ -3605,21 +3770,34 @@ def main():
                                 speak_fn = getattr(jarvis_inst, 'speak', None) if jarvis_inst else None
                                 try:
                                     if speak_fn:
-                                        ytmusic(params_obj, speak=speak_fn)
+                                        return ytmusic(params_obj, speak=speak_fn)
                                     else:
-                                        ytmusic(params_obj, speak=lambda *a, **k: None)
+                                        return ytmusic(params_obj, speak=lambda *a, **k: None)
                                 except Exception:
-                                    # best effort
-                                    pass
+                                    raise
                         except Exception as _e:
                             import traceback
                             print(f"[JARVIS] ⚠️ playback '{action}' falló: {_e}", flush=True)
                             traceback.print_exc()
-                    threading.Thread(target=_call, daemon=True).start()
+                            raise
+                    return _call()
                 except Exception:
-                    pass
+                    raise
 
-            ui.on_playback_command = _handle_play_cmd
+            from actions.playback_controller import PlaybackController
+
+            def _report_playback_result(result):
+                if not result.ok:
+                    detail = result.message or "El backend rechazó la operación."
+                    ui.show_toast(f"No se pudo ejecutar {result.action}: {detail}", 4500)
+
+            playback_controller = PlaybackController(
+                _handle_play_cmd,
+                on_result=_report_playback_result,
+            )
+            ui.playback_controller = playback_controller
+            ui.on_playback_command = playback_controller.submit
+            ui._app.aboutToQuit.connect(lambda: playback_controller.close(wait=False))
 
             # Poller para refrescar info de la pista actual y actualizar la UI
             _was_playing = [False]
@@ -3627,18 +3805,30 @@ def main():
             _last_like_state = [None]
 
             def _load_like_state(video_id: str):
-                liked = False
                 try:
                     from actions.ytmusic import get_song_like_status
                     liked = get_song_like_status(video_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(
+                        f"[JARVIS] ⚠️ no se pudo consultar Me gusta para {video_id}: {exc}",
+                        flush=True,
+                    )
+                    return
+                # Missing/ambiguous API data is an unknown state, not evidence
+                # that the song is unliked. Keep the control pending/disabled.
+                if liked is None:
+                    return
                 if video_id == _last_like_video[0]:
                     _last_like_state[0] = liked
                     ui.set_playback_like_state(video_id, liked)
 
+            _playback_poller_stop = threading.Event()
+            _last_poller_error = [0.0]
+            ui._playback_poller_stop = _playback_poller_stop
+            ui._app.aboutToQuit.connect(_playback_poller_stop.set)
+
             def _poller():
-                while True:
+                while not _playback_poller_stop.is_set():
                     try:
                         playing = False
                         # Headless backend exposes `current()`
@@ -3653,14 +3843,16 @@ def main():
                             buffering = bool(info.get('buffering', False)) if info else False
                             playback_state = str(info.get('state') or '') if info else ''
                             video_id = str(info.get('videoId') or '') if info else ''
-                            if video_id and video_id != _last_like_video[0]:
+                            thumbnail = str(info.get('thumbnail') or '') if info else ''
+                            if video_id != _last_like_video[0]:
                                 _last_like_video[0] = video_id
                                 _last_like_state[0] = None
-                                threading.Thread(
-                                    target=_load_like_state,
-                                    args=(video_id,),
-                                    daemon=True,
-                                ).start()
+                                if video_id:
+                                    threading.Thread(
+                                        target=_load_like_state,
+                                        args=(video_id,),
+                                        daemon=True,
+                                    ).start()
                             ui.update_playback(
                                 t_,
                                 a_,
@@ -3672,6 +3864,7 @@ def main():
                                 ready,
                                 buffering,
                                 playback_state,
+                                thumbnail=thumbnail,
                             )
                         else:
                             ui.update_playback('', '', 0, 0, False)
@@ -3695,11 +3888,22 @@ def main():
                             _stop_loopback()
                             ui.set_fft_bins([0.0] * 64)
                         _was_playing[0] = want_loop
-                    except Exception:
-                        pass
-                    time.sleep(1)
+                    except Exception as exc:
+                        # Keep transient backend/UI races from killing the
+                        # poller, but surface persistent failures at a bounded
+                        # rate instead of hiding them forever.
+                        now = time.monotonic()
+                        if now - _last_poller_error[0] >= 10.0:
+                            _last_poller_error[0] = now
+                            print(f"[JARVIS] ⚠️ playback poller: {exc}", flush=True)
+                    if _playback_poller_stop.wait(1.0):
+                        return
 
-            t = threading.Thread(target=_poller, daemon=True)
+            t = threading.Thread(
+                target=_poller,
+                name="jarvis-playback-ui-poller",
+                daemon=True,
+            )
             t.start()
         except Exception as _e:
             import traceback
@@ -3708,6 +3912,14 @@ def main():
 
     # Instalar handlers antes de arrancar el loop de UI
     _install_playback_handlers()
+
+    try:
+        from actions import app_settings as _app_settings
+        if _app_settings.get("lan_dashboard_enabled", False):
+            from actions import lan_dashboard
+            lan_dashboard.start_dashboard()
+    except Exception as _e:
+        print(f"[JARVIS] ⚠️ lan_dashboard no arrancó: {_e}")
 
     threading.Thread(target=runner, daemon=True).start()
     try:
@@ -3724,6 +3936,12 @@ def main():
             pass
         try:
             stop_bridge()
+        except Exception:
+            pass
+        try:
+            controller = getattr(ui, "playback_controller", None)
+            if controller is not None:
+                controller.close(wait=False)
         except Exception:
             pass
         try:

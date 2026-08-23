@@ -81,3 +81,6 @@ vlc/
 
 # === Logs ===
 *.log
+
+# === Emulator debug dumps ===
+pcsx2_bad_shader_*.txt

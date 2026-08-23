@@ -1,8 +1,9 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from actions import ytmusic_headless
-from ui import MainWindow
+from ui import JarvisUI, MainWindow
 
 
 class _FakeSlider:
@@ -236,6 +237,44 @@ class PlaybackProgressTests(unittest.TestCase):
                 self.assertEqual(window._play_position, 7.0)
                 self.assertEqual(window._slider.values, [])
                 self.assertEqual(window._time_lbl.texts, [])
+
+    def test_ui_clears_like_identity_when_track_has_no_video_id(self):
+        window = Mock()
+        window._play_video_id = "previous-video"
+        window._play_liked = True
+        window._like_pending = True
+        window._pb_like = Mock()
+        window._karaoke_float = None
+        window._user_dragging = False
+        window._slider = Mock()
+        window._time_lbl = Mock()
+        window._track_lbl = Mock()
+        window._pb_play = Mock()
+        window._playback_bar = Mock()
+        window.hud = SimpleNamespace(music_playing=True)
+        window._music_panel = None
+        window._music_float = None
+
+        MainWindow.update_playback(
+            window, "Local track", "Artist", 0, 120, True,
+            video_id="", liked=None,
+        )
+
+        self.assertEqual(window._play_video_id, "")
+        self.assertFalse(window._play_liked)
+        self.assertFalse(window._like_pending)
+        window._pb_like.setEnabled.assert_called_with(False)
+
+    def test_backend_volume_sync_does_not_emit_another_command(self):
+        facade = JarvisUI.__new__(JarvisUI)
+        facade._win = Mock()
+
+        facade.set_music_volume(0)
+
+        # Marshalled onto the GUI thread: callers include the playback worker
+        # thread, and applying the level touches the volume widget.
+        facade._win._music_volume_sig.emit.assert_called_once_with(0)
+        facade._win._set_music_volume.assert_not_called()
 
 
 if __name__ == "__main__":
