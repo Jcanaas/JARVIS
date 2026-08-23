@@ -32,6 +32,7 @@ except Exception:
     YoutubeDL = None
     _YTDLP_OK = False
 
+from actions import audio_tags
 from actions.paths import RESOURCE_DIR, config_path
 from actions.perf_helpers import SharedThreadPool
 
@@ -110,6 +111,17 @@ def _upgrade_thumbnail_url(url: str, size: int = 1200) -> str:
         rounded = "-rj" if "-rj" in params else ""
         return f"{base}=w{size}-h{size}-l90{rounded}"
     return url
+
+
+def upgrade_thumbnail_url(url: str, size: int = 544) -> str:
+    """Public wrapper: ask Google for a bigger copy of a cover.
+
+    YouTube Music hands out list artwork at 120×120 (the `=w120-h120…` suffix),
+    which is fine for a table row and mush on a phone's now-playing screen.
+    The size lives in the URL, so a larger copy costs nothing but the request.
+    Non-Google URLs are returned untouched.
+    """
+    return _upgrade_thumbnail_url(url, size)
 
 
 def _cover_match_score(expected: str, candidate: str) -> int:
@@ -526,57 +538,119 @@ def playlist_preview(query_or_id: str = "", limit: int = 5) -> dict:
     }
 
 
-_LIKED_THUMB_CACHE: dict = {"ts": 0.0, "url": ""}
+_LIKED_THUMB_CACHE: dict = {"ts": 0.0, "url": "", "count": ""}
+
+
+def _get_library_playlists_resilient(yt, limit: int | None) -> List[Dict]:
+    """Reimplements ytmusicapi's YTMusic.get_library_playlists with a
+    per-item try/except around parse_playlist(). The stock method
+    (ytmusicapi.mixins.library.LibraryMixin.get_library_playlists) calls
+    parse_content_list() with no per-item error handling, so a single
+    playlist entry with no thumbnail data (nav() raises KeyError deep in
+    parse_playlist) aborts the ENTIRE list — a real, reproducible bug in
+    ytmusicapi 1.12.0. Mirrors the stock method's request/pagination shape
+    exactly, just swaps the bulk parse for a resilient loop."""
+    from ytmusicapi.parsers.browsing import GRID, MTRIR, parse_playlist
+    from ytmusicapi.parsers.library import get_library_contents
+    from ytmusicapi.continuations import get_continuations
+
+    def _parse_list_resilient(items: list) -> List[Dict]:
+        out: List[Dict] = []
+        for raw in items:
+            try:
+                out.append(parse_playlist(raw[MTRIR]))
+            except Exception as e:
+                print(f"[ytmusic] skipping unparseable library playlist entry: {e}")
+        return out
+
+    yt._check_auth()
+    body = {"browseId": "FEmusic_liked_playlists"}
+    endpoint = "browse"
+    response = yt._send_request(endpoint, body)
+
+    results = get_library_contents(response, GRID)
+    if results is None:
+        return []
+    playlists = _parse_list_resilient(results["items"][1:])
+
+    if "continuations" in results:
+        remaining = None if limit is None else (limit - len(playlists))
+        playlists.extend(
+            get_continuations(
+                results, "gridContinuation", remaining,
+                lambda additionalParams: yt._send_request(endpoint, body, additionalParams),
+                _parse_list_resilient,
+            )
+        )
+    return playlists
 
 
 def list_playlists(limit: int | None = None) -> List[Dict]:
     yt = _get_ytmusic(require_auth=True)
-    pls = yt.get_library_playlists(limit=_optional_limit(limit))
+    try:
+        pls = _get_library_playlists_resilient(yt, _optional_limit(limit))
+    except Exception as e:
+        print(f"[ytmusic] get_library_playlists failed, showing liked songs only: {e}")
+        pls = []
     out = []
     seen: set[str] = set()
 
-    # The liked-songs cover requires its own API round-trip; cache it for a
-    # while so opening the playlists view doesn't pay it every time.
+    # The liked-songs cover + real track count require their own API
+    # round-trip (get_liked_songs only returns the raw track list, discarding
+    # the "trackCount" field — fetch the raw playlist dict ourselves here so
+    # both come from the SAME request). Cache for a while so opening the
+    # playlists view doesn't pay it every time.
     import time as _time
     liked_thumb = ""
+    liked_count = ""
     if (_time.monotonic() - _LIKED_THUMB_CACHE["ts"]) < 600 and _LIKED_THUMB_CACHE["url"]:
         liked_thumb = _LIKED_THUMB_CACHE["url"]
+        liked_count = _LIKED_THUMB_CACHE.get("count", "")
     else:
         try:
-            liked_preview = get_liked_songs(limit=1)
-            if isinstance(liked_preview, list) and liked_preview:
-                liked_thumb = _thumbnail_url(liked_preview[0])
-            if liked_thumb:
+            yt_liked = _get_ytmusic(require_auth=True)
+            raw = yt_liked.get_liked_songs(limit=1)
+            liked_count = raw.get("trackCount", "") if isinstance(raw, dict) else ""
+            # The playlist's own official cover (a static YT Music "liked
+            # songs" heart icon, from raw["thumbnails"]) — not a track's art.
+            liked_thumb = _thumbnail_url(raw) if isinstance(raw, dict) else ""
+            if liked_thumb or liked_count:
                 _LIKED_THUMB_CACHE["ts"] = _time.monotonic()
                 _LIKED_THUMB_CACHE["url"] = liked_thumb
-        except Exception:
+                _LIKED_THUMB_CACHE["count"] = liked_count
+        except Exception as e:
+            print(f"[ytmusic] failed to fetch liked-songs cover/count: {e}")
             liked_thumb = ""
+            liked_count = ""
 
     out.append({
         "playlistId": "LM",
         "browseId": "LM",
         "title": "Canciones que te gustan",
         "author": "YouTube Music",
-        "itemCount": "",
+        "itemCount": liked_count,
         "thumbnail": liked_thumb,
         "url": _album_url("LM"),
     })
     seen.add("lm")
 
     for p in pls or []:
-        pid = p.get("playlistId") or p.get("browseId") or ""
-        key = str(pid or p.get("title") or "").strip().lower()
-        if key in seen or _is_liked_playlist_query(pid) or _is_liked_playlist_query(p.get("title", "")):
-            continue
-        seen.add(key)
-        out.append({
-            "playlistId": pid,
-            "title": p.get("title", ""),
-            "author": _artist_names(p.get("author")),
-            "itemCount": p.get("count", p.get("trackCount", "")),
-            "thumbnail": _thumbnail_url(p),
-            "url": _album_url(pid) if pid else "",
-        })
+        try:
+            pid = p.get("playlistId") or p.get("browseId") or ""
+            key = str(pid or p.get("title") or "").strip().lower()
+            if key in seen or _is_liked_playlist_query(pid) or _is_liked_playlist_query(p.get("title", "")):
+                continue
+            seen.add(key)
+            out.append({
+                "playlistId": pid,
+                "title": p.get("title", ""),
+                "author": _artist_names(p.get("author")),
+                "itemCount": p.get("count", p.get("trackCount", "")),
+                "thumbnail": _thumbnail_url(p),
+                "url": _album_url(pid) if pid else "",
+            })
+        except Exception as e:
+            print(f"[ytmusic] skipping malformed playlist entry: {e}")
     return out
 
 
@@ -682,6 +756,41 @@ def retry_failed_downloads(output_dir: str = "", progress_hook=None, cancel_even
 
 def download_resume_failed(output_dir: str = "", progress_hook=None, cancel_event=None) -> list[str]:
     return retry_failed_downloads(output_dir=output_dir, progress_hook=progress_hook, cancel_event=cancel_event)
+
+
+def retag_downloads(output_dir: str = "", convert: bool = True, progress_hook=None,
+                    cancel_event=None) -> str:
+    """Rewrite tags (and fix containers) for music already on disk.
+
+    Downloads made before tagging existed are plain Opus/WebM files with no
+    artist, album, genre or cover art; this walks the audio folder and repairs
+    them in place.
+    """
+    base = Path(output_dir).expanduser() if output_dir else _downloads_dir("JARVIS_Audio")
+    result = audio_tags.retag_directory(
+        str(base), convert=convert, progress_hook=progress_hook, cancel_event=cancel_event,
+    )
+    if not result.get("ok"):
+        return str(result.get("error") or "No se pudo reparar la carpeta de música.")
+    if result.get("cancelled"):
+        return (
+            f"Reparación cancelada: {result['tagged']} de {result['files']} archivo(s) con "
+            "etiquetas. Vuelve a lanzarla cuando quieras y seguirá donde lo dejó: los ya "
+            "reparados se detectan y se saltan sin tocar la red."
+        )
+    msg = f"Metadatos escritos en {result['tagged']} de {result['files']} archivo(s) de {base}."
+    if result.get("skipped"):
+        msg += f" {result['skipped']} ya estaban bien y se saltaron."
+    if result.get("converted"):
+        msg += f" {result['converted']} convertido(s) a .m4a con {result.get('transcoder') or 'el conversor interno'}."
+    if result.get("untaggable"):
+        msg += (
+            f" {result['untaggable']} archivo(s) .webm siguen sin etiquetas: ese contenedor no admite "
+            "metadatos y no se han podido convertir."
+        )
+        if not result.get("transcoder"):
+            msg += " No encuentro mpv.exe ni ffmpeg junto a la app."
+    return msg
 
 
 def _download_cancel_requested(cancel_event=None) -> bool:
@@ -793,14 +902,40 @@ def queue_playlist_download(
 
 
 def _audio_format_selector(quality: str) -> str:
+    """Build a yt-dlp format string that prefers m4a (MP4/AAC).
+
+    "bestaudio" alone hands back WebM/Opus on almost every YouTube Music track:
+    great quality, but phones — every iPhone, plenty of Android players and car
+    stereos — can't open it, and it can't hold cover art in a way those players
+    read. m4a is the same audio family everyone ships, so ask for it first and
+    only fall back to the raw best stream when no m4a exists (then
+    actions.audio_tags converts it if ffmpeg is around).
+    """
     q = _normalize_quality(quality)
     if q == "low":
-        return "bestaudio[abr<=96]/bestaudio"
+        return "bestaudio[ext=m4a][abr<=96]/bestaudio[ext=m4a]/bestaudio[abr<=96]/bestaudio"
     if q == "medium":
-        return "bestaudio[abr<=160]/bestaudio"
+        return "bestaudio[ext=m4a][abr<=160]/bestaudio[ext=m4a]/bestaudio[abr<=160]/bestaudio"
     if q == "high":
-        return "bestaudio[abr<=320]/bestaudio"
-    return "bestaudio/best"
+        return "bestaudio[ext=m4a][abr<=320]/bestaudio[ext=m4a]/bestaudio[abr<=320]/bestaudio"
+    return "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
+
+
+def _downloaded_path(ydl, info: dict) -> str:
+    """Return the file yt-dlp actually wrote.
+
+    ``prepare_filename`` rebuilds the name from the template, which stops
+    matching as soon as a postprocessor changes the extension; the entry yt-dlp
+    records in ``requested_downloads`` is the real path.
+    """
+    for entry in (info.get("requested_downloads") or []):
+        candidate = entry.get("filepath") or entry.get("_filename")
+        if candidate and Path(candidate).exists():
+            return str(Path(candidate))
+    try:
+        return str(Path(ydl.prepare_filename(info)))
+    except Exception:
+        return ""
 
 
 def _emit_download_state(progress_hook, *, active: bool, percent: float, label: str, detail: str, can_cancel: bool = True):
@@ -976,7 +1111,19 @@ def download_audio_tracks(tracks, output_dir: str = "", quality: str = "", progr
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if info:
-                    path = str(Path(ydl.prepare_filename(info)))
+                    path = _downloaded_path(ydl, info)
+            if path:
+                _emit_download_state(
+                    progress_hook, active=True, percent=_overall_percent(1.0),
+                    label="Writing tags", detail=f"{idx}/{total} · {title}", can_cancel=False,
+                )
+                # Container fix + tags/cover art, so the file is usable on a
+                # phone instead of a bare Opus stream with no metadata.
+                path = audio_tags.finalize_download(
+                    path,
+                    track if isinstance(track, dict) else {"title": title},
+                    info,
+                )
         except (KeyboardInterrupt, DownloadCancelled):
             cancelled.set()
         except Exception as e:
@@ -1605,6 +1752,58 @@ def get_liked_songs(limit: int | None = None) -> List[Dict]:
     return out if lim is None else out[:lim]
 
 
+_LIKED_VIDEO_IDS_CACHE = {"loaded": False, "ts": 0.0, "ids": frozenset()}
+_LIKED_VIDEO_IDS_LOCK = threading.Lock()
+_LIKED_VIDEO_IDS_TTL = 300.0
+
+
+def _get_cached_liked_video_ids() -> Optional[frozenset[str]]:
+    now = time.monotonic()
+    with _LIKED_VIDEO_IDS_LOCK:
+        if (
+            _LIKED_VIDEO_IDS_CACHE["loaded"]
+            and now - float(_LIKED_VIDEO_IDS_CACHE["ts"]) < _LIKED_VIDEO_IDS_TTL
+        ):
+            return _LIKED_VIDEO_IDS_CACHE["ids"]
+    return None
+
+
+def _get_liked_video_ids() -> frozenset[str]:
+    """Return a short-lived complete index of the authenticated liked library."""
+    cached = _get_cached_liked_video_ids()
+    if cached is not None:
+        return cached
+    with _LIKED_VIDEO_IDS_LOCK:
+        now = time.monotonic()
+        if (
+            _LIKED_VIDEO_IDS_CACHE["loaded"]
+            and now - float(_LIKED_VIDEO_IDS_CACHE["ts"]) < _LIKED_VIDEO_IDS_TTL
+        ):
+            return _LIKED_VIDEO_IDS_CACHE["ids"]
+
+        tracks = get_liked_songs(limit=None)
+        ids = frozenset(
+            str(track.get("videoId") or "").strip()
+            for track in tracks
+            if isinstance(track, dict) and track.get("videoId")
+        )
+        _LIKED_VIDEO_IDS_CACHE.update({"loaded": True, "ts": now, "ids": ids})
+        return ids
+
+
+def _update_liked_video_ids_cache(video_id: str, liked: bool) -> None:
+    """Keep a previously loaded library index coherent after a local rating."""
+    with _LIKED_VIDEO_IDS_LOCK:
+        if not _LIKED_VIDEO_IDS_CACHE["loaded"]:
+            return
+        ids = set(_LIKED_VIDEO_IDS_CACHE["ids"])
+        if liked:
+            ids.add(video_id)
+        else:
+            ids.discard(video_id)
+        _LIKED_VIDEO_IDS_CACHE["ids"] = frozenset(ids)
+
+
 def get_history(limit: int = 20) -> List[Dict]:
     yt      = _get_ytmusic(require_auth=True)
     history = yt.get_history()
@@ -1668,16 +1867,41 @@ def like_song(query: str) -> str:
     return f"Le diste like a '{title}' — {artists}."
 
 
-def get_song_like_status(video_id: str) -> bool:
+def get_song_like_status(video_id: str) -> Optional[bool]:
+    """Return the authenticated rating for the exact song/video requested.
+
+    ``get_watch_playlist`` may normalize a video to its audio track and place
+    the requested item in ``counterpart``.  ``None`` means the response did not
+    contain a trustworthy status; it must not be displayed as "not liked".
+    """
     video_id = str(video_id or "").strip()
     if not video_id:
-        return False
+        return None
+    cached_ids = _get_cached_liked_video_ids()
+    if cached_ids is not None:
+        return video_id in cached_ids
     yt = _get_ytmusic(require_auth=True)
-    data = yt.get_watch_playlist(videoId=video_id, limit=1)
-    for track in data.get("tracks") or []:
-        if str(track.get("videoId") or "") == video_id:
-            return str(track.get("likeStatus") or "").upper() == "LIKE"
-    return False
+    try:
+        data = yt.get_watch_playlist(videoId=video_id, limit=1)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        for track in data.get("tracks") or []:
+            if not isinstance(track, dict):
+                continue
+            for candidate in (track, track.get("counterpart")):
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("videoId") or "") != video_id:
+                    continue
+                status = str(candidate.get("likeStatus") or "").strip().upper()
+                if status:
+                    return status == "LIKE"
+
+    # ytmusicapi 1.12.0's watch parser raises KeyError('endpoint') for some
+    # valid tracks. The authenticated liked library is slower but authoritative;
+    # cache its complete ID set so only the first fallback pays that cost.
+    return video_id in _get_liked_video_ids()
 
 
 def set_song_like(video_id: str, liked: bool) -> bool:
@@ -1686,6 +1910,7 @@ def set_song_like(video_id: str, liked: bool) -> bool:
         raise ValueError("No hay una canción activa.")
     yt = _get_ytmusic(require_auth=True)
     yt.rate_song(video_id, "LIKE" if liked else "INDIFFERENT")
+    _update_liked_video_ids_cache(video_id, bool(liked))
     return bool(liked)
 
 
@@ -1871,6 +2096,12 @@ def ytmusic(parameters: dict, speak=None) -> str:
         if action == "cleanup_partial_downloads":
             kind = parameters.get("kind", "audio")
             return cleanup_partial_downloads(kind)
+
+        if action in ("retag_downloads", "fix_music_metadata"):
+            return retag_downloads(
+                output_dir=parameters.get("output_dir") or parameters.get("path") or "",
+                convert=_as_bool(parameters.get("convert", True)),
+            )
 
         if action == "set_default_quality":
             return set_default_quality(

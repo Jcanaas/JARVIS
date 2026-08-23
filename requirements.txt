@@ -31,3 +31,5 @@ python-vlc
 pdfplumber
 python-docx
 syncedlyrics
+mutagen
+flask

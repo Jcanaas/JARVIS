@@ -32,16 +32,29 @@ class _MediaBtn(QPushButton):
                 border: 2px solid rgba(182,196,255,0.56);
             }
         """)
+        self._sync_semantics()
+
+    def _sync_semantics(self) -> None:
+        label = {
+            self.PREV: "Pista anterior",
+            self.PLAY: "Reproducir",
+            self.PAUSE: "Pausar",
+            self.NEXT: "Pista siguiente",
+        }.get(self._shape, "Control de reproducción")
+        self.setAccessibleName(label)
+        self.setToolTip(label)
 
     def set_shape(self, shape: str):
         if self._shape != shape:
             self._shape = shape
+            self._sync_semantics()
             self.update()
 
     def enterEvent(self, e):  self._hovered = True;  self.update()
     def leaveEvent(self, e):  self._hovered = False; self.update()
 
-    def paintEvent(self, _):
+    def paintEvent(self, event):
+        super().paintEvent(event)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
@@ -79,6 +92,7 @@ class _LikeBtn(QPushButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._liked = False
+        self.setCheckable(True)
         self.setFixedSize(40, 40)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet("""
@@ -95,18 +109,30 @@ class _LikeBtn(QPushButton):
                 background: rgba(255,255,255,0.02);
                 border-color: rgba(255,255,255,0.04);
             }
+            QPushButton:focus {
+                border: 2px solid rgba(182,196,255,0.56);
+            }
         """)
+        self._sync_semantics()
+
+    def _sync_semantics(self) -> None:
+        label = "Quitar de Me gusta" if self._liked else "Marcar como Me gusta"
+        self.setAccessibleName(label)
+        self.setToolTip(label)
 
     def set_liked(self, liked: bool):
         liked = bool(liked)
         if liked != self._liked:
             self._liked = liked
+            self.setChecked(liked)
+            self._sync_semantics()
             self.update()
 
     def is_liked(self) -> bool:
         return self._liked
 
     def paintEvent(self, _event):
+        super().paintEvent(_event)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = QPainterPath()
@@ -128,9 +154,11 @@ class _KaraokeToggleBtn(QPushButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._active = False
+        self.setCheckable(True)
         self.setFixedSize(40, 40)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Letra sincronizada (ventana flotante)")
+        self.setAccessibleName("Mostrar letra sincronizada")
         self.setStyleSheet("""
             QPushButton {
                 background: rgba(255,255,255,0.035);
@@ -141,18 +169,26 @@ class _KaraokeToggleBtn(QPushButton):
                 background: rgba(182,196,255,0.10);
                 border-color: rgba(182,196,255,0.28);
             }
+            QPushButton:focus {
+                border: 2px solid rgba(182,196,255,0.56);
+            }
         """)
 
     def set_active(self, active: bool):
         active = bool(active)
         if active != self._active:
             self._active = active
+            self.setChecked(active)
+            self.setAccessibleName(
+                "Ocultar letra sincronizada" if active else "Mostrar letra sincronizada"
+            )
             self.update()
 
     def is_active(self) -> bool:
         return self._active
 
     def paintEvent(self, _event):
+        super().paintEvent(_event)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         color = qcol(C.PRI if (self._active or self.underMouse()) else C.TEXT_DIM)
@@ -174,6 +210,9 @@ class ToggleSwitch(QWidget):
         self._pos = 1.0 if self._checked else 0.0
         self.setFixedSize(46, 26)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setAccessibleName("Activar o desactivar opción")
+        self.setAccessibleDescription("Desactivado")
         self._anim = HiFpsAnimation(self, setter=self._set_knob)
         self._anim.setDuration(150)
         self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
@@ -185,6 +224,7 @@ class ToggleSwitch(QWidget):
         value = bool(value)
         changed = value != self._checked
         self._checked = value
+        self.setAccessibleDescription("Activado" if value else "Desactivado")
         self._anim.stop()
         self._anim.setStartValue(self._pos)
         self._anim.setEndValue(1.0 if value else 0.0)
@@ -205,6 +245,13 @@ class ToggleSwitch(QWidget):
         if self.isEnabled() and event.button() == Qt.MouseButton.LeftButton:
             self.setChecked(not self._checked, emit=True)
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if self.isEnabled() and event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.setChecked(not self._checked, emit=True)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def paintEvent(self, event):
         from PyQt6.QtGui import QColor
@@ -236,6 +283,11 @@ class ToggleSwitch(QWidget):
         knob = qcol(C.WHITE) if self.isEnabled() else qcol("#94A3B8")
         p.setBrush(knob)
         p.drawEllipse(QRectF(x, r.top() + 3, d, d))
+        if self.hasFocus():
+            focus_pen = QPen(qcol(C.PRI), 2)
+            p.setPen(focus_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r, radius, radius)
 
 
 __all__ = [

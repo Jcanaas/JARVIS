@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,14 @@ class AppSettingsTests(unittest.TestCase):
         # Fresh import state for each test — reset module cache
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
+        # set() now refuses to write unless JARVIS_REAL_SESSION=1 (guards the
+        # real user's config against stray scripts/tests — see
+        # NOTE_settings_persistence.md). Every test here always patches
+        # _FILE to a temp path first, so opting in is safe: it never touches
+        # the real %LOCALAPPDATA%\Jarvis file.
+        env_patcher = patch.dict(os.environ, {"JARVIS_REAL_SESSION": "1"})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
 
     def test_get_returns_default_for_missing_key(self):
         with patch("actions.app_settings._FILE") as mock_file, \
@@ -119,6 +128,35 @@ class AppSettingsTests(unittest.TestCase):
             result = app_settings.get("kept_key")
 
             self.assertEqual(result, "kept_value")
+
+    def test_set_does_not_clobber_key_written_after_cache_populated(self):
+        """Regression test for the real recurring bug: set() used to reuse a
+        stale module-level cache as the base dict, so any key that appeared
+        on disk AFTER the cache was first loaded got silently deleted on the
+        next write. set() must always re-read disk fresh before merging."""
+        real_file = Path(self.temp_dir.name) / "app_settings.json"
+        with patch("actions.app_settings._FILE", real_file), \
+             patch("actions.app_settings._BACKUP_FILE", None):
+            from actions import app_settings
+            app_settings._cache = None
+
+            # Populate the read cache with an early on-disk state.
+            app_settings.set("first_key", "first_value")
+            app_settings.get("first_key")
+
+            # Simulate another writer (a restart, another process) adding a
+            # key directly on disk, behind this process's cached back.
+            data = json.loads(real_file.read_text(encoding="utf-8"))
+            data["other_writer_key"] = "other_writer_value"
+            real_file.write_text(json.dumps(data), encoding="utf-8")
+
+            # This process's cache is still stale (doesn't know about
+            # other_writer_key). Its next set() must not lose it.
+            app_settings.set("first_key", "updated_value")
+
+            on_disk = json.loads(real_file.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["first_key"], "updated_value")
+            self.assertEqual(on_disk["other_writer_key"], "other_writer_value")
 
     def test_load_handles_invalid_json(self):
         with patch("actions.app_settings._FILE") as mock_file:

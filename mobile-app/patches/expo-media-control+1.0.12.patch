@@ -1,0 +1,48 @@
+diff --git a/node_modules/expo-media-control/android/src/main/java/expo/modules/mediacontrol/MediaPlaybackService.kt b/node_modules/expo-media-control/android/src/main/java/expo/modules/mediacontrol/MediaPlaybackService.kt
+index d234e79..3adb31f 100644
+--- a/node_modules/expo-media-control/android/src/main/java/expo/modules/mediacontrol/MediaPlaybackService.kt
++++ b/node_modules/expo-media-control/android/src/main/java/expo/modules/mediacontrol/MediaPlaybackService.kt
+@@ -75,6 +75,13 @@ class MediaPlaybackService : MediaBrowserServiceCompat() {
+   // Configuration options
+   private var skipInterval = 15.0 // Default 15 seconds
+   private var artworkLoadJob: Job? = null // Cancel stale artwork loads on track change
++
++  // Accent colour for the notification, taken from the `color`/`colorized`
++  // metadata fields. Those exist in the module's TS types but were never
++  // applied on Android, so the notification always rendered on the system's
++  // default background instead of the artwork's colour.
++  private var notificationColor: Int? = null
++  private var notificationColorized = false
+   private var capabilities: List<String>? = null // null = all enabled (backward compat)
+   private var compactCapabilities: List<String>? = null
+   
+@@ -375,6 +382,14 @@ class MediaPlaybackService : MediaBrowserServiceCompat() {
+   fun updateMetadata(metadata: Map<String, Any>) {
+     val builder = MediaMetadataCompat.Builder()
+ 
++    // Notification tint. Parsed here (not into MediaMetadataCompat, which has
++    // no colour key) and applied when the notification is built.
++    notificationColorized = (metadata["colorized"] as? Boolean) ?: false
++    notificationColor = (metadata["color"] as? String)?.let { raw ->
++      try { android.graphics.Color.parseColor(if (raw.startsWith("#")) raw else "#$raw") }
++      catch (e: IllegalArgumentException) { null }
++    }
++
+     metadata["title"]?.let { builder.putString(MediaMetadataCompat.METADATA_KEY_TITLE, it.toString()) }
+     metadata["artist"]?.let { builder.putString(MediaMetadataCompat.METADATA_KEY_ARTIST, it.toString()) }
+     metadata["album"]?.let { builder.putString(MediaMetadataCompat.METADATA_KEY_ALBUM, it.toString()) }
+@@ -542,6 +557,14 @@ class MediaPlaybackService : MediaBrowserServiceCompat() {
+       .setShowWhen(false)
+       .setContentIntent(contentPendingIntent)
+ 
++    // Colourise from the artwork's accent. setColorized only takes effect on
++    // a MediaStyle notification of an ongoing foreground service, which is
++    // exactly what this is.
++    notificationColor?.let { builder.setColor(it) }
++    if (notificationColorized) {
++      builder.setColorized(true)
++    }
++
+     // Add actions and compute compact view indices
+     val addedCommands = addNotificationActions(builder)
+     val compactIndices = computeCompactViewIndices(addedCommands)

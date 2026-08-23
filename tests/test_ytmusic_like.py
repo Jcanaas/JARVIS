@@ -6,6 +6,12 @@ from actions import ytmusic_headless
 
 
 class YTMusicLikeTests(unittest.TestCase):
+    def setUp(self):
+        with ytmusic._LIKED_VIDEO_IDS_LOCK:
+            ytmusic._LIKED_VIDEO_IDS_CACHE.update(
+                {"loaded": False, "ts": 0.0, "ids": frozenset()}
+            )
+
     @patch("actions.ytmusic._get_ytmusic")
     def test_reads_exact_song_like_status(self, get_ytmusic):
         client = Mock()
@@ -18,6 +24,83 @@ class YTMusicLikeTests(unittest.TestCase):
         get_ytmusic.return_value = client
 
         self.assertTrue(ytmusic.get_song_like_status("song-id"))
+
+    @patch("actions.ytmusic._get_ytmusic")
+    def test_reads_like_status_from_requested_counterpart(self, get_ytmusic):
+        client = Mock()
+        client.get_watch_playlist.return_value = {
+            "tracks": [
+                {
+                    "videoId": "canonical-song-id",
+                    "likeStatus": "INDIFFERENT",
+                    "counterpart": {
+                        "videoId": "requested-video-id",
+                        "likeStatus": "LIKE",
+                    },
+                }
+            ]
+        }
+        get_ytmusic.return_value = client
+
+        self.assertTrue(ytmusic.get_song_like_status("requested-video-id"))
+
+    @patch("actions.ytmusic._get_ytmusic")
+    def test_missing_watch_song_uses_authoritative_liked_library(self, get_ytmusic):
+        client = Mock()
+        client.get_watch_playlist.return_value = {
+            "tracks": [{"videoId": "different-song-id", "likeStatus": "LIKE"}]
+        }
+        client.get_liked_songs.return_value = {"tracks": []}
+        get_ytmusic.return_value = client
+
+        self.assertFalse(ytmusic.get_song_like_status("requested-video-id"))
+
+    @patch("actions.ytmusic._get_ytmusic")
+    def test_missing_watch_status_uses_authoritative_liked_library(self, get_ytmusic):
+        client = Mock()
+        client.get_watch_playlist.return_value = {
+            "tracks": [{"videoId": "requested-video-id"}]
+        }
+        client.get_liked_songs.return_value = {"tracks": []}
+        get_ytmusic.return_value = client
+
+        self.assertFalse(ytmusic.get_song_like_status("requested-video-id"))
+
+    @patch("actions.ytmusic._get_ytmusic")
+    def test_falls_back_to_liked_library_when_watch_parser_fails(self, get_ytmusic):
+        client = Mock()
+        client.get_watch_playlist.side_effect = KeyError("endpoint")
+        client.get_liked_songs.return_value = {
+            "tracks": [
+                {
+                    "videoId": "requested-video-id",
+                    "title": "Liked song",
+                    "likeStatus": "LIKE",
+                }
+            ]
+        }
+        get_ytmusic.return_value = client
+
+        self.assertTrue(ytmusic.get_song_like_status("requested-video-id"))
+        client.get_liked_songs.assert_called_once_with(limit=None)
+
+    @patch("actions.ytmusic._get_ytmusic")
+    def test_uses_fresh_liked_library_cache_before_broken_watch_endpoint(
+        self, get_ytmusic
+    ):
+        client = Mock()
+        get_ytmusic.return_value = client
+        with ytmusic._LIKED_VIDEO_IDS_LOCK:
+            ytmusic._LIKED_VIDEO_IDS_CACHE.update(
+                {
+                    "loaded": True,
+                    "ts": ytmusic.time.monotonic(),
+                    "ids": frozenset({"requested-video-id"}),
+                }
+            )
+
+        self.assertTrue(ytmusic.get_song_like_status("requested-video-id"))
+        client.get_watch_playlist.assert_not_called()
 
     @patch("actions.ytmusic._get_ytmusic")
     def test_removes_like_with_indifferent_rating(self, get_ytmusic):
@@ -75,10 +158,15 @@ class YTMusicLikeTests(unittest.TestCase):
         _worker,
         _prefetch,
     ):
-        ytmusic_headless._play_video("song-id", "Song", "Artist")
+        with patch("actions.stream_proxy.serve", return_value="http://127.0.0.1:1/s/tok") as serve:
+            ytmusic_headless._play_video("song-id", "Song", "Artist")
 
+        # The prefetched URL is reused, but mpv is pointed at the loopback proxy:
+        # YouTube 403s the open-ended range ffmpeg opens a CDN URL with.
+        serve.assert_called_once()
+        self.assertEqual(serve.call_args.args[0], "https://cdn.test/audio.webm")
         ipc_request.assert_called_once_with(
-            ["loadfile", "https://cdn.test/audio.webm", "replace"]
+            ["loadfile", "http://127.0.0.1:1/s/tok", "replace"]
         )
 
     @patch("actions.ytmusic_headless._send_command")

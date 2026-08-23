@@ -4,7 +4,8 @@ from .music import MusicModePanelV2, FileDropZone, _CommandInput, _SeekSlider, S
 from .youtube import YouTubeModePanel
 from .movies import MoviesModePanel, AnimeModePanel
 from .tv import TVModePanel
-from .games import GamesModePanel
+from .games import GamesModePanel, GamesHubPanel
+from .emulators import EmulatorsModePanel, LibraryModePanel
 from .calendar import CalendarModePanel
 from .settings import SettingsModePanel
 from .cardtrader import CardTraderModePanel
@@ -16,7 +17,8 @@ __all__ = [
     'YouTubeModePanel',
     'MoviesModePanel', 'AnimeModePanel',
     'TVModePanel',
-    'GamesModePanel',
+    'GamesModePanel', 'GamesHubPanel',
+    'EmulatorsModePanel', 'LibraryModePanel',
     'CalendarModePanel',
     'SettingsModePanel',
     'CardTraderModePanel',

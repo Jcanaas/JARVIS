@@ -162,6 +162,7 @@ class SearchGlowInput(QFrame):
 
         self._line = QLineEdit(text, self)
         self._line.setPlaceholderText(placeholder)
+        self._line.setAccessibleName(placeholder or "Buscar")
         self._line.setFrame(False)
         self._line.setTextMargins(36, 0, 16 if not self._show_filter else 40, 0)
         self._line.setStyleSheet(f"""
@@ -220,10 +221,25 @@ class SearchGlowInput(QFrame):
         self._spin_anim.setLoopCount(-1)
         self._spin_anim.setEasingCurve(QEasingCurve.Type.Linear)
         self._spin_anim.valueChanged.connect(self._set_filter_angle)
-        self._spin_anim.start()
 
         self._update_children_geometry()
         self._update_state()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._filter_icon is not None and self._spin_anim.state() != QAbstractAnimation.State.Running:
+            self._spin_anim.start()
+        self._update_state()
+
+    def hideEvent(self, event):
+        for animation in (
+            self._angle_anim,
+            self._blue_anim,
+            self._pulse_anim,
+            self._spin_anim,
+        ):
+            animation.stop()
+        super().hideEvent(event)
 
     def sizeHint(self):
         return QSize(self.CANVAS_W, self.CANVAS_H)

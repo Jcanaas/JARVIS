@@ -112,6 +112,7 @@ class MainWindow(QMainWindow):
     _state_sig = pyqtSignal(str)
     _playback_sig = pyqtSignal(dict)
     _playback_like_sig = pyqtSignal(str, bool, str)
+    _music_volume_sig = pyqtSignal(int)
     _download_sig = pyqtSignal(dict)
     _downloads_changed_sig = pyqtSignal(list)  # DownloadManager snapshot → UI thread
     _whatsapp_chat_sig = pyqtSignal(str)
@@ -126,6 +127,8 @@ class MainWindow(QMainWindow):
     _translate_start_sig = pyqtSignal(str, float)
     _translate_stop_sig  = pyqtSignal()
     _translate_text_sig  = pyqtSignal(str)
+    _clipboard_hotkey_sig = pyqtSignal()
+    _clipboard_result_sig = pyqtSignal(str, str)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -243,6 +246,7 @@ class MainWindow(QMainWindow):
         self._state_sig.connect(self._apply_state)
         self._playback_sig.connect(self._apply_playback)
         self._playback_like_sig.connect(self._apply_playback_like)
+        self._music_volume_sig.connect(self._apply_music_volume)
         self._download_sig.connect(self._apply_download_state)
         self._downloads_changed_sig.connect(self._downloads_list.render)
         self._whatsapp_chat_sig.connect(self._open_whatsapp)
@@ -257,6 +261,8 @@ class MainWindow(QMainWindow):
         self._translate_start_sig.connect(self._start_screen_translate)
         self._translate_stop_sig.connect(self._stop_screen_translate)
         self._translate_text_sig.connect(self._apply_translate_text)
+        self._clipboard_hotkey_sig.connect(self._on_clipboard_hotkey)
+        self._clipboard_result_sig.connect(self._apply_clipboard_result)
 
         # Persistent downloads: the manager fires its listener on a worker
         # thread, so bounce the snapshot onto the Qt thread via a signal. Then
@@ -297,6 +303,7 @@ class MainWindow(QMainWindow):
         self._play_buffering = False
         self._play_state = "stopped"
         self._play_video_id = ""
+        self._play_thumbnail = ""
         self._play_liked = False
         self._like_pending = False   # True while a set_like request is in flight
         self._play_position_anchor = 0.0
@@ -309,6 +316,11 @@ class MainWindow(QMainWindow):
         self._music_duck_step = 2
         self._translate_overlay: "_TranslateOverlayWindow | None" = None
         self._translate_stop_flag: "threading.Event | None" = None
+        self._clipboard_overlay: "_ClipboardIntelOverlayWindow | None" = None
+        self._clipboard_hotkey = None
+        from actions.global_hotkey import GlobalHotkey
+        self._clipboard_hotkey = GlobalHotkey(lambda: self._clipboard_hotkey_sig.emit())
+        self._clipboard_hotkey.start()
         self._music_duck_active = False
         self._music_duck_should_restore = False
         self._music_duck_timer = QTimer(self)
@@ -316,9 +328,10 @@ class MainWindow(QMainWindow):
         self._music_duck_timer.timeout.connect(self._step_music_duck)
         self._playback_anim_timer = QTimer(self)
         self._playback_anim_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._playback_anim_timer.setInterval(6)  # ~180 fps; el tick es delta-time (anclado a monotonic)
+        # A progress bar gains nothing from a 166-180 Hz wake-up loop. 30 Hz is
+        # visually smooth and the timer stays stopped whenever audio is idle.
+        self._playback_anim_timer.setInterval(33)
         self._playback_anim_timer.timeout.connect(self._tick_playback_progress)
-        self._playback_anim_timer.start()
         self._seek_timer = QTimer(self)
         self._seek_timer.setSingleShot(True)
         self._seek_timer.timeout.connect(self._on_seek)
@@ -593,7 +606,7 @@ class MainWindow(QMainWindow):
             "Movies": ("Películas", "Streaming via torrents"),
             "Anime": ("Anime", "Manga y series japonesas"),
             "TV": ("TV", "Canales en directo"),
-            "Games": ("Juegos", "SteamDB · FitGirl Repacks"),
+            "Games": ("Juegos", "SteamDB · Repacks · Emuladores"),
             "Calendar": ("Calendario", "Google Calendar"),
             "CardTrader": ("Cartas Magic", "CardTrader"),
             "Ajustes": ("Ajustes", "Configuración de la app"),
@@ -692,7 +705,7 @@ class MainWindow(QMainWindow):
         self._set_mode_combo("Games")
         self._apply_right_panel_visibility()
         if self._games_panel is None:
-            self._games_panel = GamesModePanel(parent=self)
+            self._games_panel = GamesHubPanel(parent=self)
             self._center_stack.addWidget(self._games_panel)
         self._center_stack.setCurrentWidget(self._games_panel)
         self._center_stack.setVisible(True)
@@ -1223,11 +1236,13 @@ class MainWindow(QMainWindow):
         # Track info + slider
         info = QVBoxLayout(); info.setSpacing(4)
         self._track_lbl = QLabel("— Ninguna canción —")
+        self._track_lbl.setAccessibleName("Canción actual")
         self._track_lbl.setFont(QFont(FONT_UI, 10, QFont.Weight.Bold))
         self._track_lbl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
         self._slider = _SeekSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(0, 100000)
         self._slider.setValue(0)
+        self._slider.setAccessibleName("Posición de reproducción")
         self._slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self._slider.setStyleSheet(
             "QSlider::groove:horizontal { height:4px; background:rgba(255,255,255,0.12); border-radius:2px; }"
@@ -1241,16 +1256,19 @@ class MainWindow(QMainWindow):
 
         # Time label
         self._time_lbl = QLabel("--:-- / --:--")
+        self._time_lbl.setAccessibleName("Tiempo de reproducción")
         self._time_lbl.setFont(QFont(FONT_UI, 9))
         self._time_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         lay.addWidget(self._time_lbl)
 
         # Volume control
         self._pb_vol_icon = QLabel()
+        self._pb_vol_icon.setAccessibleName("Volumen")
         self._pb_vol_icon.setPixmap(_line_icon("volume", C.TEXT_DIM, 16).pixmap(16, 16))
         lay.addWidget(self._pb_vol_icon)
         self._pb_volume = QSlider(Qt.Orientation.Horizontal)
         self._pb_volume.setRange(0, 100)
+        self._pb_volume.setAccessibleName("Volumen de la música")
         self._pb_volume.setValue(int(app_settings.get("music_default_volume", 100)))
         self._pb_volume.setFixedWidth(90)
         self._pb_volume.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1288,11 +1306,11 @@ class MainWindow(QMainWindow):
     def _emit_playback_cmd(self, action: str, params: dict | None = None):
         if self.on_playback_command:
             try:
-                threading.Thread(target=self.on_playback_command, args=(action, params or {}), daemon=True).start()
+                self.on_playback_command(action, params or {})
             except Exception:
                 pass
 
-    def _set_music_volume(self, level: int):
+    def _apply_music_volume(self, level: int) -> int:
         try:
             lvl = max(0, min(100, int(level)))
         except Exception:
@@ -1300,6 +1318,17 @@ class MainWindow(QMainWindow):
         self._music_volume_level = lvl
         if not self._music_duck_active and not self._music_duck_should_restore:
             self._music_volume_restore = lvl
+        control = getattr(self, "_pb_volume", None)
+        if control is not None and control.value() != lvl:
+            control.blockSignals(True)
+            try:
+                control.setValue(lvl)
+            finally:
+                control.blockSignals(False)
+        return lvl
+
+    def _set_music_volume(self, level: int):
+        lvl = self._apply_music_volume(level)
         self._emit_playback_cmd("volume", {"level": lvl})
 
     def _step_music_duck(self):
@@ -1365,6 +1394,13 @@ class MainWindow(QMainWindow):
             self._play_position_anchor = float(pos)
             self._play_position_anchor_ts = time.monotonic()
             self._emit_playback_cmd('seek', {'position': pos})
+
+    def _set_playback_animation_active(self, active: bool) -> None:
+        timer = self._playback_anim_timer
+        if active and not timer.isActive():
+            timer.start()
+        elif not active and timer.isActive():
+            timer.stop()
 
     def _tick_playback_progress(self):
         if (
@@ -1445,7 +1481,9 @@ class MainWindow(QMainWindow):
         ready: bool | None = None,
         buffering: bool = False,
         state: str = "",
+        thumbnail: str = "",
     ):
+        self._play_thumbnail = thumbnail
         self._play_title = title
         self._play_artists = artists
         self._play_position = position
@@ -1460,18 +1498,21 @@ class MainWindow(QMainWindow):
             else "paused" if self._play_ready
             else "stopped"
         ))
-        if video_id and video_id != self._play_video_id:
+        video_id = str(video_id or "")
+        if video_id != self._play_video_id:
             self._play_video_id = video_id
             self._play_liked = False
             self._like_pending = False   # track changed → no pending op for it
             self._pb_like.set_liked(False)
-            self._pb_like.setEnabled(liked is not None)
+            self._pb_like.setEnabled(bool(video_id) and liked is not None)
             self._pb_like.setToolTip(
-                "Comprobando Me gusta..." if liked is None else "Marcar como Me gusta"
+                "Comprobando Me gusta..."
+                if video_id and liked is None
+                else "Marcar como Me gusta"
             )
         # Don't let the 1s poller override the button while the user's like
         # request is still in flight (avoids the toggle flickering back).
-        if liked is not None and not self._like_pending:
+        if video_id and liked is not None and not self._like_pending:
             self._play_liked = bool(liked)
             self._pb_like.set_liked(self._play_liked)
             self._pb_like.setToolTip(
@@ -1529,10 +1570,13 @@ class MainWindow(QMainWindow):
             playing and self._play_ready and not self._play_buffering
             and self._play_state == "playing"
         )
+        self._set_playback_animation_active(progressing and bool(title))
         self.hud.music_playing = progressing and bool(title)
         if self._music_panel is not None and hasattr(self._music_panel, "update_now_playing"):
             try:
-                self._music_panel.update_now_playing(title, artists, playing)
+                self._music_panel.update_now_playing(
+                    title, artists, playing, video_id=video_id
+                )
             except Exception:
                 pass
         if self._music_float is not None:
@@ -1629,6 +1673,59 @@ class MainWindow(QMainWindow):
     def _apply_translate_text(self, text: str) -> None:
         if self._translate_overlay is not None:
             self._translate_overlay.update_text(text)
+
+    def _on_clipboard_hotkey(self) -> None:
+        """Ctrl+Alt+C pressed (fired via _clipboard_hotkey_sig from the
+        global-hotkey thread — always runs on the Qt thread here)."""
+        text = (QApplication.clipboard().text() or "").strip()
+
+        if self._clipboard_overlay is not None:
+            self._clipboard_overlay.close()
+            self._clipboard_overlay = None
+
+        overlay = _ClipboardIntelOverlayWindow(
+            on_close=self._close_clipboard_overlay,
+            preview_text=(text[:200] + "…") if len(text) > 200 else text,
+        )
+        overlay.button("translate").clicked.connect(lambda: self._run_clipboard_action("translate", text))
+        overlay.button("summarize").clicked.connect(lambda: self._run_clipboard_action("summarize", text))
+        overlay.button("explain").clicked.connect(lambda: self._run_clipboard_action("explain", text))
+        overlay.button("fix").clicked.connect(lambda: self._run_clipboard_action("fix", text))
+
+        pos = QCursor.pos()
+        overlay.move(pos.x() + 12, pos.y() + 12)
+        overlay.show()
+        self._clipboard_overlay = overlay
+
+    def _close_clipboard_overlay(self) -> None:
+        if self._clipboard_overlay is not None:
+            self._clipboard_overlay.close()
+            self._clipboard_overlay = None
+
+    def _run_clipboard_action(self, action: str, text: str) -> None:
+        if not text:
+            if self._clipboard_overlay is not None:
+                self._clipboard_overlay.update_result("(portapapeles vacío)")
+            return
+        if self._clipboard_overlay is not None:
+            self._clipboard_overlay.set_loading()
+
+        def worker():
+            from actions import clipboard_intel
+            fn = {
+                "translate": clipboard_intel.translate,
+                "summarize": clipboard_intel.summarize,
+                "explain": clipboard_intel.explain,
+                "fix": clipboard_intel.fix,
+            }.get(action)
+            result = fn(text) if fn else ""
+            self._clipboard_result_sig.emit(action, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_clipboard_result(self, action: str, result: str) -> None:
+        if self._clipboard_overlay is not None:
+            self._clipboard_overlay.update_result(result)
 
 
 
@@ -1947,6 +2044,7 @@ class MainWindow(QMainWindow):
                 info.get('ready'),
                 bool(info.get('buffering', False)),
                 str(info.get('state') or ''),
+                str(info.get('thumbnail') or ''),
             )
         except Exception:
             pass
@@ -2082,6 +2180,7 @@ class JarvisUI:
         ready: bool | None = None,
         buffering: bool = False,
         state: str = "",
+        thumbnail: str = "",
     ):
         try:
             # Emit via MainWindow signal to ensure update happens on the GUI thread
@@ -2096,6 +2195,7 @@ class JarvisUI:
                 'ready': ready,
                 'buffering': buffering,
                 'state': state,
+                'thumbnail': thumbnail,
             })
         except Exception:
             pass
@@ -2132,6 +2232,20 @@ class JarvisUI:
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
+        # NOTE: deliberately NOT routed through actions.event_bus.log() here —
+        # ActionEvent.LOG already has a subscriber (below, in __init__) that
+        # calls write_log() in response to a LOG event. Emitting one from
+        # inside the other creates an infinite feedback loop (write_log ->
+        # event_bus.log -> that subscriber -> write_log -> ...) that only
+        # stops when it hits Python's recursion limit, silently swallowed by
+        # a bare except — this happened, spamming ~250 duplicate lines per
+        # call. The LAN dashboard mirror uses this direct callback instead.
+        cb = getattr(self, "_dashboard_log_cb", None)
+        if cb is not None:
+            try:
+                cb(text)
+            except Exception:
+                pass
 
     def set_download_state(self, state: dict):
         try:
@@ -2221,7 +2335,10 @@ class JarvisUI:
 
     def set_music_volume(self, level: int):
         try:
-            self._win._set_music_volume(level)
+            # Backend-to-UI synchronization must not emit another volume command.
+            # Callers include the playback worker thread, and _apply_music_volume
+            # writes to the volume widget — so it has to run on the GUI thread.
+            self._win._music_volume_sig.emit(int(level))
         except Exception:
             pass
 

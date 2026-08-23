@@ -10,6 +10,9 @@ from .inputs import *
 from .layouts import FlowLayout
 from .overlays import _CornerGrip, _FloatOverlay, _DetachWindow, CameraLiveWidget
 from .translate_overlay import _TranslateOverlayWindow
+from .clipboard_intel_overlay import _ClipboardIntelOverlayWindow
+from .retro import RetroScreen, KEYMAP_HELP, keymap_help
+from .controls import ControlsDialog
 
 __all__ = [
     'HiFpsAnimation', 'ANIM_INTERVAL_MS',
@@ -24,4 +27,6 @@ __all__ = [
     'FlowLayout',
     '_CornerGrip', '_FloatOverlay', '_DetachWindow', 'CameraLiveWidget',
     '_TranslateOverlayWindow',
+    '_ClipboardIntelOverlayWindow',
+    'RetroScreen', 'KEYMAP_HELP', 'keymap_help', 'ControlsDialog',
 ]

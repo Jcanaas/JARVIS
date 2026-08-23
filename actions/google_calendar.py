@@ -44,6 +44,38 @@ def _parse_dt(dt_str: str) -> str:
     return dt.isoformat()
 
 
+def _normalize_event(e: Dict) -> Dict:
+    """Flatten a Google event into the shape the UIs consume.
+
+    All-day events carry `start.date` instead of `start.dateTime`, so callers
+    can't tell them apart from a timed event without the `all_day` flag.
+    """
+    start = e.get("start", {}) or {}
+    end   = e.get("end", {}) or {}
+    return {
+        "id":          e.get("id"),
+        "summary":     e.get("summary", "(sin título)"),
+        "start":       start.get("dateTime") or start.get("date"),
+        "end":         end.get("dateTime") or end.get("date"),
+        "all_day":     bool(start.get("date") and not start.get("dateTime")),
+        "location":    e.get("location", ""),
+        "description": e.get("description", ""),
+        "attendees":   e.get("attendees", []) or [],
+        "link":        e.get("htmlLink", ""),
+    }
+
+
+def _attendee_bodies(attendees) -> List[Dict]:
+    """Accept either plain e-mail strings or Google-shaped dicts."""
+    out: List[Dict] = []
+    for a in attendees or []:
+        email = a.get("email") if isinstance(a, dict) else a
+        email = str(email or "").strip()
+        if email:
+            out.append({"email": email})
+    return out
+
+
 def list_events(max_results: int = 10, calendar_id: str = "primary") -> List[Dict]:
     svc   = _get_service()
     now   = datetime.now(timezone.utc).isoformat()
@@ -54,18 +86,31 @@ def list_events(max_results: int = 10, calendar_id: str = "primary") -> List[Dic
         singleEvents=True,
         orderBy="startTime",
     ).execute()
-    items = resp.get("items", [])
-    out   = []
-    for e in items:
-        start = e.get("start", {})
-        out.append({
-            "id":       e.get("id"),
-            "summary":  e.get("summary", "(sin título)"),
-            "start":    start.get("dateTime") or start.get("date"),
-            "location": e.get("location", ""),
-            "link":     e.get("htmlLink", ""),
-        })
-    return out
+    return [_normalize_event(e) for e in resp.get("items", [])]
+
+
+def list_events_range(
+    time_min: str,
+    time_max: str,
+    calendar_id: str = "primary",
+    max_results: int = 2500,
+) -> List[Dict]:
+    """Every event between two RFC3339 instants — what a month/day grid needs.
+
+    `list_events` can't serve that view: it always starts at "now" and caps by
+    count, so past days in the current month come back empty and a busy month
+    gets truncated.
+    """
+    svc  = _get_service()
+    resp = svc.events().list(
+        calendarId=calendar_id,
+        timeMin=time_min,
+        timeMax=time_max,
+        maxResults=max_results,
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+    return [_normalize_event(e) for e in resp.get("items", [])]
 
 
 def create_event(
@@ -75,6 +120,7 @@ def create_event(
     description: str = "",
     location: str = "",
     calendar_id: str = "primary",
+    attendees: Optional[List] = None,
 ) -> Dict:
     svc        = _get_service()
     start_rfc  = _parse_dt(start)
@@ -92,8 +138,45 @@ def create_event(
         "start":       {"dateTime": start_rfc},
         "end":         {"dateTime": end_rfc},
     }
+    guests = _attendee_bodies(attendees)
+    if guests:
+        body["attendees"] = guests
     event = svc.events().insert(calendarId=calendar_id, body=body).execute()
     return {"id": event.get("id"), "summary": event.get("summary"), "link": event.get("htmlLink")}
+
+
+def update_event(
+    event_id: str,
+    summary: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    description: Optional[str] = None,
+    location: Optional[str] = None,
+    attendees: Optional[List] = None,
+    calendar_id: str = "primary",
+) -> Dict:
+    """Patch an existing event. Only the fields passed are touched.
+
+    `attendees=[]` clears the guest list, while `attendees=None` leaves it
+    alone — so "no guests given" and "remove every guest" stay distinguishable.
+    """
+    svc = _get_service()
+    body: Dict[str, Any] = {}
+    if summary is not None:
+        body["summary"] = summary
+    if description is not None:
+        body["description"] = description
+    if location is not None:
+        body["location"] = location
+    if start:
+        body["start"] = {"dateTime": _parse_dt(start)}
+    if end:
+        body["end"] = {"dateTime": _parse_dt(end)}
+    if attendees is not None:
+        body["attendees"] = _attendee_bodies(attendees)
+
+    event = svc.events().patch(calendarId=calendar_id, eventId=event_id, body=body).execute()
+    return _normalize_event(event)
 
 
 def delete_event(event_id: str, calendar_id: str = "primary") -> str:
@@ -111,17 +194,7 @@ def search_events(query: str, max_results: int = 10, calendar_id: str = "primary
         singleEvents=True,
         orderBy="startTime",
     ).execute()
-    items = resp.get("items", [])
-    out   = []
-    for e in items:
-        start = e.get("start", {})
-        out.append({
-            "id":      e.get("id"),
-            "summary": e.get("summary", "(sin título)"),
-            "start":   start.get("dateTime") or start.get("date"),
-            "link":    e.get("htmlLink", ""),
-        })
-    return out
+    return [_normalize_event(e) for e in resp.get("items", [])]
 
 
 def google_calendar(parameters: dict, speak=None) -> str:

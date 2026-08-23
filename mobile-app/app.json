@@ -1,0 +1,84 @@
+{
+  "expo": {
+    "name": "JARVIS",
+    "slug": "jarvis-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0A0C16",
+    "primaryColor": "#B6C4FF",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.jcanadas.jarvis",
+      "infoPlist": {
+        "NSCameraUsageDescription": "JARVIS usa la cámara para escanear el código QR de emparejamiento que muestra la app de escritorio."
+      }
+    },
+    "android": {
+      "package": "com.jcanadas.jarvis",
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#0A0C16",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "softwareKeyboardLayoutMode": "resize"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "JARVIS usa la cámara para escanear el código QR de emparejamiento."
+        }
+      ],
+      "expo-status-bar",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "JARVIS usa el micrófono para que puedas darle órdenes por voz desde el móvil."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#0A0C16"
+        }
+      ],
+      "expo-font",
+      "expo-asset",
+      "expo-notifications",
+      "@react-native-vector-icons/ionicons",
+      "expo-media-control",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "f4e9df3e-d3c7-4ca9-aa94-86306b4b295f"
+      }
+    }
+  }
+}
