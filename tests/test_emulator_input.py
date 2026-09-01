@@ -37,6 +37,31 @@ class InputProfileTests(unittest.TestCase):
             self.assertFalse(any(signal.startswith("xinput:ls")
                                  for signal in ps2.pad[direction]))
 
+    def test_3ds_exposes_face_shoulders_and_dpad_not_gbas_fallback_set(self):
+        # button_order() used to silently fall back to GBA's set for any
+        # console missing from _BUTTON_ORDERS — 3ds was missing, so its
+        # controls dialog showed GBA's buttons (no X/Y, wrong shoulder
+        # labels, no L2/R2/L3/R3-shaped layout) instead of its own.
+        threeds = dict(input_config.button_order("3ds"))
+        for button in ("up", "down", "left", "right", "a", "b", "x", "y", "l", "r", "start", "select"):
+            self.assertIn(button, threeds)
+        self.assertNotIn("l2", threeds)  # emulator_runtime.pad_layout("3ds")'s triggers=False
+
+    def test_3ds_circle_pad_keys_are_freed_from_button_bindings(self):
+        # Same treatment as n64/ps2: W/A/S/D drive the circle pad directly
+        # (Emulators.svelte's updateKeyboardStick(), mirroring
+        # ui/widgets/retro.py's _STICK_KEYS) and must not also be bound to a
+        # button, or a movement key would fire that button on every step.
+        threeds = input_config.defaults("3ds")
+        for button in ("y", "x", "r"):
+            self.assertNotIn(0x57, threeds.keyboard[button])  # Qt.Key_W
+            self.assertNotIn(0x41, threeds.keyboard[button])  # Qt.Key_A
+            self.assertNotIn(0x53, threeds.keyboard[button])  # Qt.Key_S
+            self.assertNotIn(0x44, threeds.keyboard[button])  # Qt.Key_D
+        for direction in ("up", "down", "left", "right"):
+            self.assertFalse(any(signal.startswith("xinput:ls")
+                                 for signal in threeds.pad[direction]))
+
     def test_ps2_uses_the_hardware_renderer(self):
         self.assertEqual(
             emulator_runtime.CORES["ps2"].options["pcsx2_renderer"],

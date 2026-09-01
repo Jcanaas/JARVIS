@@ -88,6 +88,11 @@ _BUTTON_ORDERS: dict[str, list[tuple[str, str]]] = {
     "ngpc": _TWO_BUTTON,
     "n64": _N64,
     "ps2": _PS2,
+    # Missing here fell through to _GBA's set (no X/Y, no L2/R2/L3/R3, and a
+    # mislabelled shoulder pair) — same face/shoulder/start/select shape as
+    # the 6-button consoles, no L2/R2/L3/R3 (matches emulator_runtime.py's
+    # pad_layout()'s triggers=False, stick_buttons=False for "3ds").
+    "3ds": _SIX_BUTTON,
 }
 
 # Compatibility for callers outside the emulator UI. New code must ask for a
@@ -221,17 +226,20 @@ def _profile_defaults(console_id: str) -> tuple[dict[str, list[int]],
         keyboard["l"], keyboard["r"] = [_KEY_A], [_KEY_S]
         pad["l"] = ["xinput:lb", "xinput:lt"]
         pad["r"] = ["xinput:rb", "xinput:rt"]
-    if console_id in ("n64", "ps2"):
-        # Those machines have a real analogue stick. Using it as a second
-        # D-pad as on handhelds would press both controls at the same time.
+    if console_id in ("n64", "ps2", "3ds"):
+        # Those machines have a real analogue stick (3DS's circle pad
+        # included). Using it as a second D-pad as on handhelds would press
+        # both controls at the same time.
         for direction in ("up", "down", "left", "right"):
             pad[direction] = [signal for signal in pad[direction]
                               if not signal.startswith("xinput:ls")]
         # W/A/S/D drive the left stick directly (see RetroScreen's dedicated
-        # stick handling) and must be free of button bindings, or pressing a
-        # movement key would also fire whatever button used to sit on it.
-        # The buttons that collided (Triangulo/Cuadrado on PS2, B on N64, and
-        # the right shoulder on both) move to C/V/E instead.
+        # stick handling, and Emulators.svelte's updateKeyboardStick() for
+        # the web UI's copy of it) and must be free of button bindings, or
+        # pressing a movement key would also fire whatever button used to
+        # sit on it. The buttons that collided (Triangulo/Cuadrado on PS2, B
+        # on N64, X/Y on 3DS, and the right shoulder on all three) move to
+        # C/V/E instead.
         if "y" in keyboard:
             keyboard["y"] = [_KEY_V]
         if "x" in keyboard:

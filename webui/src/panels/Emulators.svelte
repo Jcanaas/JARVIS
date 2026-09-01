@@ -380,74 +380,62 @@
     }
   }
 
+  // -- Input: keyboard-driven analog stick (W/A/S/D) -----------------------
+  // Ports ui/widgets/retro.py's RetroScreen._stick_keys_held/_STICK_KEYS
+  // exactly: full deflection (not gradual), and completely independent of
+  // the button remapping above — like legacy, it's checked only as a
+  // *fallback* when the same key isn't already bound to a button (below),
+  // which is what makes GBA's default R=W binding still win there while
+  // n64/ps2/3ds (which free W/A/S/D from any button in
+  // input_config.py's _profile_defaults specifically for this) get the
+  // stick instead. This replaces the on-screen mouse-drag stick that used
+  // to sit under the video — per user feedback, on a PC keyboard input
+  // beats a mouse-dragged on-screen control.
+  const STICK_KEYS = { KeyW: 'up', KeyS: 'down', KeyA: 'left', KeyD: 'right' }
+  const stickKeysHeld = new Set()
+
+  function updateKeyboardStick() {
+    const held = stickKeysHeld
+    const x = (held.has('right') ? 32767 : 0) - (held.has('left') ? 32767 : 0)
+    const y = (held.has('down') ? 32767 : 0) - (held.has('up') ? 32767 : 0)
+    api.sendEmulatorInput({
+      axes: [{ index: 0, axis: 0, value: x }, { index: 0, axis: 1, value: y }],
+    }).catch(() => {})
+  }
+
   function onKeydown(e) {
     if (!playing || controlsOpen) return
     const button = activeKeyMap[e.code]
-    if (!button || heldKeys.has(e.code)) return
-    heldKeys.add(e.code)
-    e.preventDefault()
-    sendButton(button, true)
+    if (button) {
+      if (heldKeys.has(e.code)) return
+      heldKeys.add(e.code)
+      e.preventDefault()
+      sendButton(button, true)
+      return
+    }
+    const direction = STICK_KEYS[e.code]
+    if (direction) {
+      e.preventDefault()
+      stickKeysHeld.add(direction)
+      updateKeyboardStick()
+    }
   }
 
   function onKeyup(e) {
     if (!playing || controlsOpen) return
     const button = activeKeyMap[e.code]
-    if (!button) return
-    heldKeys.delete(e.code)
-    e.preventDefault()
-    sendButton(button, false)
-  }
-
-  // -- Input: analog stick (touch/mouse drag) ------------------------------
-  // Only rendered when padLayout.sticks >= 1 (GBA/SNES have none). Kept
-  // on-screen even after removing the digital button pad above: unlike
-  // every digital button, the stick has no keyboard binding at all yet (the
-  // Fase B remapper only covers buttons), so this is currently the only way
-  // to move an analog stick from the desktop web panel.
-  let stickBase = $state()
-  let stickActive = $state(false)
-  let stickPos = $state({ x: 0, y: 0 })
-
-  function stickMove(clientX, clientY) {
-    const rect = stickBase.getBoundingClientRect()
-    const cx = rect.left + rect.width / 2
-    const cy = rect.top + rect.height / 2
-    const r = rect.width / 2
-    let dx = (clientX - cx) / r
-    let dy = (clientY - cy) / r
-    const mag = Math.hypot(dx, dy)
-    if (mag > 1) {
-      dx /= mag
-      dy /= mag
+    if (button) {
+      heldKeys.delete(e.code)
+      e.preventDefault()
+      sendButton(button, false)
+      return
     }
-    stickPos = { x: dx * r * 0.5, y: dy * r * 0.5 }
-    const value = (v) => Math.round(v * 32767)
-    api.sendEmulatorInput({
-      axes: [
-        { index: 0, axis: 0, value: value(dx) },
-        { index: 0, axis: 1, value: value(dy) },
-      ],
-    }).catch(() => {})
-  }
-
-  function stickStart(e) {
-    stickActive = true
-    stickMove(e.clientX, e.clientY)
-    e.target.setPointerCapture?.(e.pointerId)
-  }
-
-  function stickDrag(e) {
-    if (!stickActive) return
-    stickMove(e.clientX, e.clientY)
-  }
-
-  function stickEnd() {
-    if (!stickActive) return
-    stickActive = false
-    stickPos = { x: 0, y: 0 }
-    api.sendEmulatorInput({
-      axes: [{ index: 0, axis: 0, value: 0 }, { index: 0, axis: 1, value: 0 }],
-    }).catch(() => {})
+    const direction = STICK_KEYS[e.code]
+    if (direction) {
+      e.preventDefault()
+      stickKeysHeld.delete(direction)
+      updateKeyboardStick()
+    }
   }
 
   $effect(() => {
@@ -673,19 +661,7 @@
       </div>
 
       {#if padLayout.sticks >= 1}
-        <div class="pad">
-          <div
-            class="stick-base"
-            bind:this={stickBase}
-            onpointerdown={stickStart}
-            onpointermove={stickDrag}
-            onpointerup={stickEnd}
-            onpointercancel={stickEnd}
-          >
-            <div class="stick-knob" style={`transform: translate(${stickPos.x}px, ${stickPos.y}px)`}></div>
-          </div>
-          <span class="stick-hint">Stick analógico — arrastra con el ratón (todos los botones ya están en el teclado, ver 🎮)</span>
-        </div>
+        <span class="stick-hint">Stick analógico: W A S D</span>
       {/if}
     </div>
   {/if}
@@ -793,22 +769,13 @@
     flex: 1; min-height: 0; border-radius: var(--radius); overflow: hidden; background: #000;
     display: flex; align-items: center; justify-content: center;
   }
-  .stream { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
+  /* max-width/max-height alone only ever shrinks an <img> that's bigger
+     than its box — it never grows one that's smaller, which an emulator's
+     native frame (e.g. 3DS's ~400x480) always is next to a real window.
+     The video sat tiny in a sea of black until width/height:100% +
+     object-fit actually stretch it (up or down) to fill .video-wrap,
+     still preserving aspect ratio. */
+  .stream { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
 
-  .pad {
-    flex-shrink: 0; display: flex; align-items: center; gap: 12px;
-    padding: 8px 4px;
-  }
-
-  .stick-base {
-    width: 90px; height: 90px; border-radius: 50%;
-    background: var(--panel-2); border: 1px solid var(--border-a);
-    position: relative; touch-action: none; flex-shrink: 0;
-  }
-  .stick-knob {
-    position: absolute; top: 50%; left: 50%; width: 40px; height: 40px; margin: -20px;
-    border-radius: 50%; background: var(--pri-gho); border: 1px solid var(--pri);
-    pointer-events: none;
-  }
-  .stick-hint { color: var(--text-dim); font-size: 11.5px; }
+  .stick-hint { flex-shrink: 0; color: var(--text-dim); font-size: 11.5px; padding: 4px; }
 </style>
