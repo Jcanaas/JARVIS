@@ -25,6 +25,11 @@
   let status = $state(null) // last /api/emulator/status response
   let padLayout = $state({})
   let streamNonce = $state(0) // bumped on every start() so the <img> can't show a stale MJPEG connection from a previous game
+  // 3DS-only: the combined top+bottom frame shows the bottom (touch) screen
+  // on the PC too, which is redundant once it's mirrored to the phone via
+  // actions/lan_dashboard.py's /api/gamepad/screen — this crops it out of
+  // the desktop view without touching the stream itself.
+  let hideBottomScreen = $state(false)
   let actionError = $state('')
   let libraryError = $state('') // start() failed before the player mounted (e.g. missing PS2 BIOS)
   let biosBusy = $state(false)
@@ -254,6 +259,7 @@
     }
     playing = null
     status = null
+    hideBottomScreen = false
   }
 
   async function togglePause() {
@@ -633,6 +639,16 @@
           <button class="ghost" onclick={saveState} title="Guardar estado">💾</button>
           <button class="ghost" onclick={loadState} title="Cargar estado">📂</button>
           <button class="ghost" onclick={openControls} title="Controles">🎮</button>
+          {#if playing.console_id === '3ds'}
+            <button
+              class="ghost"
+              class:active={hideBottomScreen}
+              onclick={() => (hideBottomScreen = !hideBottomScreen)}
+              title={hideBottomScreen ? 'Mostrar pantalla táctil aquí también' : 'Ocultar pantalla táctil (ya la tienes en el móvil)'}
+            >
+              {hideBottomScreen ? '🖥️' : '📱🖥️'}
+            </button>
+          {/if}
           <button class="ghost" onclick={toggleFullscreen} title="Pantalla completa">⛶</button>
         </div>
       </div>
@@ -647,7 +663,7 @@
         />
       {/if}
 
-      <div class="video-wrap" bind:this={videoWrap}>
+      <div class="video-wrap" class:top-only={hideBottomScreen} bind:this={videoWrap}>
         {#key streamNonce}
           <img src={`/api/emulator/stream?_=${streamNonce}`} alt={playing.title} class="stream" />
         {/key}
@@ -771,6 +787,7 @@
     color: var(--text); width: 32px; height: 32px; cursor: pointer;
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   }
+  .ghost.active { background: var(--pri); border-color: var(--pri); }
 
   .empty { color: var(--text-med); font-size: 13px; padding: 24px; text-align: center; }
   .empty.error { color: var(--red); }
@@ -810,6 +827,25 @@
     display: flex; align-items: center; justify-content: center;
   }
   .stream { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
+  /* 3DS's combined frame is the top+bottom screens stacked vertically —
+     the top screen alone is exactly the top half, at double the combined
+     frame's aspect ratio (actions/emulator_frame.py's crop_bottom_screen_3ds
+     crops the bottom half the same way, by proportion not fixed pixels, so
+     this holds regardless of resolution_factor). Forcing the wrapper to
+     that aspect ratio and letting the *same* <img> (no new element — the
+     MJPEG connection must not be dropped just to toggle this) cover it
+     anchored to the top crops the bottom screen out with no JS math. */
+  .video-wrap.top-only {
+    /* Sized from width, not stretched to fill the flex column like the
+       normal full-frame view — showing half the vertical content should
+       take up roughly half the vertical space, not be blown back up to
+       the same height and lose detail to upscaling. */
+    flex: 0 1 auto; width: 100%; max-width: 100%; aspect-ratio: 5 / 3;
+  }
+  .video-wrap.top-only .stream {
+    width: 100%; height: 100%; max-width: none; max-height: none;
+    object-fit: cover; object-position: top;
+  }
 
   .pad {
     flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;

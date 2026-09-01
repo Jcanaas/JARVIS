@@ -10,7 +10,13 @@ import { api, gamepadScreenUrl } from "../api";
  * fraction across the rendered image is the same fraction across the real
  * cropped screen with no extra math. */
 const SCREEN_ASPECT = 4 / 3;
-const POLL_MS = 100; // ~10fps target — plenty for a screen only tapped, not watched
+// The 3DS's own bottom screen updates at up to 30fps like the top one, and
+// a real 3DS session measured server round-trips at ~5ms (checked directly
+// against actions/lan_dashboard.py's /api/gamepad/screen, 40 requests back
+// to back) — plenty of headroom to match that instead of visibly lagging
+// behind the top screen shown elsewhere (the desktop web panel, or a
+// second phone glance at the game).
+const POLL_MS = 33; // ~30fps
 
 /**
  * Mirrors the 3DS bottom (touch) screen on the phone and forwards taps/
@@ -20,9 +26,11 @@ const POLL_MS = 100; // ~10fps target — plenty for a screen only tapped, not w
  * snapshot instead of opening one long MJPEG connection — nothing here
  * reliably decodes multipart/x-mixed-replace the way a browser <img> does,
  * and polling a still image is a well-worn, reliable substitute at the
- * ~10fps this needs. Verified server-side separately: 40 consecutive
+ * ~30fps this needs. Verified server-side separately: 40 consecutive
  * requests all returned valid, consistent frames in ~5ms each — the
- * flicker seen on-device was never a backend problem.
+ * flicker seen on-device was never a backend problem, and there's plenty
+ * of headroom in that response time for a much higher poll rate than the
+ * original conservative 10fps.
  *
  * Uses expo-image, not React Native's core Image. Three things were tried
  * on core Image first, all still flickered on-device: a plain setInterval

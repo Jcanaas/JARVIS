@@ -422,7 +422,7 @@ function GamepadPad({
             </TouchableOpacity>
           )}
           {editMode && (
-            <Text style={styles.editHint}>Arrastra los grupos para moverlos, o su esquina para cambiar el tamaño</Text>
+            <Text style={styles.editHint}>Arrastra los grupos para moverlos, usa +/- para cambiar el tamaño</Text>
           )}
 
           {(layout.shoulders || layout.triggers) && (
@@ -494,10 +494,11 @@ function GamepadPad({
  * nothing by mistake. */
 const MIN_SCALE = 0.6;
 const MAX_SCALE = 1.9;
+const SCALE_STEP = 0.1;
 
 /**
  * Wraps one control group so it can be dragged to a device-local offset —
- * and, via the resize handle at its corner, scaled — in edit mode. Outside
+ * and, via the +/- buttons at its corner, scaled — in edit mode. Outside
  * edit mode it's a plain positioned+scaled View with no responder of its
  * own, so it never competes with GamepadPad's single-responder gameplay
  * handling (see PadButton's docstring for why that matters).
@@ -516,8 +517,6 @@ function Draggable({
 }) {
   const start = useRef<Offset>({ x: 0, y: 0 });
   const dragging = useRef(false);
-  const resizeStart = useRef({ x: 0, y: 0, scale: 1 });
-  const resizing = useRef(false);
 
   const onGrant = useCallback((e: any) => {
     dragging.current = true;
@@ -534,23 +533,13 @@ function Draggable({
 
   const onRelease = useCallback(() => { dragging.current = false; }, []);
 
-  const onResizeGrant = useCallback((e: any) => {
-    resizing.current = true;
-    resizeStart.current = { x: e.nativeEvent.pageX, y: e.nativeEvent.pageY, scale };
-  }, [scale]);
+  const shrink = useCallback(() => {
+    onResize(id, Math.max(MIN_SCALE, Math.round((scale - SCALE_STEP) * 100) / 100));
+  }, [id, onResize, scale]);
 
-  const onResizeMove = useCallback((e: any) => {
-    if (!resizing.current) return;
-    // Dragging the corner handle away from the group (down-right) grows it,
-    // toward it (up-left) shrinks it — the sum of both axes so the handle
-    // doesn't need to be dragged along one exact diagonal to work smoothly.
-    const dx = e.nativeEvent.pageX - resizeStart.current.x;
-    const dy = e.nativeEvent.pageY - resizeStart.current.y;
-    const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, resizeStart.current.scale + (dx + dy) / 160));
-    onResize(id, next);
-  }, [id, onResize]);
-
-  const onResizeRelease = useCallback(() => { resizing.current = false; }, []);
+  const grow = useCallback(() => {
+    onResize(id, Math.min(MAX_SCALE, Math.round((scale + SCALE_STEP) * 100) / 100));
+  }, [id, onResize, scale]);
 
   const positioned = [style, { transform: [{ translateX: offset.x }, { translateY: offset.y }, { scale }] }];
 
@@ -569,26 +558,20 @@ function Draggable({
       onResponderTerminate={onRelease}
     >
       {children}
-      <View
-        // The raw responder View API (unlike Touchable*/Pressable) doesn't
-        // support hitSlop, so the actual touchable area is padded out to a
-        // real finger-sized target (48x48) around the small visible circle,
-        // instead of relying on hitting that circle's own bounds exactly.
-        style={styles.resizeHandleHit}
-        // A separate, deeper responder wins over the drag handler above for
-        // touches that land on the handle itself (RN grants the responder
-        // to the deepest claimant), so touching the corner resizes instead
-        // of dragging the whole group.
-        onStartShouldSetResponder={() => true}
-        onMoveShouldSetResponder={() => true}
-        onResponderGrant={onResizeGrant}
-        onResponderMove={onResizeMove}
-        onResponderRelease={onResizeRelease}
-        onResponderTerminate={onResizeRelease}
-      >
-        <View style={styles.resizeHandle}>
-          <Ionicons name="resize" size={13} color="#08101F" />
-        </View>
+      {/* Tap +/- rather than a drag-to-resize handle: a corner drag gesture
+          nested inside this same View's own drag responder turned out
+          unreliable in practice on-device across several attempts (precise
+          hit-testing, negotiating which responder wins). Plain
+          TouchableOpacity taps use the exact same mechanism already proven
+          reliable for every other button in this file (close/edit/reset),
+          not a bespoke gesture. */}
+      <View style={styles.resizeControls} pointerEvents="box-none">
+        <TouchableOpacity style={styles.resizeBtn} onPress={shrink} hitSlop={10}>
+          <Ionicons name="remove" size={14} color="#08101F" />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.resizeBtn} onPress={grow} hitSlop={10}>
+          <Ionicons name="add" size={14} color="#08101F" />
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -672,14 +655,10 @@ const styles = StyleSheet.create({
   resetText: { color: C.textMed, fontSize: 11, fontWeight: "700" },
   editHint: { position: "absolute", top: 58, alignSelf: "center", color: C.textMed, fontSize: 11, opacity: 0.8 },
   draggable: { borderWidth: 1, borderColor: C.pri, borderStyle: "dashed", borderRadius: 12 },
-  // A real View (raw responder API) has no hitSlop, so the touchable region
-  // is this bigger transparent box — the small coloured circle inside it is
-  // only the visual, centred within it, not the hit target itself.
-  resizeHandleHit: {
-    position: "absolute", bottom: -24, right: -24, width: 48, height: 48,
-    alignItems: "center", justifyContent: "center", zIndex: 3,
+  resizeControls: {
+    position: "absolute", bottom: -16, right: -16, flexDirection: "row", gap: 6, zIndex: 3,
   },
-  resizeHandle: {
+  resizeBtn: {
     width: 28, height: 28, borderRadius: 14,
     backgroundColor: C.pri, borderWidth: 2, borderColor: C.bg,
     alignItems: "center", justifyContent: "center",
