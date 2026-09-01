@@ -174,6 +174,29 @@ CORES: dict[str, CoreSpec] = {
             "pcsx2_analog_mode1": "enabled",
         },
     ),
+    # Azahar (the Citra/Lime3DS successor) publishes an official libretro
+    # core on the same buildbot as everything else here. Boots and plays with
+    # OpenGL — verified against a real commercial dump on this machine, both
+    # screens correctly composited into one frame by the core's own
+    # "citra_layout_option" (default: top screen above bottom screen), so
+    # this needs no special dual-screen handling on the frontend side, the
+    # same single <img>/frame pipeline as every other console just works.
+    #
+    # OpenGL, not Vulkan: this core also supports Vulkan, but Vulkan+RADV
+    # crashes immediately on AMD GPUs on Arch Linux (a known upstream bug at
+    # the time this was written) — exactly this machine's iGPU. GL 4.3 is
+    # confirmed available here (see NOTE_webui_emulators_plan.md's Fase 1).
+    "3ds": CoreSpec(
+        key="3ds",
+        name="Azahar (core libretro)",
+        library="azahar_libretro",
+        console_name="Nintendo 3DS",
+        options={
+            "citra_graphics_api": "OpenGL",
+            "citra_use_hw_shader": "enabled",
+            "citra_layout_option": "default",
+        },
+    ),
 }
 
 
@@ -187,6 +210,10 @@ _PAD_LAYOUTS: dict[str, dict] = {
     "snes": {"shoulders": True},
     "md":   {"shoulders": True},   # 6-button pad: X/Y/Z land on the retropad shoulders
     "pce":  {},
+    # The circle pad (left stick) and L/R shoulders; New3DS's click-in C-stick
+    # and ZL/ZR aren't wired up here — same MVP scope as the touch screen
+    # (see NOTE_webui_emulators_plan.md's Fase 6 results).
+    "3ds":  {"sticks": 1, "triggers": False, "stick_buttons": False, "shoulders": True},
 }
 
 _PAD_DEFAULT = {

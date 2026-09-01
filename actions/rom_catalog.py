@@ -255,6 +255,22 @@ CONSOLES: dict[str, Console] = {
         rom_exts=(".ngc", ".ngp"),
         emulator="ngpc",
     ),
+    # No catalog: 3DS dumps are large (multi-GB, often re-encrypted or
+    # region/format-specific) and there's no verified No-Intro/Redump set on
+    # Internet Archive for this console the way there is for the cartridge
+    # systems above — has_catalog=False makes get_index() return [] and
+    # skips it in search()/popular(), same "local dumps only" contract PS2
+    # itself falls back to for anything not in its own archive_items.
+    "3ds": Console(
+        id="3ds",
+        name="Nintendo 3DS",
+        short="3DS",
+        archive_item="",
+        thumb_repo="Nintendo_-_Nintendo_3DS",
+        rom_exts=(".3ds", ".cia", ".cxi"),
+        emulator="3ds",
+        has_catalog=False,
+    ),
 }
 
 

@@ -776,6 +776,77 @@ ctypes en `libretro.py` ajeno a emuladores y no tocado por este plan.
 **Criterio de salida:** arranca y se juega. Si el core no rinde o casca, se
 documenta y se para — es la fase más especulativa de todas.
 
+### ✅ RESULTADOS FASE 6 — ejecutada, funciona de verdad
+
+**La fase más especulativa del plan resultó ser la más limpia.** Sin ningún
+problema serio.
+
+**Nombres de opciones investigados** (repo `azahar-emu/azahar`,
+`src/citra_libretro/core_settings.cpp` — el frontend libretro vive dentro del
+mono-repo, no en un repo aparte). Prefijo `citra_` (heredado de Citra, del que
+Azahar viene). Las que importan:
+- `citra_graphics_api`: `"Auto"` / `"Vulkan"` / `"OpenGL"` / `"Software"` —
+  forzado a `"OpenGL"`, igual que decía el plan.
+- `citra_layout_option`: `"default"` (arriba-abajo), `"single_screen"`,
+  `"large_screen"`, `"side_by_side"` — **esto resuelve el pendiente de las dos
+  pantallas sin ningún trabajo de frontend**: el core compone ambas pantallas
+  en un solo framebuffer él solito, exactamente como lo hace cualquier core de
+  una sola pantalla. El pipeline de `<img>` único de la Fase 3 vale tal cual.
+- Nada de BIOS/claves AES en las opciones del core — a diferencia de PS2,
+  Azahar arranca en modo HLE sin archivos de sistema. Confirmado en la
+  práctica: arrancó a la primera sin pedir nada.
+
+**Probado con el `.3ds` real del usuario** (dump comercial descifrado, 4.3 GB,
+Pokémon con ROM hack "PokeAndroid"), con el core del buildbot oficial
+(mismo día, como PS2 en la Fase 5):
+
+- **Arranca y renderiza correctamente**: pantalla de selección de idioma de
+  Pokémon, ambas pantallas compuestas a 400x480, colores e iluminación
+  correctos, sin fondo negro ni artefactos.
+- **~52 fps** en el primer arranque (objetivo 60) — sin optimizar, aceptable
+  para una primera pasada.
+- **Input real confirmado, no solo "no casca":** pulsar abajo×2 + A movió la
+  selección de idioma de "English" a "Français" y confirmó — comportamiento
+  de juego correcto y coherente, verificado visualmente en el frame
+  resultante, con un diff de píxel de 29 frente al ~0.5 de reposo medido en
+  PS2 (misma técnica de verificación que la Fase 5).
+- **El fix de concurrencia de la Fase 5 generaliza sin tocarlo:**
+  `save_state()`/`load_state()` a través de la `EmulatorSession` real, sin
+  crash, en este core de hardware nuevo — confirma que el arreglo no era
+  específico de PS2.
+- Probado a través del pipeline completo de producción: `install_core("3ds")`
+  real (no copia manual), `game_library.add_local_rom()`, y las rutas web
+  (`/api/emulator/library`, `/pad`, `/cores`, `/consoles`) reconociendo la
+  consola correctamente.
+
+**Decisiones de alcance, explícitas:**
+- **Sin catálogo de descarga.** `rom_catalog.CONSOLES["3ds"]` tiene
+  `has_catalog=False` — no hay ningún set tipo No-Intro/Redump verificado en
+  Internet Archive para 3DS como sí lo hay para GBA/SNES/PS2. Solo importación
+  de ROMs locales (`game_library.add_local_rom()`), mismo patrón que ya
+  soporta PS2 para lo que no está en su propio catálogo.
+- **Sin pantalla táctil ni C-stick/ZL/ZR de New3DS.** El circle pad, cruceta,
+  ABXY, Start/Select y L/R ya funcionan (son mando estándar de libretro). La
+  pantalla táctil (necesaria para menús de muchos juegos) y los controles
+  exclusivos de New3DS quedan fuera — quien retome esto puede añadir un
+  control táctil en `Emulators.svelte` sobre la mitad inferior del `<img>`,
+  traduciendo coordenadas de clic a un evento táctil vía
+  `RETRO_DEVICE_POINTER`.
+- **Sin cambios en el frontend.** `Emulators.svelte` ya era genérico por
+  consola desde la Fase 4 (mando dibujado a partir de `pad_layout()`) — 3DS
+  funciona con el panel tal cual, sin tocar una línea de Svelte.
+
+#### Tests
+
+`tests/test_emulator_input.py` — 2 tests nuevos: que `citra_graphics_api` es
+`"OpenGL"` (no Vulkan), y que el pad de 3DS tiene un stick, hombros, sin
+gatillos, y que la consola no tiene catálogo de descarga.
+
+#### Regresiones: ninguna
+
+741 passed, 2 skipped — mismo único fallo preexistente desde la Fase 2, sin
+relación con emuladores.
+
 ---
 
 ## Orden y por qué

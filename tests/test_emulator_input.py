@@ -43,6 +43,26 @@ class InputProfileTests(unittest.TestCase):
             "OpenGL",
         )
 
+    def test_3ds_uses_opengl_not_vulkan(self):
+        # Vulkan+RADV crashes immediately on AMD GPUs on Arch Linux — exactly
+        # this machine's iGPU (see NOTE_webui_emulators_plan.md's Fase 6).
+        self.assertEqual(
+            emulator_runtime.CORES["3ds"].options["citra_graphics_api"],
+            "OpenGL",
+        )
+
+    def test_3ds_pad_has_one_stick_and_no_catalog(self):
+        layout = emulator_runtime.pad_layout("3ds")
+        self.assertEqual(layout["sticks"], 1)
+        self.assertTrue(layout["shoulders"])
+        # New3DS's C-stick/ZL/ZR aren't wired up — same MVP scope as touch.
+        self.assertFalse(layout["triggers"])
+
+        from actions import rom_catalog
+        console = rom_catalog.CONSOLES["3ds"]
+        self.assertFalse(console.has_catalog)
+        self.assertIn(".3ds", console.rom_exts)
+
     def test_saved_profiles_do_not_leak_between_consoles(self):
         storage = {}
 
