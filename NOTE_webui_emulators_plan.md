@@ -607,6 +607,84 @@ Si ninguno lo arregla, la conclusión de la nota se mantiene: probablemente es e
 bug de readback parcial que mainline arregló en 2.8.0 con `Force Full`, y la
 salida real es actualizar/portar el core, no una opción existente.
 
+### ✅ RESULTADOS FASE 5 — ejecutada
+
+**`pcsx2_renderer` revertido a `"OpenGL"`** en `emulator_runtime.py` (se quitó
+el comentario de diagnóstico temporal). Efecto colateral bueno: esto arregla
+también `test_ps2_uses_the_hardware_renderer`, el único test que llevaba en
+rojo desde antes de empezar esta tarea entera.
+
+**Gate de BIOS:** el *check* ya existía desde la Fase 2
+(`EmulatorSession.start()` ya rechazaba con un mensaje claro si faltaba). Lo
+que de verdad faltaba por "replicar" de `emulators.py:1580` era la
+*importación* — se añadió `/api/emulator/bios/import` (equivalente web del
+`QFileDialog` nativo de `_import_bios()`, ya que un navegador solo tiene
+`<input type=file>`), con un control mínimo en `Emulators.svelte` que aparece
+solo si `start()` falla por BIOS ausente. Probado con un dump falso de 4 MiB
+**real** (no mockeado) contra un `system_dir` temporal — nunca contra el BIOS
+real de esta máquina.
+
+**Rendimiento medido en gameplay real, no solo splash/menú** (el hueco de
+honestidad que quedó anotado dos veces en fases anteriores): arranque
+completo de Madagascar desde cero bajo OpenGL, pulsando Cruz/Start de verdad
+a través de BIOS → avisos → intro → menú, hasta **gameplay 3D real** (Marty
+en el zoo) — **57.2 fps de media sobre 250s reales**, incluyendo las
+transiciones de menú (que son las que más CPU piden, no solo el render 3D).
+`pcsx2_upscale_multiplier` se deja en `"1x Native (PS2)"`: no hay ninguna
+señal de cuello de botella que justifique subirlo, ni en splash (Fase 1/3) ni
+en gameplay real medido aquí.
+
+**Mando analógico: verificado con evidencia cuantitativa, no solo "no
+casca".** Con el personaje en reposo, el diff medio de píxel entre frames
+consecutivos es **0.5** (ruido, prácticamente estático). Con el stick a la
+izquierda a fondo, 90 frames después el diff sube a **57.5**; hacia delante,
+**47.7** — dos órdenes de magnitud por encima del reposo. Las capturas
+confirman visualmente que es movimiento coherente: la cebra gira y cruza a
+una pasarela con un NPC visible, no un frame corrupto.
+
+#### El bug de fondo negro de Madagascar: reproducido y descartada la hipótesis del `hw_download_mode`
+
+Se intentó llegar a la pantalla exacta navegando el menú de pausa por script
+(`Exit to Map`), con éxito parcial: se alcanzó el diálogo de confirmación
+correcto, pero el cursor no se movía de "No" a "Yes" con las pulsaciones
+sintéticas de "arriba" — probablemente un problema de timing del script, no
+del juego, no diagnosticado a fondo por priorizar el tiempo.
+
+**El usuario reprodujo el bug jugando de verdad** y guardó el estado
+(`DreamWorks Madagascar (Spain).state`, pantalla "Minigolf tiki" del mapa).
+Cargado ese estado bajo la configuración actual (OpenGL):
+
+- **9.7% de píxeles no-negros** — el HUD y el texto ("Minigolf tiki", "Jugar
+  minijuego") se ven perfectamente; el fondo 3D del mapa es negro sólido.
+  Coincide exactamente con la descripción de la nota.
+- Se confirmó primero, volcando las opciones reales que reporta el core
+  (`JARVIS_CORE_LOG=1`), que `pcsx2_hw_download_mode` existe con
+  **exactamente** los 4 valores usados en el barrido — nada de typos
+  silenciados.
+- **Barrido de los 4 valores contra este mismo estado: resultado idéntico en
+  los cuatro** (`Accurate`, `Disable Readbacks`, `Unsynchronized`,
+  `Disabled`), 9.7% no-negro en los cuatro casos, píxel a píxel indistinguibles.
+  **La opción no tiene ningún efecto sobre este bug.**
+
+**Conclusión:** la hipótesis de `hw_download_mode` queda descartada con
+evidencia directa, no por descarte. Se mantiene la conclusión de reserva de
+la nota original: el volcado de opciones confirma que **este fork de LRPS2
+solo tiene 4 valores**, sin el quinto (`"Accurate (Force Full)"`) que PCSX2
+mainline añadió en 2.8.0 precisamente para el mismo patrón de síntoma
+("varias lecturas GPU→CPU parciales por frame" en menús). La salida real no
+es una opción existente en este core — es actualizar o portar esa mejora del
+mainline al fork LRPS2, o cambiar de core. Fuera de alcance de esta tarea de
+port de UI web; queda documentado para quien retome el bug en sí.
+
+#### Regresiones: ninguna
+
+Suite completa tras el revert del renderer y la ruta de BIOS: **737 passed, 2
+skipped, 1 failed** — el revert dejó en verde `test_ps2_uses_the_hardware_renderer`
+(el único fallo que se arregló solo, sin tocarlo directamente). Queda un único
+fallo preexistente, el mismo desde la Fase 2:
+`test_log_interface_returns_a_callable_function_pointer`, un problema de
+ctypes en `libretro.py` ajeno a emuladores y no tocado por este plan.
+
 ---
 
 ## Fase 6 — 3DS (azahar)

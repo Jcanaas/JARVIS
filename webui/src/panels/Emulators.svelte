@@ -22,6 +22,8 @@
   let padLayout = $state({})
   let streamNonce = $state(0) // bumped on every start() so the <img> can't show a stale MJPEG connection from a previous game
   let actionError = $state('')
+  let libraryError = $state('') // start() failed before the player mounted (e.g. missing PS2 BIOS)
+  let biosBusy = $state(false)
 
   let statusTimer = null
   let videoWrap = $state()
@@ -58,6 +60,7 @@
 
   async function play(entry) {
     actionError = ''
+    libraryError = ''
     try {
       const res = await api.startEmulator(entry.entry_id)
       playing = entry
@@ -66,7 +69,29 @@
       padLayout = await api.getEmulatorPad(entry.console_id)
       pollStatus()
     } catch (e) {
-      actionError = e.message
+      // start() fails before the player ever mounts, so this can't reuse
+      // actionError (only rendered inside the player view below).
+      libraryError = e.message
+    }
+  }
+
+  // BIOS import: web equivalent of ui/panels/emulators.py's _import_bios(),
+  // which opens a native Qt file picker — browsers only have a file input.
+  // Only PS2 needs one (actions/bios.py's own docstring explains why this
+  // app never bundles one itself), so this only ever shows for that error.
+  const NEEDS_BIOS = 'PS2 necesita una BIOS'
+  async function importBios(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    biosBusy = true
+    try {
+      await api.importEmulatorBios(file)
+      libraryError = ''
+    } catch (err) {
+      libraryError = err.message
+    } finally {
+      biosBusy = false
+      e.target.value = ''
     }
   }
 
@@ -252,6 +277,18 @@
       <button class="ghost" onclick={loadLibrary} title="Actualizar"><Icon name="refresh" size={16} /></button>
     </div>
 
+    {#if libraryError}
+      <div class="action-error">
+        {libraryError}
+        {#if libraryError.includes(NEEDS_BIOS)}
+          <label class="bios-import">
+            {biosBusy ? 'Importando…' : 'Importar BIOS de PS2'}
+            <input type="file" accept=".bin,.rom" onchange={importBios} disabled={biosBusy} hidden />
+          </label>
+        {/if}
+      </div>
+    {/if}
+
     {#if loading}
       <div class="empty">Cargando…</div>
     {:else if error}
@@ -398,7 +435,11 @@
   .player-tools { display: flex; gap: 6px; flex-shrink: 0; }
   .player-tools .ghost { font-size: 14px; }
 
-  .action-error { color: var(--red); font-size: 12px; flex-shrink: 0; }
+  .action-error { color: var(--red); font-size: 12px; flex-shrink: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .bios-import {
+    background: var(--panel-2); border: 1px solid var(--border-a); border-radius: var(--radius-sm);
+    color: var(--pri); font-size: 12px; padding: 6px 12px; cursor: pointer;
+  }
 
   .video-wrap {
     flex: 1; min-height: 0; border-radius: var(--radius); overflow: hidden; background: #000;

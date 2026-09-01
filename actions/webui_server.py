@@ -1675,6 +1675,28 @@ def _make_app(host_ref):
         threading.Thread(target=_run, daemon=True).start()
         return jsonify({"ok": True}), 202
 
+    @app.route("/api/emulator/bios/import", methods=["POST"])
+    def api_emulator_bios_import():
+        # PS2 is the only console that needs one (see actions/bios.py's own
+        # docstring on why this app never fetches/bundles a BIOS itself) —
+        # web equivalent of ui/panels/emulators.py's _import_bios(), which
+        # opens a native Qt file picker; browsers only have file inputs.
+        f = request.files.get("file")
+        if not f or not f.filename:
+            return jsonify({"error": "missing_file"}), 400
+
+        import tempfile
+        from actions import bios, emulator_runtime as er
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_path = Path(tmp) / f.filename
+            f.save(temp_path)
+            try:
+                target = bios.import_ps2_bios(temp_path, er.system_dir())
+            except bios.BiosError as e:
+                return jsonify({"error": str(e)}), 400
+        return jsonify({"ok": True, "path": str(target)})
+
     def _rom_dict(rom) -> dict:
         from dataclasses import asdict
         from actions import rom_catalog as rc

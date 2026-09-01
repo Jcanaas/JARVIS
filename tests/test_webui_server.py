@@ -839,6 +839,42 @@ class EmulatorRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 202)
         self.assertIn(("emulator_core_error", {"console_id": "gba", "error": "boom"}), published)
 
+    # -- BIOS import (PS2) -------------------------------------------------
+    # Web equivalent of ui/panels/emulators.py's _import_bios(), which opens
+    # a native Qt file picker — browsers only have <input type=file>.
+
+    def test_bios_import_missing_file(self):
+        resp = self.client.post("/api/emulator/bios/import", data={})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_bios_import_rejects_a_bad_dump(self):
+        from actions.bios import BiosError
+        with patch("actions.bios.import_ps2_bios", side_effect=BiosError("no parece una BIOS")):
+            resp = self.client.post(
+                "/api/emulator/bios/import",
+                data={"file": (io.BytesIO(b"not a bios"), "fake.bin")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_bios_import_success_copies_a_real_dump_into_a_temp_system_dir(self):
+        # Real actions.bios.import_ps2_bios, not mocked — isolated to a temp
+        # system_dir so this never touches this machine's actual BIOS.
+        with tempfile.TemporaryDirectory() as system_dir:
+            dump = b"\x00" * (4 * 1024 * 1024)  # real PS2 BIOS dumps are always exactly 4 MiB
+            with patch("actions.emulator_runtime.system_dir", return_value=Path(system_dir)):
+                resp = self.client.post(
+                    "/api/emulator/bios/import",
+                    data={"file": (io.BytesIO(dump), "SCPH-70012.bin")},
+                    content_type="multipart/form-data",
+                )
+            self.assertEqual(resp.status_code, 200)
+            body = resp.get_json()
+            self.assertTrue(body["ok"])
+            copied = Path(body["path"])
+            self.assertTrue(copied.is_file())
+            self.assertEqual(copied.stat().st_size, 4 * 1024 * 1024)
+
     # -- catalog ------------------------------------------------------------
 
     def test_catalog_search_success(self):

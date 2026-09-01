@@ -154,13 +154,16 @@ CORES: dict[str, CoreSpec] = {
         library="pcsx2_libretro",
         console_name="PlayStation 2",
         options={
-            # TEMPORARY diagnostic: "Software" instead of "OpenGL", to split
-            # whether the black map background (DreamWorks Madagascar, level
-            # select over "La fuga de Marty") is a hardware-renderer-specific
-            # GS bug or something else. Software is pixel-accurate but far
-            # too slow to actually play with — revert to "OpenGL" once this
-            # is confirmed either way.
-            "pcsx2_renderer": "Software",
+            # Hardware rendering is the usable default: the software
+            # rasterizer measured 11-14fps on Madagascar gameplay on an
+            # 8-core Ryzen, while OpenGL settles around 3.3ms/frame after
+            # its initial shader compilation (see NOTE_webui_emulators.md
+            # and NOTE_webui_emulators_plan.md's Fase 1/5 results for the
+            # actual numbers). It was forced to "Software" for a while to
+            # isolate a black-map-background bug (DreamWorks Madagascar,
+            # level select over "La fuga de Marty") — see the plan's Fase 5
+            # results for how that investigation concluded.
+            "pcsx2_renderer": "OpenGL",
             "pcsx2_upscale_multiplier": "1x Native (PS2)",
             # A real DualShock boots in digital mode and only enables its
             # sticks once you press the pad's own ANALOG button — which this

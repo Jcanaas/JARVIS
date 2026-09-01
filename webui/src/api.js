@@ -117,6 +117,14 @@ export const sendEmulatorInput = (body) => postJSON('/api/emulator/input', body)
 export const saveEmulatorState = () => postJSON('/api/emulator/state/save', {})
 export const loadEmulatorState = () => postJSON('/api/emulator/state/load', {})
 export const getEmulatorPad = (consoleId) => getJSON(`/api/emulator/pad?console_id=${encodeURIComponent(consoleId)}`)
+export async function importEmulatorBios(file) {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch('/api/emulator/bios/import', { method: 'POST', body: form })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`)
+  return data
+}
 
 // Calendar
 export const getCalendarEvents = (timeMin, timeMax) =>
