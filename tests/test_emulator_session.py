@@ -22,6 +22,7 @@ class _FakeCore:
         self.pressed = []
         self.reset_called = False
         self._loaded_lock = threading.Lock()
+        self.threads_called_from: set = set()
 
     def load_game(self, rom_path):
         self.rom_path = rom_path
@@ -29,6 +30,7 @@ class _FakeCore:
     def run_frame(self):
         with self._loaded_lock:
             self.run_frame_calls += 1
+        self.threads_called_from.add(threading.current_thread().name)
 
     def current_frame(self):
         return (b"\x00" * 4, 2, 2, 8, 2)
@@ -38,6 +40,7 @@ class _FakeCore:
 
     def reset(self):
         self.reset_called = True
+        self.threads_called_from.add(threading.current_thread().name)
 
     def set_button(self, button, pressed):
         self.pressed.append((button, pressed))
@@ -55,10 +58,12 @@ class _FakeCore:
         self.sram = blob
 
     def save_state(self):
+        self.threads_called_from.add(threading.current_thread().name)
         return b"STATE"
 
     def load_state(self, blob):
         self.loaded_state = blob
+        self.threads_called_from.add(threading.current_thread().name)
 
 
 class EmulatorSessionTests(unittest.TestCase):
@@ -226,6 +231,42 @@ class EmulatorSessionTests(unittest.TestCase):
             self._wait_for(lambda: self.fake_core.run_frame_calls > 0)
             session.reset()
             self.assertTrue(self.fake_core.reset_called)
+        finally:
+            session.stop()
+
+    def test_save_load_and_reset_run_on_the_emulation_thread(self):
+        # Regression test: save_state()/load_state()/reset() used to call
+        # straight into the core from whatever thread invoked them (e.g. a
+        # Flask request thread in production). That's safe for a
+        # software-rendered core but segfaults a hardware-rendered one,
+        # whose GL context is only ever current on the emulation thread —
+        # found live against the real PS2 core. This asserts they're routed
+        # through _drain_pending_actions instead, called from run_frame's
+        # own thread, and never from this test's (the caller's) thread.
+        session = self._session()
+        session.start("gba", self.rom)
+        try:
+            self._wait_for(lambda: self.fake_core.run_frame_calls > 0)
+            session.save_state()
+            session.load_state()
+            session.reset()
+            caller_thread = threading.current_thread().name
+            self.assertNotIn(caller_thread, self.fake_core.threads_called_from)
+            self.assertEqual(len(self.fake_core.threads_called_from), 1)
+        finally:
+            session.stop()
+
+    def test_save_state_works_while_paused(self):
+        # _drain_pending_actions runs before the pause early-continue in
+        # _run()'s loop specifically so this doesn't hang.
+        session = self._session()
+        session.start("gba", self.rom)
+        try:
+            self._wait_for(lambda: self.fake_core.run_frame_calls > 0)
+            session.pause(True)
+            session.save_state()  # must not time out
+            state_file = self.saves_dir / "game.state"
+            self.assertTrue(state_file.is_file())
         finally:
             session.stop()
 

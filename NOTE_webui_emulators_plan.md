@@ -666,22 +666,96 @@ Cargado ese estado bajo la configuración actual (OpenGL):
   `Disabled`), 9.7% no-negro en los cuatro casos, píxel a píxel indistinguibles.
   **La opción no tiene ningún efecto sobre este bug.**
 
-**Conclusión:** la hipótesis de `hw_download_mode` queda descartada con
-evidencia directa, no por descarte. Se mantiene la conclusión de reserva de
-la nota original: el volcado de opciones confirma que **este fork de LRPS2
-solo tiene 4 valores**, sin el quinto (`"Accurate (Force Full)"`) que PCSX2
-mainline añadió en 2.8.0 precisamente para el mismo patrón de síntoma
-("varias lecturas GPU→CPU parciales por frame" en menús). La salida real no
-es una opción existente en este core — es actualizar o portar esa mejora del
-mainline al fork LRPS2, o cambiar de core. Fuera de alcance de esta tarea de
-port de UI web; queda documentado para quien retome el bug en sí.
+**Conclusión de esa sesión:** la hipótesis de `hw_download_mode` queda
+descartada con evidencia directa. El volcado de opciones confirma que este
+fork de LRPS2 (a fecha de esa prueba) solo tenía 4 valores, sin el quinto
+(`"Accurate (Force Full)"`) que PCSX2 mainline añadió en 2.8.0 para el mismo
+patrón de síntoma.
+
+### ✅ ACTUALIZACIÓN — el bug arreglado de verdad, y una corrección importante de causa
+
+El usuario pidió intentar portar el parche de `Force Full` (mainline commit
+[`4b76157b9`](https://github.com/PCSX2/pcsx2/commit/4b76157b9e0be3b7a8937d93e981c4380cce35b4))
+al fork LRPS2. Se investigó el diff real (5 archivos, ~10 líneas de lógica en
+`GSTextureCache.cpp`), se confirmó que el fork tiene el mismo código en esos
+puntos exactos (`readbacks_since_draw`, `GSHardwareDownloadMode`), se clonó
+`libretro/ps2` (rama `libretroization`), se parcheó (`Config.h`,
+`GSTextureCache.cpp` en 5 sitios — el fork duplica la lógica en rama
+profundidad/color, mainline no en esa versión —, `main.cpp`,
+`libretro_core_options.h`), se resolvió un problema de portabilidad ajeno
+(`fallocate` sin `_GNU_SOURCE` en `libretro-common/vfs/vfs_implementation.c`,
+por una glibc más estricta que la de la CI oficial) y se compiló con éxito.
+
+**Probado contra el savestate real del usuario (Minigolf tiki): pasó de 9.7%
+a 99.4% no-negro con `Accurate (Force Full)`.** Corregido de verdad.
+
+**Pero antes de instalarlo, control de causa — y ahí vino la sorpresa:** se
+compiló una segunda versión, del mismo commit de upstream, **sin** el parche
+de Force Full (solo con el fix de `_GNU_SOURCE`, imprescindible para que
+compile en absoluto). Probada contra el mismo savestate: **también 99.4%
+no-negro, píxel a píxel idéntica.** El parche de Force Full no tuvo nada que
+ver — el core instalado en esta máquina (fechado 24 de agosto) simplemente
+estaba desactualizado. La rama `libretroization` está muy activa (commits de
+hace 3 días en el momento de la prueba) y algún cambio de los ~100 commits en
+`GS/HW`/`GS/TC` entre el 24 de agosto y ahora ya arregló este bug por otra
+vía — no identificado el commit exacto, y no hacía falta: la corrección real
+es mucho más simple.
+
+**Comprobación final, la más simple de todas:** el propio buildbot oficial de
+libretro (`buildbot.libretro.com`, el mismo que ya usa
+`emulator_runtime.install_core()`) tenía una build de **ese mismo día**
+(`Last-Modified` de hace pocas horas). Descargada y probada:
+**99.4% no-negro, con render por hardware real (`hw_render_active=True`) y
+110 fps sin capar en gameplay real** (muy por encima de los 59.9 objetivo).
+
+**Se instaló esa build oficial** vía la propia función `install_core("ps2")`
+de JARVIS (no una copia manual de archivo — ejercitando el código de
+producción real), con copia de seguridad del core anterior
+(`pcsx2_libretro.so.backup-20260824`) antes de sobrescribir. Verificado de
+nuevo contra el core ya instalado (`find_core("ps2")`, la misma ruta que usa
+la app): sigue en 99.4%.
+
+**Conclusión final:** el arreglo real es "actualiza el core", no un parche.
+Mucho mejor resultado que el previsto — cero divergencia de fork que mantener,
+cero riesgo de que `install_core()` sobrescriba silenciosamente un binario
+casero en la próxima actualización. El clon local con el parche de Force Full
+se descartó (no llegó a usarse en producción); el diff investigado
+(mainline `4b76157b9`) queda documentado arriba por si en el futuro hiciera
+falta portarlo de verdad para otro juego con el mismo síntoma.
+
+#### Hallazgo colateral: bug real de concurrencia en `save_state`/`load_state`/`reset`, encontrado y arreglado
+
+Verificando el core recién instalado a través de la API pública real de
+`EmulatorSession` (no un script suelto), `load_state()` **hizo crashear el
+proceso** (SIGSEGV) al llamarlo desde el hilo principal mientras el hilo de
+emulación tenía el contexto GL activo en el suyo. `save_state()`, `load_state()`
+y `reset()` (de la Fase 2) llamaban directamente a `core.*` desde el hilo que
+los invocara — para GBA/SNES (software) es inofensivo, pero para un core con
+render por hardware (PS2, y cualquier consola futura que lo use) es acceso a
+GL desde el hilo equivocado. En producción, `/api/emulator/state/save|load`
+lo llaman desde un hilo de petición Flask — **este bug era real y explotable
+en producción**, no un artefacto de mi script de prueba.
+
+**Arreglado:** las tres operaciones ahora se encolan (`_pending_actions`,
+`queue.Queue`) y se ejecutan en el propio hilo de emulación, drenadas una vez
+por iteración del bucle en `_run()` — colocado **antes** del `continue` de
+pausa, así que funciona incluso con el juego en pausa. El invariante 2 del
+módulo (documentado desde la Fase 2: "el contexto GL solo puede tocarse desde
+el hilo de emulación") ahora se aplica también a estas tres llamadas, no solo
+a `run_frame()`.
+
+Verificado: 2 tests nuevos en `test_emulator_session.py` (que la llamada
+ocurre en el hilo de emulación y no en el del llamador; que `save_state()`
+sigue funcionando en pausa) y reproducción en vivo del crash original seguida
+de la misma llamada ya arreglada, sin fallo, contra el core real de PS2 recién
+instalado.
 
 #### Regresiones: ninguna
 
-Suite completa tras el revert del renderer y la ruta de BIOS: **737 passed, 2
-skipped, 1 failed** — el revert dejó en verde `test_ps2_uses_the_hardware_renderer`
-(el único fallo que se arregló solo, sin tocarlo directamente). Queda un único
-fallo preexistente, el mismo desde la Fase 2:
+Suite completa, incluyendo el fix de concurrencia: **739 passed, 2
+skipped, 1 failed** — el revert del renderer dejó en verde
+`test_ps2_uses_the_hardware_renderer` (se arregló solo, sin tocarlo
+directamente). Queda un único fallo preexistente, el mismo desde la Fase 2:
 `test_log_interface_returns_a_callable_function_pointer`, un problema de
 ctypes en `libretro.py` ajeno a emuladores y no tocado por este plan.
 

@@ -15,7 +15,14 @@ Two rules validated in the Fase 1 prototypes, both load-bearing here:
 2. The GL context must be made current on the same thread that calls
    retro_run() (actions/libretro.py's run_frame() already does this every
    frame) — so the session's own background thread has to be both the pacer
-   and the renderer. There is no separate "GL thread".
+   and the renderer. There is no separate "GL thread". This extends to any
+   call into the core, not just run_frame(): save_state()/load_state()/
+   reset() route through _pending_actions and run on this same thread
+   for exactly that reason — a hardware-rendered console (confirmed with
+   PS2) segfaults if they're called directly from the caller's own thread
+   (an HTTP handler thread, in production), because the GL context is
+   current on the emulation thread, not theirs. Software cores (GBA/SNES)
+   don't have this hazard, which is why it went unnoticed until PS2.
 
 Only one core may be loaded per process (actions/libretro.py's `load()` is a
 process-global singleton, and cores keep process-global state) — this session
@@ -24,6 +31,7 @@ and the legacy Qt emulator panel must never run at the same time. See
 """
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from pathlib import Path
@@ -76,6 +84,10 @@ class EmulatorSession:
         self._fps_measured = 0.0
         self._error: Optional[str] = None
         self._loaded_event = threading.Event()
+
+        # save_state/load_state/reset requests, drained on the emulation
+        # thread itself — see rule 2 in the module docstring.
+        self._pending_actions: "queue.Queue[tuple[str, threading.Event, dict]]" = queue.Queue()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -145,9 +157,8 @@ class EmulatorSession:
             self._pause_event.clear()
 
     def reset(self) -> None:
-        core = self._core
-        if core is not None:
-            core.reset()
+        if self._core is not None:
+            self._run_on_emulation_thread("reset")
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -218,21 +229,57 @@ class EmulatorSession:
             pass
 
     def save_state(self) -> None:
-        core = self._core
-        if core is None:
+        if self._core is None:
             raise EmulatorSessionError("No hay ninguna sesión activa")
-        _, state = self._save_paths()
-        state.write_bytes(core.save_state())
-        self._flush_sram()
+        self._run_on_emulation_thread("save_state")
 
     def load_state(self) -> None:
-        core = self._core
-        if core is None:
+        if self._core is None:
             raise EmulatorSessionError("No hay ninguna sesión activa")
-        _, state = self._save_paths()
-        if not state.is_file():
-            raise EmulatorSessionError("No hay ningún estado guardado para este juego")
-        core.load_state(state.read_bytes())
+        self._run_on_emulation_thread("load_state")
+
+    def _run_on_emulation_thread(self, action: str, timeout: float = 10.0) -> None:
+        """Queues `action` (save_state/load_state/reset) for the emulation
+        thread to run — see rule 2 in the module docstring for why these
+        can't just run on the caller's own thread — and blocks until it's
+        done or raises whatever it raised."""
+        done = threading.Event()
+        result: dict = {}
+        self._pending_actions.put((action, done, result))
+        if not done.wait(timeout=timeout):
+            raise EmulatorSessionError("La sesión no respondió a tiempo")
+        if "error" in result:
+            raise result["error"]
+
+    def _drain_pending_actions(self, core) -> None:
+        """Runs any queued save_state/load_state/reset on the emulation
+        thread, which is the only place it's safe to touch a hardware-
+        rendered core — called once per loop iteration in _run(), including
+        while paused, so the GL context (already current on this thread) is
+        always the one these calls execute against."""
+        while True:
+            try:
+                action, done, result = self._pending_actions.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if action == "save_state":
+                    _, state_path = self._save_paths()
+                    state_path.write_bytes(core.save_state())
+                    self._flush_sram()
+                elif action == "load_state":
+                    _, state_path = self._save_paths()
+                    if not state_path.is_file():
+                        raise EmulatorSessionError(
+                            "No hay ningún estado guardado para este juego"
+                        )
+                    core.load_state(state_path.read_bytes())
+                elif action == "reset":
+                    core.reset()
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                done.set()
 
     # ------------------------------------------------------------------
     # Status
@@ -282,6 +329,7 @@ class EmulatorSession:
         try:
             while not self._stop_event.is_set():
                 now = time.perf_counter()
+                self._drain_pending_actions(core)
                 if self._pause_event.is_set():
                     last = now
                     time.sleep(0.02)
