@@ -385,7 +385,7 @@ function GamepadPad({
     <Modal visible transparent={false} animationType="fade" onRequestClose={onClose} supportedOrientations={["landscape"]}>
       <View style={styles.screen}>
         {hasTouchScreen && (
-          <View style={[styles.touchCol, editMode && styles.touchColElevated]}>
+          <View style={[styles.touchCol, styles.touchColElevated]}>
             <Draggable
               id="group:touchscreen"
               editMode={editMode}
@@ -663,16 +663,15 @@ const styles = StyleSheet.create({
   screen: { flex: 1, flexDirection: "row", backgroundColor: C.bg },
   touchCol: { alignItems: "center", justifyContent: "center", paddingLeft: 20, paddingVertical: 12 },
   // zIndex (+ elevation for Android, which otherwise ignores zIndex between
-  // sibling Views) above the pad — edit mode only: dragging this column's
-  // content past its own slot, into where the pad sits, must keep it on
-  // top instead of vanishing behind the pad's own opaque background, which
-  // paints after this sibling in the tree by default. Applying this always
-  // rather than only while it's actually needed is suspected to have made
-  // gamepad button presses stop registering during normal play with the
-  // touch screen present (Android's elevation can expand a view's
-  // effective hit/paint area beyond its own layout box in ways plain
-  // zIndex on iOS doesn't) — scoping it to edit mode removes the risk
-  // entirely for the case that actually matters, normal gameplay.
+  // sibling Views) above the pad: dragging this column's content past its
+  // own slot in edit mode, into where the pad sits, must keep it on top
+  // instead of vanishing behind the pad's own opaque background, which
+  // paints after this sibling in the tree by default. Tried scoping this to
+  // edit-mode-only, suspecting it was why gamepad buttons stopped
+  // registering during normal 3DS play — confirmed wrong (buttons stayed
+  // broken with it removed, and removing it also brought the covering bug
+  // straight back), so back to unconditional. The real cause of the button
+  // issue is still open.
   touchColElevated: { zIndex: 10, elevation: 10 },
   pad: { flex: 1, backgroundColor: C.bg, justifyContent: "center", paddingHorizontal: 24, paddingVertical: 12 },
   // Narrower when sharing the screen with the 3DS touch mirror, so the pad
