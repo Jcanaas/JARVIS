@@ -49,6 +49,7 @@ actions/vendor/webtorrent-stream/node_modules/
 actions/vendor/webtorrent-stream/package-lock.json
 actions/vendor/torlink/node_modules/
 actions/vendor/torlink/package-lock.json
+mobile-app/node_modules/
 
 # === Large Windows binaries (bundled via installer, not tracked in git) ===
 mpv.exe
