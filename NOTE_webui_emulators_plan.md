@@ -98,6 +98,9 @@ funciona:
    `retro_run()`.** `run_frame()` (`libretro.py:1153`) hace `makeCurrent` cada
    frame justo por esto. Consecuencia: el hilo de pacing y el de render son el
    mismo hilo, siempre.
+2b. **El `QApplication` se crea en el hilo principal, la emulación en el
+   worker.** Verificado en la Fase 1: al revés emula bien pero el proceso muere
+   con SIGSEGV al cerrar. Ver "Hallazgo crítico" en los resultados de la Fase 1.
 3. **No romper el emulador Qt.** `ui/widgets/retro.py` y `ui/panels/emulators.py`
    están en uso. Se tocan lo mínimo, y cada fase que los toque verifica que
    `--legacy` sigue arrancando y jugando.
@@ -206,6 +209,70 @@ mantienen prácticamente iguales**: solo cambia dónde vive el gestor, no su API
 **Decisión que sale de esta fase:** in-process vs. subproceso. Es la única
 bifurcación arquitectónica del plan, y por eso va antes de escribir código de
 producción.
+
+### ✅ RESULTADOS FASE 1 — ejecutada, las tres subfases pasan
+
+**Veredicto: in-process. El Plan B del subproceso NO hace falta.**
+
+| Prueba | Resultado |
+|---|---|
+| 1a GBA software, fuera de `retro.py` | ✅ **59.7 / 59.7 fps**, peor frame 5.0 ms |
+| 1b PS2 hardware GL (`hw_render=True`) | ✅ **59.6 / 59.9 fps** en RTX 5060 |
+| 1c GBA + WebKit vivos en el mismo proceso | ✅ 59.7 fps sostenidos, cierre limpio |
+| 1c PS2 hardware GL + WebKit | ✅ **59.6 fps sostenidos**, cierre limpio |
+
+Frames verificados a ojo, no solo por contador: Metroid Zero Mission (240x160,
+RGB565) y el splash de Madagascar (640x448, XRGB8888) salen con colores,
+geometría y degradados correctos. La conversión de frame se hizo con
+**numpy + Pillow, sin `QImage`** — confirma que del pipeline de frames Qt solo
+hace falta para el contexto GL, nada más.
+
+#### Hallazgo crítico: el `QApplication` tiene que nacer en el hilo principal
+
+La nota (y mi propio plan inicial) daban por bueno crear el `QApplication` en
+un hilo secundario. **Emula perfectamente, pero el proceso muere con SIGSEGV al
+cerrar el intérprete** — reproducido en los 4 plugins QPA (`wayland`,
+`offscreen`, `xcb`, `minimal`), o sea que es la regla de Qt de "QCoreApplication
+se crea en el hilo principal", no un problema de plataforma.
+`sip.transferto()` no lo evita.
+
+**La solución no cuesta nada:** crear el `QApplication` en el **hilo principal**
+(sin llamar nunca a `exec()`) y dejar la emulación + el contexto GL en el
+worker. Probado: `EXIT=0`, sin crash. Y encaja exactamente donde hace falta —
+`webui_host.mainloop()` ya corre en el hilo principal y puede crearlo **antes**
+de `webview.start()`.
+
+#### Qué GPU usar (matiza el hallazgo 2)
+
+Ambas mueven Madagascar a velocidad plena, así que **la elección es por
+robustez, no por rendimiento**:
+
+| Plugin QPA | GPU | fps | Avisos |
+|---|---|---|---|
+| por defecto (`wayland`) | AMD 780M | 59.5 | ninguno |
+| `offscreen` | NVIDIA RTX 5060 | 59.6 | *"QWindow-based QOffscreenSurface outside the gui thread. Expect failures"* |
+
+→ **Default: el plugin por defecto (iGPU AMD)**, que no usa ninguna API fuera
+de contrato. `offscreen`/NVIDIA queda como **escape configurable** para cuando
+haga falta más músculo (upscale >1x, o el core de 3DS en la Fase 6).
+
+#### Avisos anotados, no bloqueantes
+
+- `Gdk-WARNING: eglMakeCurrent failed` aparece **una vez** al arrancar WebKit
+  con el core GL ya vivo. La ventana siguió pintando y la emulación no se
+  inmutó, pero es señal de que GTK y Qt se disputan EGL. Si en fases
+  posteriores aparecen cuelgues raros de la ventana, empezar a mirar por aquí.
+- Bajo `offscreen`, `QOffscreenSurface` es QWindow-based y Qt avisa de que
+  crearlo fuera del hilo gui puede fallar. Funcionó, pero es API fuera de
+  contrato: otra razón para que ese modo no sea el default.
+
+#### Lo que NO se ha medido (para no vender de más)
+
+Las medidas de PS2 son de **intro y menús**, no de gameplay. El dato de
+11-14 fps de la nota era *gameplay* con renderer software. Que el splash vaya a
+60 fps **no demuestra** que el gameplay vaya a 60 fps — eso se mide en la Fase 5,
+con `upscale_multiplier` real y una partida de verdad. Tampoco se ha probado
+nada de audio, ni sesiones largas (lo más largo han sido ~50 s).
 
 ---
 
