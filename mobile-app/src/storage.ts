@@ -39,3 +39,30 @@ export function parseConnectionUrl(raw: string): Connection | null {
     return null;
   }
 }
+
+const LAYOUT_KEY = "jarvis_pad_layout";
+
+/** Pixel offset from a control group's default position, keyed by group id
+ * (e.g. "group:dpad", "group:face" — see GamepadOverlay.tsx). A device-local
+ * preference, deliberately not synced to the desktop: the emulator itself
+ * has no notion of where the phone draws its own buttons. */
+export type PadOffsets = Record<string, { x: number; y: number }>;
+
+export async function loadPadLayout(): Promise<PadOffsets> {
+  try {
+    const raw = await AsyncStorage.getItem(LAYOUT_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function savePadLayout(offsets: PadOffsets): Promise<void> {
+  await AsyncStorage.setItem(LAYOUT_KEY, JSON.stringify(offsets));
+}
+
+export async function resetPadLayout(): Promise<void> {
+  await AsyncStorage.removeItem(LAYOUT_KEY);
+}

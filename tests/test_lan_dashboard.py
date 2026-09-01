@@ -809,6 +809,37 @@ class LanDashboardTests(unittest.TestCase):
         r = client.get("/api/gamepad/screen?token=wrong")
         self.assertEqual(r.status_code, 403)
 
+    def test_gamepad_screen_returns_a_cropped_jpeg_snapshot(self):
+        """One still JPEG per request, not a multipart stream — React
+        Native's <Image> doesn't reliably decode multipart/x-mixed-replace,
+        so the phone polls this endpoint instead (see the route's docstring
+        in actions/lan_dashboard.py)."""
+        import types as _types
+        from actions import lan_dashboard
+        from actions.libretro import PIXEL_RGB565
+        from ui.widgets import retro
+
+        # A tiny synthetic RGB565 frame is enough to exercise the real
+        # frame_to_bgr -> crop_bottom_screen_3ds -> cv2.imencode pipeline.
+        width, height = 40, 48
+        pixel = (0x1F << 11).to_bytes(2, "little")  # solid red
+        frame = pixel * (width * height)
+        core = MagicMock()
+        core.latest_frame.return_value = (frame, width, height, width * 2, PIXEL_RGB565)
+        screen = _types.SimpleNamespace(core=core, _console_id="3ds")
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=screen):
+            r = client.get(f"/api/gamepad/screen?token={token}")
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "image/jpeg")
+        self.assertGreater(len(r.data), 0)
+        self.assertTrue(r.data.startswith(b"\xff\xd8"))  # JPEG magic bytes
+
     def test_gamepad_touch_translates_coordinates_and_forwards_to_the_core(self):
         import types as _types
         from actions import lan_dashboard

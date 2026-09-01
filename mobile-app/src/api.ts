@@ -189,6 +189,16 @@ export function avatarProxyUrl(chatId: string): string {
   return `${c.baseUrl}/api/whatsapp/avatar?chat_id=${encodeURIComponent(chatId)}&token=${encodeURIComponent(c.token)}`;
 }
 
+/** Authenticated URL for one JPEG snapshot of the 3DS bottom (touch)
+ * screen. `cacheBust` should change on every call (e.g. Date.now()) — the
+ * caller polls this on a timer rather than opening one long streaming
+ * connection, since React Native's <Image> doesn't reliably decode
+ * multipart/x-mixed-replace the way a browser <img> does. */
+export function gamepadScreenUrl(cacheBust: number): string {
+  const c = requireConn();
+  return `${c.baseUrl}/api/gamepad/screen?token=${encodeURIComponent(c.token)}&t=${cacheBust}`;
+}
+
 function requireConn(): Connection {
   if (!conn) throw new Error("API not configured — pair with the desktop app first");
   return conn;
@@ -334,6 +344,7 @@ export const api = {
       buttons: string[];
       announce?: number;
       layout?: PadLayout;
+      has_touch_screen?: boolean;
     }>("/api/gamepad/status"),
   /** Asks the phone-side prompt to reappear (mirrors the desktop's button). */
   announceGamepad: () => postJson<{ ok: boolean; announce: number }>("/api/gamepad/announce", {}),
@@ -342,6 +353,11 @@ export const api = {
     axes?: { index: number; axis: number; value: number }[];
     clear?: boolean;
   }) => postJson<{ ok: boolean }>("/api/gamepad/input", body),
+  /** x/y normalized 0..1 within the bottom-screen image gamepadScreenUrl()
+   * returns — the backend does the translation to the core's own pointer
+   * coordinates (actions/emulator_frame.py's touch_to_pointer). */
+  sendGamepadTouch: (body: { x: number; y: number; pressed: boolean }) =>
+    postJson<{ ok: boolean }>("/api/gamepad/touch", body),
 
   getClipboard: () => request<{ text: string }>("/api/remote/clipboard"),
   setClipboard: (text: string) => postJson<{ ok: boolean }>("/api/remote/clipboard", { text }),

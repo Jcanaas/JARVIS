@@ -1619,54 +1619,39 @@ def _make_app(token: str):
             return (None, 0, 0, 0, 0), console_id
         return getter(), console_id
 
-    def _gamepad_screen_frames(quality: int):
-        import time as _time
-
-        import cv2
-
-        from actions.emulator_frame import crop_bottom_screen_3ds, frame_to_bgr
-
-        boundary = b"jarvisframe"
-        while True:
-            (data, w, h, pitch, fmt), console_id = _active_emulator_frame()
-            if console_id != "3ds" or data is None:
-                _time.sleep(0.1)
-                continue
-
-            bgr = frame_to_bgr(data, w, h, pitch, fmt)
-            if bgr is None:
-                _time.sleep(1 / 60)
-                continue
-
-            cropped = crop_bottom_screen_3ds(bgr)
-            ok, buf = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, quality])
-            if not ok:
-                continue
-            jpg = buf.tobytes()
-            yield (
-                b"--" + boundary + b"\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Content-Length: " + str(len(jpg)).encode("ascii") + b"\r\n\r\n"
-                + jpg + b"\r\n"
-            )
-            _time.sleep(1 / 60)
-
     @app.route("/api/gamepad/screen")
     def api_gamepad_screen():
-        """MJPEG stream of just the 3DS bottom (touch) screen, cropped out of
-        the combined framebuffer — for the phone to mirror and touch, tied to
-        /api/gamepad/touch below. 404s for any console but 3DS instead of
-        streaming a screen there's nothing to touch."""
+        """A single JPEG snapshot of just the 3DS bottom (touch) screen,
+        cropped out of the combined framebuffer — tied to /api/gamepad/touch
+        below. Deliberately one still image per request rather than an MJPEG
+        multipart stream: React Native's <Image> component doesn't reliably
+        decode multipart/x-mixed-replace the way a browser <img> does, so the
+        phone polls this endpoint on a timer with a cache-busting query
+        param instead of opening one long-lived connection. 404s for any
+        console but 3DS instead of serving a screen there's nothing to
+        touch."""
         if not _check_token():
             return jsonify({"error": "unauthorized"}), 403
         _core, console_id = _active_emulator()
         if console_id != "3ds":
             return jsonify({"error": "no_touch_screen"}), 404
+        data, w, h, pitch, fmt = _active_emulator_frame()[0]
+        if data is None:
+            return jsonify({"error": "no_frame"}), 409
+
+        import cv2
+
+        from actions.emulator_frame import crop_bottom_screen_3ds, frame_to_bgr
+
+        bgr = frame_to_bgr(data, w, h, pitch, fmt)
+        if bgr is None:
+            return jsonify({"error": "no_frame"}), 409
+        cropped = crop_bottom_screen_3ds(bgr)
         quality = max(10, min(95, request.args.get("quality", default=70, type=int) or 70))
-        resp = Response(
-            _gamepad_screen_frames(quality),
-            mimetype="multipart/x-mixed-replace; boundary=jarvisframe",
-        )
+        ok, buf = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            return jsonify({"error": "encode_failed"}), 500
+        resp = Response(buf.tobytes(), mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
         return resp

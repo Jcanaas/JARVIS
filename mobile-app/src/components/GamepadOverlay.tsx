@@ -5,6 +5,7 @@ import { useKeepAwake } from "expo-keep-awake";
 import { Ionicons } from "@react-native-vector-icons/ionicons";
 import { C, radius, spacing } from "../theme";
 import { api, PadLayout } from "../api";
+import { loadPadLayout, savePadLayout, resetPadLayout, type PadOffsets } from "../storage";
 import {
   configureForegroundDisplay, ensureNotificationPermission, ensureChannel,
   presentNotification, dismissNotification, onNotificationTapped,
@@ -13,6 +14,7 @@ import AnalogStick, {
   AXIS_MAX, STICK_SIZE, stickTravel,
   type Offset, type Rect, type StickSide,
 } from "./AnalogStick";
+import TouchScreen3DS from "./TouchScreen3DS";
 
 const DIGITAL_LAYOUT: PadLayout = {
   sticks: 0, triggers: false, stick_buttons: false, shoulders: false, face: "nintendo",
@@ -34,6 +36,7 @@ export default function GamepadOverlay() {
   const [open, setOpen] = useState(false);
   const [consoleId, setConsoleId] = useState("");
   const [layout, setLayout] = useState<PadLayout>(DIGITAL_LAYOUT);
+  const [hasTouchScreen, setHasTouchScreen] = useState(false);
   const dismissedRef = useRef(false);
   const announceRef = useRef<number | null>(null);
   const notifIdRef = useRef<string | null>(null);
@@ -73,10 +76,11 @@ export default function GamepadOverlay() {
 
   const poll = useCallback(async () => {
     try {
-      const { active, console: cid, announce, layout: padLayout } = await api.getGamepadStatus();
+      const { active, console: cid, announce, layout: padLayout, has_touch_screen } = await api.getGamepadStatus();
       setAvailable(active);
       setConsoleId(cid || "");
       setLayout(padLayout ? { ...DIGITAL_LAYOUT, ...padLayout } : DIGITAL_LAYOUT);
+      setHasTouchScreen(!!has_touch_screen);
 
       // The desktop asked for the prompt again: honour it even if the user
       // dismissed the last one.
@@ -113,7 +117,14 @@ export default function GamepadOverlay() {
   useEffect(() => () => { clearNotification(); }, [clearNotification]);
 
   if (open) {
-    return <GamepadPad consoleId={consoleId} layout={layout} onClose={() => setOpen(false)} />;
+    return (
+      <GamepadPad
+        consoleId={consoleId}
+        layout={layout}
+        hasTouchScreen={hasTouchScreen}
+        onClose={() => setOpen(false)}
+      />
+    );
   }
 
   return (
@@ -167,8 +178,8 @@ const FACE_LABELS: Record<string, { up: string; left: string; right: string; dow
 const AXIS_SEND_MS = 50;
 
 function GamepadPad({
-  consoleId, layout, onClose,
-}: { consoleId: string; layout: PadLayout; onClose: () => void }) {
+  consoleId, layout, hasTouchScreen, onClose,
+}: { consoleId: string; layout: PadLayout; hasTouchScreen: boolean; onClose: () => void }) {
   useKeepAwake(); // a controller that lets the screen sleep is useless
 
   // Visual state only. What is actually sent lives in the refs below, so a
@@ -177,6 +188,29 @@ function GamepadPad({
   const [offsets, setOffsets] = useState<Record<StickSide, Offset>>({
     left: { x: 0, y: 0 }, right: { x: 0, y: 0 },
   });
+
+  // Repositionable layout (Fase D3): each control *group* — not each single
+  // button, dragging 15 individual buttons on a phone screen would be
+  // fiddly — can be dragged to a device-local offset from its default spot.
+  const [editMode, setEditMode] = useState(false);
+  const [padOffsets, setPadOffsets] = useState<PadOffsets>({});
+
+  useEffect(() => {
+    loadPadLayout().then(setPadOffsets);
+  }, []);
+
+  const dragGroup = useCallback((id: string, offset: Offset) => {
+    setPadOffsets((prev) => {
+      const next = { ...prev, [id]: offset };
+      savePadLayout(next).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const resetGroups = useCallback(() => {
+    setPadOffsets({});
+    resetPadLayout().catch(() => {});
+  }, []);
 
   const rootRef = useRef<View | null>(null);
   const rootOrigin = useRef<Offset>({ x: 0, y: 0 });
@@ -315,97 +349,175 @@ function GamepadPad({
   }, [hitTest, layout.sticks, send, sendAxes]);
 
   const face = FACE_LABELS[layout.face] || FACE_LABELS.nintendo;
+  const zero: Offset = { x: 0, y: 0 };
 
   return (
     <Modal visible transparent={false} animationType="fade" onRequestClose={onClose} supportedOrientations={["landscape"]}>
-      <View
-        ref={rootRef}
-        onLayout={measureRoot}
-        style={styles.pad}
-        // One responder for the whole pad: this is what makes holding a
-        // direction while tapping a button possible at all.
-        onStartShouldSetResponder={() => true}
-        onMoveShouldSetResponder={() => true}
-        // Refuse to hand the responder over while fingers are on controls,
-        // or a stray tap would freeze them. With nothing held we let go, so
-        // the close button still works normally.
-        onResponderTerminationRequest={() => owners.current.size === 0}
-        onResponderGrant={handleTouches}
-        onResponderMove={handleTouches}
-        // Start/End fire for *every* pointer while we hold the responder,
-        // including ones whose target is a different view. Without them a
-        // crisp second-finger tap on a button — down and up between two move
-        // events — would never be seen at all.
-        onResponderStart={handleTouches}
-        onResponderEnd={(e) => handleTouches(e, true)}
-        onResponderRelease={(e) => handleTouches(e, true)}
-        onResponderTerminate={(e) => handleTouches(e, true)}
-      >
-        <TouchableOpacity style={styles.closeBtn} onPress={onClose} hitSlop={12}>
-          <Ionicons name="close" size={20} color={C.textMed} />
-        </TouchableOpacity>
-        {!!consoleId && <Text style={styles.padConsole}>{consoleId.toUpperCase()}</Text>}
-
-        {(layout.shoulders || layout.triggers) && (
-          <View style={styles.shoulderRow}>
-            <View style={styles.shoulderGroup}>
-              {layout.triggers && <PadButton id="btn:l2" label="L2" down={!!down.l2} onMeasure={onMeasure} style={styles.shoulder} />}
-              {layout.shoulders && <PadButton id="btn:l" label="L1" down={!!down.l} onMeasure={onMeasure} style={styles.shoulder} />}
-            </View>
-            <View style={styles.shoulderGroup}>
-              {layout.shoulders && <PadButton id="btn:r" label="R1" down={!!down.r} onMeasure={onMeasure} style={styles.shoulder} />}
-              {layout.triggers && <PadButton id="btn:r2" label="R2" down={!!down.r2} onMeasure={onMeasure} style={styles.shoulder} />}
-            </View>
+      <View style={styles.screen}>
+        {hasTouchScreen && (
+          <View style={styles.touchCol}>
+            <TouchScreen3DS />
           </View>
         )}
+        <View
+          ref={rootRef}
+          onLayout={measureRoot}
+          style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
+          // One responder for the whole pad: this is what makes holding a
+          // direction while tapping a button possible at all. Edit mode
+          // disables this — dragging a group must not also register as
+          // gameplay input — each Draggable becomes its own responder instead.
+          onStartShouldSetResponder={() => !editMode}
+          onMoveShouldSetResponder={() => !editMode}
+          // Refuse to hand the responder over while fingers are on controls,
+          // or a stray tap would freeze them. With nothing held we let go, so
+          // the close button still works normally.
+          onResponderTerminationRequest={() => owners.current.size === 0}
+          onResponderGrant={handleTouches}
+          onResponderMove={handleTouches}
+          // Start/End fire for *every* pointer while we hold the responder,
+          // including ones whose target is a different view. Without them a
+          // crisp second-finger tap on a button — down and up between two move
+          // events — would never be seen at all.
+          onResponderStart={handleTouches}
+          onResponderEnd={(e) => handleTouches(e, true)}
+          onResponderRelease={(e) => handleTouches(e, true)}
+          onResponderTerminate={(e) => handleTouches(e, true)}
+        >
+          <TouchableOpacity style={styles.closeBtn} onPress={onClose} hitSlop={12}>
+            <Ionicons name="close" size={20} color={C.textMed} />
+          </TouchableOpacity>
+          {!!consoleId && <Text style={styles.padConsole}>{consoleId.toUpperCase()}</Text>}
+          <TouchableOpacity
+            style={[styles.editBtn, editMode && styles.editBtnActive]}
+            onPress={() => setEditMode((v) => !v)}
+            hitSlop={12}
+          >
+            <Ionicons name={editMode ? "checkmark" : "move"} size={16} color={editMode ? "#08101F" : C.textMed} />
+          </TouchableOpacity>
+          {editMode && (
+            <TouchableOpacity style={styles.resetBtn} onPress={resetGroups} hitSlop={12}>
+              <Text style={styles.resetText}>Restaurar</Text>
+            </TouchableOpacity>
+          )}
+          {editMode && <Text style={styles.editHint}>Arrastra los grupos para moverlos</Text>}
 
-        <View style={styles.mainRow}>
-          <View style={styles.dpad}>
-            <PadButton id="btn:up" label="▲" down={!!down.up} onMeasure={onMeasure} style={[styles.dBtn, styles.dUp]} />
-            <PadButton id="btn:left" label="◀" down={!!down.left} onMeasure={onMeasure} style={[styles.dBtn, styles.dLeft]} />
-            <PadButton id="btn:right" label="▶" down={!!down.right} onMeasure={onMeasure} style={[styles.dBtn, styles.dRight]} />
-            <PadButton id="btn:down" label="▼" down={!!down.down} onMeasure={onMeasure} style={[styles.dBtn, styles.dDown]} />
+          {(layout.shoulders || layout.triggers) && (
+            <View style={styles.shoulderRow}>
+              <Draggable id="group:shoulder-l" editMode={editMode} offset={padOffsets["group:shoulder-l"] || zero} onDrag={dragGroup} style={styles.shoulderGroup}>
+                {layout.triggers && <PadButton id="btn:l2" label="L2" down={!!down.l2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
+                {layout.shoulders && <PadButton id="btn:l" label="L1" down={!!down.l} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
+              </Draggable>
+              <Draggable id="group:shoulder-r" editMode={editMode} offset={padOffsets["group:shoulder-r"] || zero} onDrag={dragGroup} style={styles.shoulderGroup}>
+                {layout.shoulders && <PadButton id="btn:r" label="R1" down={!!down.r} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
+                {layout.triggers && <PadButton id="btn:r2" label="R2" down={!!down.r2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
+              </Draggable>
+            </View>
+          )}
+
+          <View style={styles.mainRow}>
+            <Draggable id="group:dpad" editMode={editMode} offset={padOffsets["group:dpad"] || zero} onDrag={dragGroup} style={styles.dpad}>
+              <PadButton id="btn:up" label="▲" down={!!down.up} onMeasure={onMeasure} style={[styles.dBtn, styles.dUp]} disabled={editMode} />
+              <PadButton id="btn:left" label="◀" down={!!down.left} onMeasure={onMeasure} style={[styles.dBtn, styles.dLeft]} disabled={editMode} />
+              <PadButton id="btn:right" label="▶" down={!!down.right} onMeasure={onMeasure} style={[styles.dBtn, styles.dRight]} disabled={editMode} />
+              <PadButton id="btn:down" label="▼" down={!!down.down} onMeasure={onMeasure} style={[styles.dBtn, styles.dDown]} disabled={editMode} />
+            </Draggable>
+
+            <Draggable id="group:center" editMode={editMode} offset={padOffsets["group:center"] || zero} onDrag={dragGroup} style={styles.centerCol}>
+              <PadButton id="btn:select" label="SELECT" down={!!down.select} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
+              <PadButton id="btn:start" label="START" down={!!down.start} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
+            </Draggable>
+
+            <Draggable id="group:face" editMode={editMode} offset={padOffsets["group:face"] || zero} onDrag={dragGroup} style={styles.face}>
+              <PadButton id="btn:x" label={face.up} down={!!down.x} onMeasure={onMeasure} style={[styles.fBtn, styles.fUp]} disabled={editMode} />
+              <PadButton id="btn:y" label={face.left} down={!!down.y} onMeasure={onMeasure} style={[styles.fBtn, styles.fLeft]} disabled={editMode} />
+              <PadButton id="btn:a" label={face.right} down={!!down.a} onMeasure={onMeasure} style={[styles.fBtn, styles.fRight]} disabled={editMode} />
+              <PadButton id="btn:b" label={face.down} down={!!down.b} onMeasure={onMeasure} style={[styles.fBtn, styles.fDown]} disabled={editMode} />
+            </Draggable>
           </View>
 
-          <View style={styles.centerCol}>
-            <PadButton id="btn:select" label="SELECT" down={!!down.select} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} />
-            <PadButton id="btn:start" label="START" down={!!down.start} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} />
-          </View>
-
-          <View style={styles.face}>
-            <PadButton id="btn:x" label={face.up} down={!!down.x} onMeasure={onMeasure} style={[styles.fBtn, styles.fUp]} />
-            <PadButton id="btn:y" label={face.left} down={!!down.y} onMeasure={onMeasure} style={[styles.fBtn, styles.fLeft]} />
-            <PadButton id="btn:a" label={face.right} down={!!down.a} onMeasure={onMeasure} style={[styles.fBtn, styles.fRight]} />
-            <PadButton id="btn:b" label={face.down} down={!!down.b} onMeasure={onMeasure} style={[styles.fBtn, styles.fDown]} />
-          </View>
-        </View>
-
-        {layout.sticks > 0 && (
-          <View style={styles.stickRow}>
-            <AnalogStick
-              id="stick:left"
-              label={layout.sticks > 1 ? "IZQ" : "STICK"}
-              offset={offsets.left}
-              onMeasure={onMeasure}
-            />
-            {layout.sticks > 1 && (
+          {layout.sticks > 0 && (
+            <Draggable id="group:sticks" editMode={editMode} offset={padOffsets["group:sticks"] || zero} onDrag={dragGroup} style={styles.stickRow}>
               <AnalogStick
-                id="stick:right"
-                label="DCH"
-                offset={offsets.right}
+                id="stick:left"
+                label={layout.sticks > 1 ? "IZQ" : "STICK"}
+                offset={offsets.left}
                 onMeasure={onMeasure}
               />
-            )}
-            {layout.stick_buttons && (
-              <View style={styles.stickButtons}>
-                <PadButton id="btn:l3" label="L3" down={!!down.l3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} />
-                <PadButton id="btn:r3" label="R3" down={!!down.r3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} />
-              </View>
-            )}
-          </View>
-        )}
+              {layout.sticks > 1 && (
+                <AnalogStick
+                  id="stick:right"
+                  label="DCH"
+                  offset={offsets.right}
+                  onMeasure={onMeasure}
+                />
+              )}
+              {layout.stick_buttons && (
+                <View style={styles.stickButtons}>
+                  <PadButton id="btn:l3" label="L3" down={!!down.l3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
+                  <PadButton id="btn:r3" label="R3" down={!!down.r3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
+                </View>
+              )}
+            </Draggable>
+          )}
+        </View>
       </View>
     </Modal>
+  );
+}
+
+/**
+ * Wraps one control group so it can be dragged to a device-local offset in
+ * edit mode. Outside edit mode it's a plain positioned View — no responder
+ * of its own, so it never competes with GamepadPad's single-responder
+ * gameplay handling (see PadButton's docstring for why that matters).
+ */
+function Draggable({
+  id, editMode, offset, onDrag, children, style,
+}: {
+  id: string;
+  editMode: boolean;
+  offset: Offset;
+  onDrag: (id: string, offset: Offset) => void;
+  children: React.ReactNode;
+  style?: any;
+}) {
+  const start = useRef<Offset>({ x: 0, y: 0 });
+  const dragging = useRef(false);
+
+  const onGrant = useCallback((e: any) => {
+    dragging.current = true;
+    start.current = { x: e.nativeEvent.pageX - offset.x, y: e.nativeEvent.pageY - offset.y };
+  }, [offset]);
+
+  const onMove = useCallback((e: any) => {
+    if (!dragging.current) return;
+    onDrag(id, {
+      x: e.nativeEvent.pageX - start.current.x,
+      y: e.nativeEvent.pageY - start.current.y,
+    });
+  }, [id, onDrag]);
+
+  const onRelease = useCallback(() => { dragging.current = false; }, []);
+
+  const positioned = [style, { transform: [{ translateX: offset.x }, { translateY: offset.y }] }];
+
+  if (!editMode) {
+    return <View style={positioned}>{children}</View>;
+  }
+
+  return (
+    <View
+      style={[positioned, styles.draggable]}
+      onStartShouldSetResponder={() => true}
+      onMoveShouldSetResponder={() => true}
+      onResponderGrant={onGrant}
+      onResponderMove={onMove}
+      onResponderRelease={onRelease}
+      onResponderTerminate={onRelease}
+    >
+      {children}
+    </View>
   );
 }
 
@@ -418,7 +530,7 @@ function GamepadPad({
  * decide which of them the live touches are sitting on.
  */
 function PadButton({
-  id, label, down, style, textStyle, onMeasure,
+  id, label, down, style, textStyle, onMeasure, disabled,
 }: {
   id: string;
   label: string;
@@ -426,6 +538,10 @@ function PadButton({
   style?: any;
   textStyle?: any;
   onMeasure: (id: string, rect: Rect) => void;
+  /** True while the pad is in edit mode — the root responder is off then
+   *  (see GamepadPad), so this button won't receive input either way; this
+   *  just dims it to make that visually obvious. */
+  disabled?: boolean;
 }) {
   const ref = useRef<View | null>(null);
   const measure = useCallback(() => {
@@ -433,7 +549,7 @@ function PadButton({
   }, [id, onMeasure]);
 
   return (
-    <View ref={ref} onLayout={measure} style={[styles.btn, style, down && styles.btnDown]}>
+    <View ref={ref} onLayout={measure} style={[styles.btn, style, down && styles.btnDown, disabled && styles.btnDisabled]}>
       <Text style={[styles.btnText, textStyle]}>{label}</Text>
     </View>
   );
@@ -463,7 +579,22 @@ const styles = StyleSheet.create({
   secondaryText: { color: C.textMed, fontSize: 13.5, fontWeight: "600" },
   footnote: { color: C.textMed, fontSize: 10.5, textAlign: "center", opacity: 0.8, lineHeight: 15 },
 
+  screen: { flex: 1, flexDirection: "row", backgroundColor: C.bg },
+  touchCol: { alignItems: "center", justifyContent: "center", paddingLeft: 20, paddingVertical: 12 },
   pad: { flex: 1, backgroundColor: C.bg, justifyContent: "center", paddingHorizontal: 24, paddingVertical: 12 },
+  // Narrower when sharing the screen with the 3DS touch mirror, so the pad
+  // doesn't crowd it off a phone-sized landscape width.
+  padWithTouchScreen: { paddingHorizontal: 12 },
+  editBtn: {
+    position: "absolute", top: 14, right: 64, width: 36, height: 36, borderRadius: 18,
+    backgroundColor: "rgba(255,255,255,0.06)", alignItems: "center", justifyContent: "center", zIndex: 2,
+  },
+  editBtnActive: { backgroundColor: C.pri },
+  resetBtn: { position: "absolute", top: 14, right: 108, height: 36, paddingHorizontal: 12, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.06)", alignItems: "center", justifyContent: "center", zIndex: 2 },
+  resetText: { color: C.textMed, fontSize: 11, fontWeight: "700" },
+  editHint: { position: "absolute", top: 58, alignSelf: "center", color: C.textMed, fontSize: 11, opacity: 0.8 },
+  draggable: { borderWidth: 1, borderColor: C.pri, borderStyle: "dashed", borderRadius: 12 },
+  btnDisabled: { opacity: 0.55 },
   shoulderGroup: { flexDirection: "row", gap: 8 },
   stickRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 14, paddingHorizontal: 10 },
   // L3/R3 as real buttons: a touchscreen has no way to click a stick in, and
