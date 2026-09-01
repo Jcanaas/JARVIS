@@ -1001,6 +1001,85 @@ class EmulatorRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 202)
         self.assertIn(("emulator_download_error", {"stem": "Metroid", "error": "sin espacio"}), published)
 
+    # -- versions + local import (Fase C) ------------------------------------
+
+    def test_catalog_versions_success(self):
+        from actions.rom_catalog import Rom
+        usa = Rom(title="Metroid", console_id="gba", stem="Metroid (USA)", region="USA")
+        eu = Rom(title="Metroid", console_id="gba", stem="Metroid (Europe)", region="Europe")
+        with patch("actions.rom_catalog.get_index", return_value=[usa]), \
+             patch("actions.rom_catalog.versions_for", return_value=[usa, eu]), \
+             patch("actions.rom_catalog.local_path", return_value=None):
+            resp = self.client.get(
+                "/api/emulator/catalog/versions?console_id=gba&stem=Metroid+(USA)"
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(len(body), 2)
+        self.assertIn("version_label", body[0])
+
+    def test_catalog_versions_not_found(self):
+        with patch("actions.rom_catalog.get_index", return_value=[]):
+            resp = self.client.get(
+                "/api/emulator/catalog/versions?console_id=gba&stem=missing"
+            )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_library_import_missing_file(self):
+        resp = self.client.post(
+            "/api/emulator/library/import", data={"console_id": "gba"}
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_library_import_missing_console_id(self):
+        resp = self.client.post(
+            "/api/emulator/library/import",
+            data={"file": (io.BytesIO(b"rom bytes"), "game.gba")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_library_import_saves_and_registers_a_real_rom(self):
+        # Real actions.rom_catalog.roms_dir + actions.game_library.add_local_rom,
+        # not mocked — isolated to a temp DATA_DIR so this never touches this
+        # machine's actual ROM library.
+        with tempfile.TemporaryDirectory() as data_dir:
+            with patch("actions.rom_catalog.DATA_DIR", Path(data_dir)):
+                resp = self.client.post(
+                    "/api/emulator/library/import",
+                    data={
+                        "file": (io.BytesIO(b"pretend rom contents"), "MyGame.gba"),
+                        "console_id": "gba",
+                        "title": "My Game",
+                    },
+                    content_type="multipart/form-data",
+                )
+                self.assertEqual(resp.status_code, 200)
+                body = resp.get_json()
+                self.assertTrue(body["ok"])
+                self.assertEqual(body["entry"]["title"], "My Game")
+                self.assertEqual(body["entry"]["console_id"], "gba")
+                saved = Path(body["entry"]["path"])
+                self.assertTrue(saved.is_file())
+                self.assertEqual(saved.read_bytes(), b"pretend rom contents")
+
+    def test_library_import_rejects_a_duplicate_filename(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            with patch("actions.rom_catalog.DATA_DIR", Path(data_dir)):
+                first = {
+                    "file": (io.BytesIO(b"one"), "Dup.gba"),
+                    "console_id": "gba",
+                }
+                self.client.post("/api/emulator/library/import", data=first,
+                                 content_type="multipart/form-data")
+                second = {
+                    "file": (io.BytesIO(b"two"), "Dup.gba"),
+                    "console_id": "gba",
+                }
+                resp = self.client.post("/api/emulator/library/import", data=second,
+                                        content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 409)
+
 
 if __name__ == "__main__":
     unittest.main()

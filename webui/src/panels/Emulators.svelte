@@ -4,12 +4,14 @@
   // feature). The core (actions/libretro.py) is driven headless by
   // actions/emulator_session.py; this panel just talks to that over HTTP:
   // the video is a plain <img> pointed at the MJPEG stream, input is a POST
-  // per press, no WebSocket anywhere. Only ROMs already in «Mi biblioteca»
-  // are playable from here — browsing/downloading the catalogue is backend
-  // -only for now (actions/rom_catalog.py's routes exist and are tested,
-  // just not wired to a screen yet).
+  // per press, no WebSocket anywhere. Two top-level views besides the
+  // player: "Mi biblioteca" (ROMs already owned) and "Catálogo" (search/
+  // download via actions/rom_catalog.py, or local import for consoles with
+  // no catalog — PS2, 3DS).
+  import { onDestroy } from 'svelte'
   import * as api from '../api.js'
   import { emulatorPlaying } from '../stores/emulator.js'
+  import { events } from '../stores/sse.js'
   import Icon from '../lib/Icon.svelte'
   import ControlsDialog from '../lib/ControlsDialog.svelte'
 
@@ -26,6 +28,147 @@
   let actionError = $state('')
   let libraryError = $state('') // start() failed before the player mounted (e.g. missing PS2 BIOS)
   let biosBusy = $state(false)
+
+  // -- Catálogo (Fase C) ---------------------------------------------------
+  let view = $state('library') // 'library' | 'catalog' | 'catalogDetail'
+  let consoles = $state([])
+  let catalogConsoleId = $state('gba')
+  let catalogRegion = $state('')
+  let catalogQuery = $state('')
+  let catalogResults = $state([])
+  let catalogLoading = $state(false)
+  let catalogError = $state('')
+  let catalogSearchTimer = null
+  let catalogSearchToken = 0
+
+  let detailRom = $state(null)
+  let detailVersions = $state([])
+  let detailLoading = $state(false)
+  // stem -> {fraction, status: 'downloading'|'ready'|'error', error}
+  let downloadState = $state({})
+
+  let importFile = $state(null)
+  let importTitle = $state('')
+  let importBusy = $state(false)
+  let importError = $state('')
+
+  const catalogConsole = $derived(consoles.find((c) => c.id === catalogConsoleId))
+
+  async function loadConsoles() {
+    try {
+      consoles = await api.getEmulatorConsoles()
+      if (consoles.length && !consoles.some((c) => c.id === catalogConsoleId)) {
+        catalogConsoleId = consoles[0].id
+      }
+    } catch (e) {
+      catalogError = e.message
+    }
+  }
+
+  async function openCatalog() {
+    view = 'catalog'
+    if (!consoles.length) await loadConsoles()
+    if (catalogConsole?.has_catalog) runCatalogSearch()
+  }
+
+  function selectCatalogConsole(id) {
+    catalogConsoleId = id
+    catalogQuery = ''
+    catalogResults = []
+    catalogError = ''
+    const console_ = consoles.find((c) => c.id === id)
+    if (console_?.has_catalog) runCatalogSearch()
+  }
+
+  function queueCatalogSearch() {
+    clearTimeout(catalogSearchTimer)
+    catalogSearchTimer = setTimeout(runCatalogSearch, 280)
+  }
+
+  async function runCatalogSearch() {
+    const token = ++catalogSearchToken
+    catalogLoading = true
+    catalogError = ''
+    try {
+      const results = catalogQuery.trim()
+        ? await api.searchEmulatorCatalog(catalogConsoleId, catalogQuery.trim(), catalogRegion)
+        : await api.getEmulatorCatalogPopular(catalogConsoleId)
+      if (token !== catalogSearchToken) return // a newer search already landed
+      catalogResults = results
+    } catch (e) {
+      if (token !== catalogSearchToken) return
+      catalogError = e.message
+      catalogResults = []
+    } finally {
+      if (token === catalogSearchToken) catalogLoading = false
+    }
+  }
+
+  async function openDetail(rom) {
+    detailRom = rom
+    detailVersions = [rom]
+    view = 'catalogDetail'
+    detailLoading = true
+    try {
+      detailVersions = await api.getEmulatorCatalogVersions(rom.console_id, rom.stem)
+    } catch {
+      // A rom with no other known versions isn't an error — just itself.
+    } finally {
+      detailLoading = false
+    }
+  }
+
+  function backToCatalog() {
+    view = 'catalog'
+    detailRom = null
+  }
+
+  async function startDownload(rom) {
+    downloadState = { ...downloadState, [rom.stem]: { fraction: 0, status: 'downloading' } }
+    try {
+      await api.downloadEmulatorRom(rom.console_id, rom.stem)
+    } catch (e) {
+      downloadState = { ...downloadState, [rom.stem]: { status: 'error', error: e.message } }
+    }
+  }
+
+  async function playFromCatalog(rom) {
+    await play({ entry_id: `rom:${rom.stem}`, console_id: rom.console_id, title: rom.title })
+  }
+
+  async function doImport() {
+    if (!importFile) return
+    importBusy = true
+    importError = ''
+    try {
+      await api.importEmulatorRom(importFile, catalogConsoleId, importTitle)
+      importFile = null
+      importTitle = ''
+      view = 'library'
+      loadLibrary()
+    } catch (e) {
+      importError = e.message
+    } finally {
+      importBusy = false
+    }
+  }
+
+  const unsubscribeCatalogEvents = events.subscribe(({ type, data }) => {
+    if (type === 'emulator_download_progress') {
+      downloadState = {
+        ...downloadState,
+        [data.stem]: { fraction: data.fraction, status: 'downloading' },
+      }
+    } else if (type === 'emulator_download_ready') {
+      downloadState = { ...downloadState, [data.stem]: { status: 'ready' } }
+      catalogResults = catalogResults.map((r) =>
+        r.stem === data.stem ? { ...r, downloaded: true } : r
+      )
+    } else if (type === 'emulator_download_error') {
+      downloadState = { ...downloadState, [data.stem]: { status: 'error', error: data.error } }
+    }
+  })
+  onDestroy(unsubscribeCatalogEvents)
 
   let statusTimer = null
   let videoWrap = $state()
@@ -316,8 +459,13 @@
 <div class="panel">
   {#if !playing}
     <div class="header-row">
-      <h2>Emuladores</h2>
-      <button class="ghost" onclick={loadLibrary} title="Actualizar"><Icon name="refresh" size={16} /></button>
+      <div class="tabs">
+        <button class="tab" class:active={view === 'library'} onclick={() => (view = 'library')}>Mi biblioteca</button>
+        <button class="tab" class:active={view !== 'library'} onclick={openCatalog}>Catálogo</button>
+      </div>
+      {#if view === 'library'}
+        <button class="ghost" onclick={loadLibrary} title="Actualizar"><Icon name="refresh" size={16} /></button>
+      {/if}
     </div>
 
     {#if libraryError}
@@ -332,29 +480,141 @@
       </div>
     {/if}
 
-    {#if loading}
-      <div class="empty">Cargando…</div>
-    {:else if error}
-      <div class="empty error">{error}</div>
-    {:else if !entries.length}
-      <div class="empty">
-        Tu biblioteca está vacía. Copia una ROM en <code>roms/&lt;consola&gt;/</code> y pulsa actualizar.
-      </div>
-    {:else}
-      <div class="grid">
-        {#each entries as entry (entry.entry_id)}
-          <button class="card" onclick={() => play(entry)}>
-            <div class="thumb-wrap">
-              {#if entry.poster_url}
-                <img src={entry.poster_url} alt="" loading="lazy" class="thumb" />
-              {:else}
-                <div class="thumb thumb-placeholder"><Icon name="games" size={28} /></div>
-              {/if}
-              <span class="console-badge">{entry.platform}</span>
-            </div>
-            <div class="card-title">{entry.title}</div>
+    {#if view === 'library'}
+      {#if loading}
+        <div class="empty">Cargando…</div>
+      {:else if error}
+        <div class="empty error">{error}</div>
+      {:else if !entries.length}
+        <div class="empty">
+          Tu biblioteca está vacía. Copia una ROM en <code>roms/&lt;consola&gt;/</code>, pulsa actualizar, o
+          descarga una desde el <button class="linklike" onclick={openCatalog}>Catálogo</button>.
+        </div>
+      {:else}
+        <div class="grid">
+          {#each entries as entry (entry.entry_id)}
+            <button class="card" onclick={() => play(entry)}>
+              <div class="thumb-wrap">
+                {#if entry.poster_url}
+                  <img src={entry.poster_url} alt="" loading="lazy" class="thumb" />
+                {:else}
+                  <div class="thumb thumb-placeholder"><Icon name="games" size={28} /></div>
+                {/if}
+                <span class="console-badge">{entry.platform}</span>
+              </div>
+              <div class="card-title">{entry.title}</div>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {:else if view === 'catalog'}
+      <div class="console-chips">
+        {#each consoles as c (c.id)}
+          <button class="chip" class:active={c.id === catalogConsoleId} onclick={() => selectCatalogConsole(c.id)}>
+            {c.short}
           </button>
         {/each}
+      </div>
+
+      {#if catalogConsole && !catalogConsole.has_catalog}
+        <div class="import-form">
+          <p class="hint">
+            No hay catálogo de descarga para {catalogConsole.name} — importa un archivo que ya tengas.
+          </p>
+          <input
+            type="file"
+            accept={catalogConsole.rom_exts.join(',')}
+            onchange={(e) => (importFile = e.target.files?.[0] || null)}
+          />
+          <input type="text" placeholder="Título (opcional)" bind:value={importTitle} />
+          {#if importError}<div class="action-error">{importError}</div>{/if}
+          <button class="primary" disabled={!importFile || importBusy} onclick={doImport}>
+            {importBusy ? 'Importando…' : 'Importar'}
+          </button>
+        </div>
+      {:else}
+        <div class="region-chips">
+          {#each [['', 'Todas'], ['USA', 'USA'], ['Europe', 'Europa'], ['Japan', 'Japón'], ['Spain', 'España']] as [value, label] (value)}
+            <button
+              class="chip small"
+              class:active={catalogRegion === value}
+              onclick={() => { catalogRegion = value; runCatalogSearch() }}
+            >{label}</button>
+          {/each}
+        </div>
+        <input
+          type="text"
+          class="search-box"
+          placeholder="Buscar…"
+          bind:value={catalogQuery}
+          oninput={queueCatalogSearch}
+        />
+
+        {#if catalogLoading}
+          <div class="empty">Cargando…</div>
+        {:else if catalogError}
+          <div class="empty error">{catalogError}</div>
+        {:else if !catalogResults.length}
+          <div class="empty">Sin resultados.</div>
+        {:else}
+          <div class="grid">
+            {#each catalogResults as rom (rom.stem)}
+              <button class="card" onclick={() => openDetail(rom)}>
+                <div class="thumb-wrap">
+                  {#if rom.poster_url}
+                    <img src={rom.poster_url} alt="" loading="lazy" class="thumb" />
+                  {:else}
+                    <div class="thumb thumb-placeholder"><Icon name="games" size={28} /></div>
+                  {/if}
+                  {#if rom.downloaded}<span class="console-badge on-disk">EN DISCO</span>{/if}
+                </div>
+                <div class="card-title">{rom.title}</div>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+    {:else if view === 'catalogDetail' && detailRom}
+      <div class="detail">
+        <button class="ghost back-btn" onclick={backToCatalog}><Icon name="up" size={16} /> Volver</button>
+        <div class="detail-body">
+          {#if detailRom.poster_url}
+            <img src={detailRom.poster_url} alt="" class="detail-art" />
+          {:else}
+            <div class="detail-art thumb-placeholder"><Icon name="games" size={40} /></div>
+          {/if}
+          <div class="detail-info">
+            <h3>{detailRom.title}</h3>
+            {#if detailVersions.length > 1}
+              <select
+                class="version-select"
+                onchange={(e) => (detailRom = detailVersions.find((v) => v.stem === e.target.value) || detailRom)}
+              >
+                {#each detailVersions as v (v.stem)}
+                  <option value={v.stem} selected={v.stem === detailRom.stem}>{v.version_label || v.region || v.stem}</option>
+                {/each}
+              </select>
+            {/if}
+            <p class="detail-meta">{detailRom.region || 'Región sin indicar'} · {detailRom.size_label}</p>
+            {#if !detailRom.available}
+              <p class="warn">{detailRom.unavailable_reason || 'Esta versión no está disponible para descargar.'}</p>
+            {/if}
+
+            {#if downloadState[detailRom.stem]?.status === 'downloading'}
+              <div class="progress"><div class="progress-bar" style={`width:${(downloadState[detailRom.stem].fraction || 0) * 100}%`}></div></div>
+              <button class="primary" disabled>Descargando…</button>
+            {:else if downloadState[detailRom.stem]?.status === 'error'}
+              <div class="action-error">{downloadState[detailRom.stem].error}</div>
+              <button class="primary" onclick={() => startDownload(detailRom)}>Reintentar</button>
+            {:else if detailRom.downloaded || downloadState[detailRom.stem]?.status === 'ready'}
+              <button class="primary" onclick={() => playFromCatalog(detailRom)}>▶ Jugar</button>
+            {:else if !detailRom.available}
+              <button class="primary" disabled>No disponible</button>
+            {:else}
+              <button class="primary" onclick={() => startDownload(detailRom)}>⬇ Descargar ROM</button>
+            {/if}
+          </div>
+        </div>
       </div>
     {/if}
   {:else}
@@ -452,7 +712,59 @@
   .panel { height: 100%; min-height: 0; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
 
   .header-row { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
-  .header-row h2 { margin: 0; font-size: 16px; }
+
+  .tabs { display: flex; gap: 4px; }
+  .tab {
+    background: transparent; border: none; color: var(--text-med); font-size: 14px; font-weight: 600;
+    padding: 6px 4px; cursor: pointer; border-bottom: 2px solid transparent;
+  }
+  .tab.active { color: var(--text); border-bottom-color: var(--pri); }
+
+  .linklike { background: none; border: none; color: var(--pri); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
+
+  .console-chips, .region-chips { display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
+  .chip {
+    background: var(--panel-2); border: 1px solid var(--border-a); border-radius: 999px;
+    color: var(--text-med); font-size: 12px; padding: 6px 12px; cursor: pointer;
+  }
+  .chip.small { font-size: 11px; padding: 4px 10px; }
+  .chip.active { background: var(--pri-gho); border-color: var(--pri); color: var(--pri); }
+
+  .search-box {
+    background: var(--panel-2); border: 1px solid var(--border-a); border-radius: var(--radius-sm);
+    color: var(--text); padding: 8px 12px; font-size: 13px; flex-shrink: 0;
+  }
+
+  .on-disk { background: rgba(50, 180, 100, 0.85); }
+
+  .import-form { display: flex; flex-direction: column; gap: 10px; max-width: 340px; }
+  .import-form input[type="text"] {
+    background: var(--panel-2); border: 1px solid var(--border-a); border-radius: var(--radius-sm);
+    color: var(--text); padding: 8px 12px; font-size: 13px;
+  }
+  .hint { color: var(--text-med); font-size: 12.5px; margin: 0; }
+
+  .primary {
+    background: var(--pri); border: none; border-radius: var(--radius-sm);
+    color: #08101F; font-weight: 700; font-size: 13px; padding: 9px 16px; cursor: pointer;
+    align-self: flex-start;
+  }
+  .primary:disabled { opacity: 0.6; cursor: default; }
+
+  .detail { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+  .back-btn { width: auto; padding: 0 12px; gap: 6px; align-self: flex-start; }
+  .detail-body { display: flex; gap: 18px; }
+  .detail-art { width: 160px; height: 160px; border-radius: var(--radius-sm); object-fit: cover; background: var(--panel-2); flex-shrink: 0; }
+  .detail-info { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .detail-info h3 { margin: 0; font-size: 16px; }
+  .detail-meta { color: var(--text-med); font-size: 12.5px; margin: 0; }
+  .version-select {
+    background: var(--panel-2); border: 1px solid var(--border-a); border-radius: var(--radius-sm);
+    color: var(--text); padding: 6px 10px; font-size: 12.5px; align-self: flex-start;
+  }
+  .warn { color: #d9a441; font-size: 12.5px; margin: 0; }
+  .progress { width: 100%; max-width: 260px; height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+  .progress-bar { height: 100%; background: var(--pri); transition: width 0.2s; }
 
   .ghost {
     background: var(--panel-2); border: 1px solid var(--border-a); border-radius: var(--radius-sm);

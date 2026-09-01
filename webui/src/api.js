@@ -132,6 +132,30 @@ export const bindEmulatorControl = (consoleId, button, code) =>
 export const resetEmulatorControls = (consoleId) =>
   postJSON('/api/emulator/controls/reset', { console_id: consoleId })
 
+// Catalog / downloader (Fase C) — backend from Fase 4/5, this is the UI for it.
+export const getEmulatorConsoles = () => getJSON('/api/emulator/consoles')
+export const getEmulatorCores = () => getJSON('/api/emulator/cores')
+export const installEmulatorCore = (consoleId) =>
+  postJSON('/api/emulator/cores/install', { console_id: consoleId })
+export const searchEmulatorCatalog = (consoleId, q, region) =>
+  getJSON(`/api/emulator/catalog/search?console_id=${encodeURIComponent(consoleId)}&q=${encodeURIComponent(q)}&region=${encodeURIComponent(region || '')}`)
+export const getEmulatorCatalogPopular = (consoleId) =>
+  getJSON(`/api/emulator/catalog/popular?console_id=${encodeURIComponent(consoleId)}`)
+export const getEmulatorCatalogVersions = (consoleId, stem) =>
+  getJSON(`/api/emulator/catalog/versions?console_id=${encodeURIComponent(consoleId)}&stem=${encodeURIComponent(stem)}`)
+export const downloadEmulatorRom = (consoleId, stem) =>
+  postJSON('/api/emulator/catalog/download', { console_id: consoleId, stem })
+export async function importEmulatorRom(file, consoleId, title) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('console_id', consoleId)
+  if (title) form.append('title', title)
+  const res = await fetch('/api/emulator/library/import', { method: 'POST', body: form })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`)
+  return data
+}
+
 // Calendar
 export const getCalendarEvents = (timeMin, timeMax) =>
   getJSON(`/api/calendar/events?time_min=${encodeURIComponent(timeMin)}&time_max=${encodeURIComponent(timeMax)}`)

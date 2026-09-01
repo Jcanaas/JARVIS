@@ -1756,6 +1756,10 @@ def _make_app(host_ref):
         d["downloaded"] = rc.local_path(rom) is not None
         return d
 
+    def _find_rom(console_id: str, stem: str):
+        from actions import rom_catalog as rc
+        return next((r for r in rc.get_index(console_id) if r.stem == stem), None)
+
     @app.route("/api/emulator/catalog/search")
     def api_emulator_catalog_search():
         console_id = request.args.get("console_id") or "gba"
@@ -1787,8 +1791,7 @@ def _make_app(host_ref):
             return jsonify({"error": "missing_console_id_or_stem"}), 400
 
         try:
-            from actions import rom_catalog as rc
-            rom = next((r for r in rc.get_index(console_id) if r.stem == stem), None)
+            rom = _find_rom(console_id, stem)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
         if rom is None:
@@ -1810,6 +1813,53 @@ def _make_app(host_ref):
 
         threading.Thread(target=_run, daemon=True).start()
         return jsonify({"ok": True}), 202
+
+    @app.route("/api/emulator/catalog/versions")
+    def api_emulator_catalog_versions():
+        console_id = request.args.get("console_id") or "gba"
+        stem = request.args.get("stem") or ""
+        try:
+            from actions import rom_catalog as rc
+            rom = _find_rom(console_id, stem)
+            if rom is None:
+                return jsonify({"error": "not_found"}), 404
+            versions = rc.versions_for(rom)
+            return jsonify([
+                {**_rom_dict(v), "version_label": rc.version_label(v)}
+                for v in versions
+            ])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/emulator/library/import", methods=["POST"])
+    def api_emulator_library_import():
+        # Web equivalent of ui/panels/emulators.py's _import_local_rom(),
+        # which registers whatever path a native file picker returned — a
+        # browser upload has no such path (only the file's bytes), so this
+        # first saves it into the console's own roms_dir(), the same
+        # directory actions/game_library.py's scan_roms() already treats as
+        # a first-class way to add a game, then registers it exactly like
+        # the legacy panel does.
+        f = request.files.get("file")
+        console_id = request.form.get("console_id") or ""
+        title = request.form.get("title") or ""
+        if not f or not f.filename:
+            return jsonify({"error": "missing_file"}), 400
+        if not console_id:
+            return jsonify({"error": "missing_console_id"}), 400
+
+        try:
+            from actions import rom_catalog as rc
+            from actions import game_library as gl
+
+            dest = rc.roms_dir(console_id) / f.filename
+            if dest.exists():
+                return jsonify({"error": f"«{f.filename}» ya está en tu biblioteca"}), 409
+            f.save(dest)
+            entry = gl.add_local_rom(dest, console_id, title=title)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        return jsonify({"ok": True, "entry": entry.to_dict()})
 
     # -- Emuladores (streaming) -------------------------------------------
     # MJPEG (multipart/x-mixed-replace) over a plain <img>, no WebSocket and
