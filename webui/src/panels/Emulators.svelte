@@ -27,8 +27,14 @@
   let streamNonce = $state(0) // bumped on every start() so the <img> can't show a stale MJPEG connection from a previous game
   // 3DS-only: the combined top+bottom frame shows the bottom (touch) screen
   // on the PC too, which is redundant once it's mirrored to the phone via
-  // actions/lan_dashboard.py's /api/gamepad/screen — this crops it out of
-  // the desktop view without touching the stream itself.
+  // actions/lan_dashboard.py's /api/gamepad/screen. Cropped server-side
+  // (?crop=top on /api/emulator/stream, actions/webui_server.py) rather
+  // than with CSS on the full frame — cropping first means the <img> keeps
+  // its native resolution and the existing max-width/max-height "contain"
+  // fit still works exactly as it always did; forcing the *displayed* box
+  // into the cropped aspect ratio via CSS instead upscaled the same source
+  // pixels across a bigger area than before, which read as a resolution/
+  // bitrate drop that was never really there.
   let hideBottomScreen = $state(false)
   let actionError = $state('')
   let libraryError = $state('') // start() failed before the player mounted (e.g. missing PS2 BIOS)
@@ -304,27 +310,18 @@
     }
   }
 
-  // -- Input: touch/mouse pad -------------------------------------------------
+  // -- Input: buttons -------------------------------------------------------
   // Fire-and-forget: a press/release is a single POST, no batching — human
   // input rates never come close to needing it, and the emulation loop never
   // waits on this either way (actions/emulator_session.py's thread is the
-  // only thing that touches the core).
+  // only thing that touches the core). The desktop panel used to also draw
+  // its own on-screen d-pad/face-button pad (mouse/touch clickable) — pulled
+  // per user feedback: on a PC every digital button already has a keyboard
+  // binding (default or remapped, see the controls dialog below), so a
+  // second on-screen copy was pure clutter. Kept as sendButton() because
+  // onKeydown/onKeyup below still need it; only the extra UI is gone.
   function sendButton(name, pressed) {
     api.sendEmulatorInput({ buttons: [{ name, pressed }] }).catch(() => {})
-  }
-
-  function pressButton(name) {
-    return (e) => {
-      e.preventDefault()
-      sendButton(name, true)
-    }
-  }
-
-  function releaseButton(name) {
-    return (e) => {
-      e.preventDefault()
-      sendButton(name, false)
-    }
   }
 
   // -- Input: keyboard ----------------------------------------------------
@@ -402,9 +399,11 @@
   }
 
   // -- Input: analog stick (touch/mouse drag) ------------------------------
-  // Only rendered when padLayout.sticks >= 1 (GBA/SNES have none — this path
-  // is dormant until Fase 5/6 add N64/PS2, kept here so that work is just a
-  // CoreSpec + this component already knowing what to do with it).
+  // Only rendered when padLayout.sticks >= 1 (GBA/SNES have none). Kept
+  // on-screen even after removing the digital button pad above: unlike
+  // every digital button, the stick has no keyboard binding at all yet (the
+  // Fase B remapper only covers buttons), so this is currently the only way
+  // to move an analog stick from the desktop web panel.
   let stickBase = $state()
   let stickActive = $state(false)
   let stickPos = $state({ x: 0, y: 0 })
@@ -663,61 +662,29 @@
         />
       {/if}
 
-      <div class="video-wrap" class:top-only={hideBottomScreen} bind:this={videoWrap}>
+      <div class="video-wrap" bind:this={videoWrap}>
         {#key streamNonce}
-          <img src={`/api/emulator/stream?_=${streamNonce}`} alt={playing.title} class="stream" />
+          <img
+            src={`/api/emulator/stream?_=${streamNonce}${hideBottomScreen ? '&crop=top' : ''}`}
+            alt={playing.title}
+            class="stream"
+          />
         {/key}
       </div>
 
-      <div class="pad">
-        <div class="pad-left">
-          <div class="dpad">
-            <button class="dp dp-up" onpointerdown={pressButton('up')} onpointerup={releaseButton('up')} onpointerleave={releaseButton('up')}>▲</button>
-            <button class="dp dp-left" onpointerdown={pressButton('left')} onpointerup={releaseButton('left')} onpointerleave={releaseButton('left')}>◀</button>
-            <button class="dp dp-right" onpointerdown={pressButton('right')} onpointerup={releaseButton('right')} onpointerleave={releaseButton('right')}>▶</button>
-            <button class="dp dp-down" onpointerdown={pressButton('down')} onpointerup={releaseButton('down')} onpointerleave={releaseButton('down')}>▼</button>
+      {#if padLayout.sticks >= 1}
+        <div class="pad">
+          <div
+            class="stick-base"
+            bind:this={stickBase}
+            onpointerdown={stickStart}
+            onpointermove={stickDrag}
+            onpointerup={stickEnd}
+            onpointercancel={stickEnd}
+          >
+            <div class="stick-knob" style={`transform: translate(${stickPos.x}px, ${stickPos.y}px)`}></div>
           </div>
-          {#if padLayout.sticks >= 1}
-            <div
-              class="stick-base"
-              bind:this={stickBase}
-              onpointerdown={stickStart}
-              onpointermove={stickDrag}
-              onpointerup={stickEnd}
-              onpointercancel={stickEnd}
-            >
-              <div class="stick-knob" style={`transform: translate(${stickPos.x}px, ${stickPos.y}px)`}></div>
-            </div>
-          {/if}
-        </div>
-
-        <div class="pad-mid">
-          <button class="mini" onpointerdown={pressButton('select')} onpointerup={releaseButton('select')} onpointerleave={releaseButton('select')}>Select</button>
-          <button class="mini" onpointerdown={pressButton('start')} onpointerup={releaseButton('start')} onpointerleave={releaseButton('start')}>Start</button>
-        </div>
-
-        <div class="pad-right">
-          <div class="face">
-            <button class="fb fb-y" onpointerdown={pressButton('y')} onpointerup={releaseButton('y')} onpointerleave={releaseButton('y')}>Y</button>
-            <button class="fb fb-x" onpointerdown={pressButton('x')} onpointerup={releaseButton('x')} onpointerleave={releaseButton('x')}>X</button>
-            <button class="fb fb-a" onpointerdown={pressButton('a')} onpointerup={releaseButton('a')} onpointerleave={releaseButton('a')}>A</button>
-            <button class="fb fb-b" onpointerdown={pressButton('b')} onpointerup={releaseButton('b')} onpointerleave={releaseButton('b')}>B</button>
-          </div>
-        </div>
-      </div>
-
-      {#if padLayout.shoulders || padLayout.triggers}
-        <div class="shoulders">
-          {#if padLayout.shoulders}
-            <button class="mini" onpointerdown={pressButton('l')} onpointerup={releaseButton('l')} onpointerleave={releaseButton('l')}>L</button>
-          {/if}
-          {#if padLayout.triggers}
-            <button class="mini" onpointerdown={pressButton('l2')} onpointerup={releaseButton('l2')} onpointerleave={releaseButton('l2')}>L2</button>
-            <button class="mini" onpointerdown={pressButton('r2')} onpointerup={releaseButton('r2')} onpointerleave={releaseButton('r2')}>R2</button>
-          {/if}
-          {#if padLayout.shoulders}
-            <button class="mini" onpointerdown={pressButton('r')} onpointerup={releaseButton('r')} onpointerleave={releaseButton('r')}>R</button>
-          {/if}
+          <span class="stick-hint">Stick analógico — arrastra con el ratón (todos los botones ya están en el teclado, ver 🎮)</span>
         </div>
       {/if}
     </div>
@@ -827,46 +794,11 @@
     display: flex; align-items: center; justify-content: center;
   }
   .stream { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
-  /* 3DS's combined frame is the top+bottom screens stacked vertically —
-     the top screen alone is exactly the top half, at double the combined
-     frame's aspect ratio (actions/emulator_frame.py's crop_bottom_screen_3ds
-     crops the bottom half the same way, by proportion not fixed pixels, so
-     this holds regardless of resolution_factor). Forcing the wrapper to
-     that aspect ratio and letting the *same* <img> (no new element — the
-     MJPEG connection must not be dropped just to toggle this) cover it
-     anchored to the top crops the bottom screen out with no JS math. */
-  .video-wrap.top-only {
-    /* Sized from width, not stretched to fill the flex column like the
-       normal full-frame view — showing half the vertical content should
-       take up roughly half the vertical space, not be blown back up to
-       the same height and lose detail to upscaling. */
-    flex: 0 1 auto; width: 100%; max-width: 100%; aspect-ratio: 5 / 3;
-  }
-  .video-wrap.top-only .stream {
-    width: 100%; height: 100%; max-width: none; max-height: none;
-    object-fit: cover; object-position: top;
-  }
 
   .pad {
-    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
-    padding: 8px 4px; gap: 12px;
+    flex-shrink: 0; display: flex; align-items: center; gap: 12px;
+    padding: 8px 4px;
   }
-  .pad-left, .pad-right { display: flex; align-items: center; gap: 16px; }
-  .pad-mid { display: flex; gap: 8px; align-self: flex-end; padding-bottom: 6px; }
-
-  .dpad {
-    position: relative; width: 108px; height: 108px; flex-shrink: 0;
-    touch-action: none;
-  }
-  .dp {
-    position: absolute; width: 36px; height: 36px;
-    background: var(--panel-2); border: 1px solid var(--border-a); border-radius: 6px;
-    color: var(--text); font-size: 14px; cursor: pointer; user-select: none;
-  }
-  .dp-up { top: 0; left: 36px; }
-  .dp-down { bottom: 0; left: 36px; }
-  .dp-left { top: 36px; left: 0; }
-  .dp-right { top: 36px; right: 0; }
 
   .stick-base {
     width: 90px; height: 90px; border-radius: 50%;
@@ -878,25 +810,5 @@
     border-radius: 50%; background: var(--pri-gho); border: 1px solid var(--pri);
     pointer-events: none;
   }
-
-  .face {
-    position: relative; width: 108px; height: 108px; flex-shrink: 0;
-    touch-action: none;
-  }
-  .fb {
-    position: absolute; width: 36px; height: 36px; border-radius: 50%;
-    background: var(--panel-2); border: 1px solid var(--border-a);
-    color: var(--text); font-size: 13px; font-weight: 700; cursor: pointer; user-select: none;
-  }
-  .fb-y { top: 0; left: 36px; }
-  .fb-a { bottom: 0; left: 36px; }
-  .fb-x { top: 36px; left: 0; }
-  .fb-b { top: 36px; right: 0; }
-
-  .mini {
-    background: var(--panel-2); border: 1px solid var(--border-a); border-radius: var(--radius-sm);
-    color: var(--text-med); font-size: 11px; padding: 6px 12px; cursor: pointer; user-select: none;
-  }
-
-  .shoulders { flex-shrink: 0; display: flex; justify-content: space-between; padding: 0 4px 4px; }
+  .stick-hint { color: var(--text-dim); font-size: 11.5px; }
 </style>

@@ -73,6 +73,15 @@ def crop_bottom_screen_3ds(bgr: np.ndarray) -> np.ndarray:
     return bgr[y0:y1, x0:x1]
 
 
+def crop_top_screen_3ds(bgr: np.ndarray) -> np.ndarray:
+    """Crops the 3DS top (main) screen out of a combined top+bottom BGR
+    frame — full width, everything above the same split point
+    crop_bottom_screen_3ds() crops the touch screen below."""
+    height = bgr.shape[0]
+    y1 = int(height * _BOTTOM_SCREEN_Y0)
+    return bgr[:y1]
+
+
 def touch_to_pointer(fx: float, fy: float) -> tuple[int, int]:
     """Converts a touch fraction (0..1, 0..1) *within the bottom-screen crop*
     into the RETRO_DEVICE_POINTER coordinates (-0x7fff..0x7fff) Azahar

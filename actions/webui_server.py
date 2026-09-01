@@ -1869,12 +1869,12 @@ def _make_app(host_ref):
     # the emulation thread never waits on this generator, and a slow or
     # disconnected client can only starve itself, not the emulator.
 
-    def _mjpeg_frames(quality: int):
+    def _mjpeg_frames(quality: int, crop_top: bool):
         import time as _time
 
         import cv2
 
-        from actions.emulator_frame import frame_to_bgr
+        from actions.emulator_frame import crop_top_screen_3ds, frame_to_bgr
         from actions.emulator_session import get_session
 
         session = get_session()
@@ -1897,6 +1897,11 @@ def _make_app(host_ref):
             if bgr is None:
                 _time.sleep(1 / 60)
                 continue
+            # Only 3DS's frame is actually top+bottom combined; cropping any
+            # other console's frame this way would just chop its picture in
+            # half, so this only ever applies when it's the right shape.
+            if crop_top and session.console_id == "3ds":
+                bgr = crop_top_screen_3ds(bgr)
 
             ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
             if not ok:
@@ -1914,8 +1919,16 @@ def _make_app(host_ref):
         # Clamped rather than trusted: this is the one query param that
         # reaches a C encoder (cv2.imencode) with no validation of its own.
         quality = max(10, min(95, request.args.get("quality", default=70, type=int) or 70))
+        # Cropped server-side (webui/src/panels/Emulators.svelte's "hide the
+        # touch screen" toggle, once it's already mirrored to the phone via
+        # actions/lan_dashboard.py's /api/gamepad/screen) so the <img> keeps
+        # its native resolution and the existing CSS "contain" fit still
+        # works unchanged — cropping the *displayed* box instead of the
+        # source with CSS upscaled the same pixels across more screen space
+        # than before and looked like a resolution drop.
+        crop_top = request.args.get("crop") == "top"
         resp = Response(
-            _mjpeg_frames(quality),
+            _mjpeg_frames(quality, crop_top),
             mimetype="multipart/x-mixed-replace; boundary=jarvisframe",
         )
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"

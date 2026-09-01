@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from actions.emulator_frame import crop_bottom_screen_3ds, frame_to_bgr, touch_to_pointer
+from actions.emulator_frame import crop_bottom_screen_3ds, crop_top_screen_3ds, frame_to_bgr, touch_to_pointer
 from actions.libretro import PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888
 
 
@@ -79,6 +79,27 @@ class CropBottomScreen3dsTests(unittest.TestCase):
         frame[240:480, 40:360] = [1, 2, 3]  # paint exactly the bottom screen
         cropped = crop_bottom_screen_3ds(frame)
         self.assertTrue((cropped == [1, 2, 3]).all())
+
+
+class CropTopScreen3dsTests(unittest.TestCase):
+    def test_crops_full_width_top_half(self):
+        frame = np.zeros((480, 400, 3), dtype=np.uint8)
+        cropped = crop_top_screen_3ds(frame)
+        self.assertEqual(cropped.shape, (240, 400, 3))
+
+    def test_crop_is_a_view_into_the_expected_region(self):
+        frame = np.zeros((480, 400, 3), dtype=np.uint8)
+        frame[0:240, 0:400] = [4, 5, 6]  # paint exactly the top screen
+        cropped = crop_top_screen_3ds(frame)
+        self.assertTrue((cropped == [4, 5, 6]).all())
+
+    def test_splits_at_the_same_line_crop_bottom_screen_3ds_starts_from(self):
+        # The two crops must be complements of each other along y — nothing
+        # from one screen should leak into the other's crop.
+        frame = np.zeros((480, 400, 3), dtype=np.uint8)
+        top = crop_top_screen_3ds(frame)
+        bottom = crop_bottom_screen_3ds(frame)
+        self.assertEqual(top.shape[0], 480 - bottom.shape[0])
 
 
 class TouchToPointerTests(unittest.TestCase):
