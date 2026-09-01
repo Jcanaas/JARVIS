@@ -11,6 +11,7 @@
   import * as api from '../api.js'
   import { emulatorPlaying } from '../stores/emulator.js'
   import Icon from '../lib/Icon.svelte'
+  import ControlsDialog from '../lib/ControlsDialog.svelte'
 
   let { active = true } = $props()
 
@@ -71,6 +72,7 @@
       status = res.status
       streamNonce++
       padLayout = await api.getEmulatorPad(entry.console_id)
+      loadKeyMap(entry.console_id)
       pollStatus()
       emulatorPlaying.set(true)
     } catch (e) {
@@ -179,10 +181,12 @@
   // -- Input: keyboard ----------------------------------------------------
   // Same default layout as actions/input_config.py's _BASE_KEYBOARD (arrow
   // keys, X/Space=A, Z=B, S=X, A=Y, Q=L, W=R, Enter=start, Backspace=select)
-  // — familiar to anyone who's used the legacy desktop app, kept in sync by
-  // hand rather than fetched, since the web MVP doesn't expose per-user
-  // remapping (that's a whole settings screen the plan never asked for).
-  const KEY_MAP = {
+  // — used until /api/emulator/controls answers (or if it fails), and for
+  // any button the user has never customized. The user's actual bindings
+  // (shared with --legacy, see actions/input_config.py's
+  // qt_key_from_js_code) load into activeKeyMap once a game starts, and
+  // reload after every save in the controls dialog below.
+  const DEFAULT_KEY_MAP = {
     ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
     KeyX: 'a', Space: 'a',
     KeyZ: 'b',
@@ -194,11 +198,45 @@
     Enter: 'start', NumpadEnter: 'start',
     Backspace: 'select', ShiftLeft: 'select', ShiftRight: 'select',
   }
+  let activeKeyMap = $state(DEFAULT_KEY_MAP)
   const heldKeys = new Set()
 
+  async function loadKeyMap(consoleId) {
+    try {
+      const res = await api.getEmulatorControls(consoleId)
+      const map = {}
+      for (const [buttonId, binding] of Object.entries(res.bindings)) {
+        if (binding.code) map[binding.code] = buttonId
+      }
+      activeKeyMap = Object.keys(map).length ? map : DEFAULT_KEY_MAP
+    } catch {
+      activeKeyMap = DEFAULT_KEY_MAP
+    }
+  }
+
+  let controlsOpen = $state(false)
+  let pausedForControls = $state(false)
+
+  async function openControls() {
+    pausedForControls = !status?.paused
+    if (pausedForControls) {
+      try { await api.pauseEmulator(true) } catch {}
+      status = status ? { ...status, paused: true } : status
+    }
+    controlsOpen = true
+  }
+
+  async function closeControls() {
+    controlsOpen = false
+    if (pausedForControls) {
+      try { await api.pauseEmulator(false) } catch {}
+      status = status ? { ...status, paused: false } : status
+    }
+  }
+
   function onKeydown(e) {
-    if (!playing) return
-    const button = KEY_MAP[e.code]
+    if (!playing || controlsOpen) return
+    const button = activeKeyMap[e.code]
     if (!button || heldKeys.has(e.code)) return
     heldKeys.add(e.code)
     e.preventDefault()
@@ -206,8 +244,8 @@
   }
 
   function onKeyup(e) {
-    if (!playing) return
-    const button = KEY_MAP[e.code]
+    if (!playing || controlsOpen) return
+    const button = activeKeyMap[e.code]
     if (!button) return
     heldKeys.delete(e.code)
     e.preventDefault()
@@ -334,11 +372,20 @@
           <button class="ghost" onclick={reset} title="Reiniciar"><Icon name="refresh" size={16} /></button>
           <button class="ghost" onclick={saveState} title="Guardar estado">💾</button>
           <button class="ghost" onclick={loadState} title="Cargar estado">📂</button>
+          <button class="ghost" onclick={openControls} title="Controles">🎮</button>
           <button class="ghost" onclick={toggleFullscreen} title="Pantalla completa">⛶</button>
         </div>
       </div>
 
       {#if actionError}<div class="action-error">{actionError}</div>{/if}
+
+      {#if controlsOpen}
+        <ControlsDialog
+          consoleId={playing.console_id}
+          onClose={closeControls}
+          onSaved={() => loadKeyMap(playing.console_id)}
+        />
+      {/if}
 
       <div class="video-wrap" bind:this={videoWrap}>
         {#key streamNonce}

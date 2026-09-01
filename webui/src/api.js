@@ -125,6 +125,12 @@ export async function importEmulatorBios(file) {
   if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`)
   return data
 }
+export const getEmulatorControls = (consoleId) =>
+  getJSON(`/api/emulator/controls?console_id=${encodeURIComponent(consoleId)}`)
+export const bindEmulatorControl = (consoleId, button, code) =>
+  postJSON('/api/emulator/controls/bind', { console_id: consoleId, button, code })
+export const resetEmulatorControls = (consoleId) =>
+  postJSON('/api/emulator/controls/reset', { console_id: consoleId })
 
 // Calendar
 export const getCalendarEvents = (timeMin, timeMax) =>

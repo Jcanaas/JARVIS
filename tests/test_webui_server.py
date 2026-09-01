@@ -801,6 +801,58 @@ class EmulatorRouteTests(unittest.TestCase):
         self.assertEqual(resp.get_json(), {"sticks": 2})
         mocked.assert_called_once_with("ps2")
 
+    # -- keyboard remapping (Fase B of NOTE_webui_emulators_polish_plan.md) --
+    # Route contracts only, mocking actions.input_config — the translation
+    # logic itself (qt_key_from_js_code/js_code_from_qt_key) has its own
+    # dedicated tests in tests/test_input_config.py.
+
+    def test_controls_lists_buttons_and_current_bindings(self):
+        from actions import input_config as ic
+        real_bindings = ic.defaults("gba")
+        with patch("actions.input_config.load", return_value=real_bindings):
+            resp = self.client.get("/api/emulator/controls?console_id=gba")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertIn({"id": "a", "label": "A"}, body["buttons"])
+        self.assertEqual(body["bindings"]["a"]["code"], "KeyX")
+
+    def test_controls_bind_success(self):
+        from actions import input_config as ic
+        real_bindings = ic.defaults("gba")
+        with patch("actions.input_config.load", return_value=real_bindings), \
+             patch("actions.input_config.save") as mock_save:
+            resp = self.client.post(
+                "/api/emulator/controls/bind",
+                json={"console_id": "gba", "button": "a", "code": "KeyP"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["code"], "KeyP")
+        mock_save.assert_called_once()
+        self.assertIn(ord("P"), real_bindings.keyboard["a"])
+
+    def test_controls_bind_rejects_an_untranslatable_key(self):
+        resp = self.client.post(
+            "/api/emulator/controls/bind",
+            json={"console_id": "gba", "button": "a", "code": "MetaLeft"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_controls_bind_missing_button(self):
+        resp = self.client.post(
+            "/api/emulator/controls/bind",
+            json={"console_id": "gba", "code": "KeyP"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_controls_reset_calls_through(self):
+        with patch("actions.input_config.reset") as mock_reset:
+            resp = self.client.post(
+                "/api/emulator/controls/reset", json={"console_id": "gba"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        mock_reset.assert_called_once_with("gba")
+
     def test_cores_reports_ps2_bios_presence(self):
         with patch("actions.emulator_runtime.CORES", {"gba": object(), "ps2": object()}), \
              patch("actions.emulator_runtime.core_status",

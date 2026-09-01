@@ -152,6 +152,65 @@ _BASE_PAD: dict[str, list[str]] = {
 }
 
 
+# webui/src/panels/Emulators.svelte captures rebinds as browser
+# KeyboardEvent.code strings ("ArrowUp", "KeyX", "Digit1"...), not Qt key
+# codes — but both apps share the same actions/app_settings.json-backed
+# Bindings storage (see Fase B of NOTE_webui_emulators_polish_plan.md: a
+# second, web-only preference store would drift from --legacy's and confuse
+# whoever switches between the two). These two functions are the only place
+# that knows how to go between the two encodings, so the rest of this module
+# — and every caller — stays Qt-agnostic.
+#
+# Letters and digits need no table: Qt.Key already equals the ASCII code
+# for A-Z (0x41-0x5A) and 0-9 (0x30-0x39), same as JS's "KeyA".."KeyZ" and
+# "Digit0".."Digit9" once the letter/digit is pulled out of the code string.
+# Only the handful of named keys _BASE_KEYBOARD actually uses need an
+# explicit entry.
+_JS_CODE_TO_QT_KEY: dict[str, int] = {
+    "ArrowUp": _KEY_UP, "ArrowDown": _KEY_DOWN,
+    "ArrowLeft": _KEY_LEFT, "ArrowRight": _KEY_RIGHT,
+    "Enter": _KEY_RETURN, "NumpadEnter": _KEY_ENTER,
+    "Backspace": _KEY_BACKSPACE,
+    "ShiftLeft": _KEY_SHIFT, "ShiftRight": _KEY_SHIFT,
+    "Space": _KEY_SPACE,
+    "Tab": 0x01000001, "Escape": 0x01000000,
+}
+_QT_KEY_TO_JS_CODE: dict[int, str] = {
+    v: k for k, v in _JS_CODE_TO_QT_KEY.items()
+    # ShiftLeft and ShiftRight both map to _KEY_SHIFT; keep the first
+    # (ShiftLeft) as the canonical reverse mapping rather than whichever
+    # dict-ordering happens to win.
+    if not (v == _KEY_SHIFT and k == "ShiftRight")
+}
+
+
+def qt_key_from_js_code(code: str) -> int | None:
+    """Browser KeyboardEvent.code -> Qt key code, or None if this specific
+    key has no Qt equivalent worth binding (dead keys, IME composition...)."""
+    code = str(code or "")
+    if code in _JS_CODE_TO_QT_KEY:
+        return _JS_CODE_TO_QT_KEY[code]
+    if len(code) == 4 and code.startswith("Key") and code[3].isalpha():
+        return ord(code[3].upper())
+    if len(code) == 6 and code.startswith("Digit") and code[5].isdigit():
+        return ord(code[5])
+    return None
+
+
+def js_code_from_qt_key(key: int) -> str | None:
+    """Inverse of qt_key_from_js_code — for showing a binding captured
+    elsewhere (legacy, or the gamepad side) as a JS code the web UI could
+    also react to. Not exhaustive: only round-trips what
+    qt_key_from_js_code can itself produce."""
+    if key in _QT_KEY_TO_JS_CODE:
+        return _QT_KEY_TO_JS_CODE[key]
+    if 0x41 <= key <= 0x5A:
+        return f"Key{chr(key)}"
+    if 0x30 <= key <= 0x39:
+        return f"Digit{chr(key)}"
+    return None
+
+
 def _profile_defaults(console_id: str) -> tuple[dict[str, list[int]],
                                                  dict[str, list[str]]]:
     ids = [button for button, _ in button_order(console_id)]

@@ -1642,6 +1642,57 @@ def _make_app(host_ref):
         from actions import emulator_runtime as er
         return jsonify(er.pad_layout(request.args.get("console_id") or ""))
 
+    # -- Keyboard remapping --------------------------------------------------
+    # Web equivalent of ui/widgets/controls.py's ControlsDialog (keyboard
+    # side only — gamepad capture belongs to the phone's own controller, not
+    # this desktop panel). Reads/writes the exact same
+    # actions/input_config.py-backed storage --legacy uses, translated
+    # through qt_key_from_js_code()/js_code_from_qt_key() — see that
+    # module's own comment on why this isn't a second, web-only store.
+
+    @app.route("/api/emulator/controls")
+    def api_emulator_controls():
+        from actions import input_config as ic
+        console_id = request.args.get("console_id") or "gba"
+        bindings = ic.load(console_id)
+        out = {}
+        for button, _label in ic.button_order(console_id):
+            keys = bindings.keyboard.get(button) or []
+            primary = keys[0] if keys else None
+            out[button] = {
+                "code": ic.js_code_from_qt_key(primary) if primary is not None else None,
+                "label": ic.key_label(primary) if primary is not None else "",
+            }
+        return jsonify({
+            "buttons": [{"id": b, "label": label} for b, label in ic.button_order(console_id)],
+            "bindings": out,
+        })
+
+    @app.route("/api/emulator/controls/bind", methods=["POST"])
+    def api_emulator_controls_bind():
+        from actions import input_config as ic
+        data = request.get_json(silent=True) or {}
+        console_id = str(data.get("console_id") or "gba")
+        button = str(data.get("button") or "")
+        code = str(data.get("code") or "")
+        if not button:
+            return jsonify({"error": "missing_button"}), 400
+        qt_key = ic.qt_key_from_js_code(code)
+        if qt_key is None:
+            return jsonify({"error": f"«{code}» no se puede usar como control"}), 400
+        bindings = ic.load(console_id)
+        bindings.bind_key(button, qt_key)
+        ic.save(bindings, console_id)
+        return jsonify({"ok": True, "code": code, "label": ic.key_label(qt_key)})
+
+    @app.route("/api/emulator/controls/reset", methods=["POST"])
+    def api_emulator_controls_reset():
+        from actions import input_config as ic
+        data = request.get_json(silent=True) or {}
+        console_id = str(data.get("console_id") or "gba")
+        ic.reset(console_id)
+        return jsonify({"ok": True})
+
     @app.route("/api/emulator/cores")
     def api_emulator_cores():
         from actions import emulator_runtime as er
