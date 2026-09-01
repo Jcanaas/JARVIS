@@ -9,6 +9,7 @@
   // -only for now (actions/rom_catalog.py's routes exist and are tested,
   // just not wired to a screen yet).
   import * as api from '../api.js'
+  import { emulatorPlaying } from '../stores/emulator.js'
   import Icon from '../lib/Icon.svelte'
 
   let { active = true } = $props()
@@ -56,6 +57,9 @@
   function stopWatchingStatus() {
     clearInterval(statusTimer)
     statusTimer = null
+    // Covers both stop() and pollStatus() noticing the core died/exited on
+    // its own — either way panel shortcuts (P/U/etc.) should work again.
+    emulatorPlaying.set(false)
   }
 
   async function play(entry) {
@@ -68,6 +72,7 @@
       streamNonce++
       padLayout = await api.getEmulatorPad(entry.console_id)
       pollStatus()
+      emulatorPlaying.set(true)
     } catch (e) {
       // start() fails before the player ever mounts, so this can't reuse
       // actionError (only rendered inside the player view below).

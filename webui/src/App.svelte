@@ -12,6 +12,7 @@
   import SetupOverlay from './lib/SetupOverlay.svelte'
   import { startEventStream, playback, whatsappUnread, voiceState } from './stores/sse.js'
   import { activePanel, panelByKey } from './stores/nav.js'
+  import { emulatorPlaying } from './stores/emulator.js'
   import { getState, getSetupStatus, toggleMic, toggleFullscreen, fireInterrupt } from './api.js'
 
   let ready = $state(false)
@@ -64,6 +65,11 @@
 
     if (e.ctrlKey || e.altKey || e.metaKey) return
     if (isEditableTarget(e.target)) return
+    // Mirrors ui/__init__.py's _shortcut_focus_is_editing() checking for
+    // RetroScreen: the emulator's own keyboard mapping uses plain letters
+    // (X/Z/S/A/Q/W…) that collide with these single-letter panel shortcuts,
+    // so a game button press must never also navigate away from the panel.
+    if ($emulatorPlaying) return
     const panel = panelByKey(e.key)
     if (panel && panel.available) {
       activePanel.set(panel.id)
