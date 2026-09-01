@@ -356,7 +356,14 @@ function GamepadPad({
       <View style={styles.screen}>
         {hasTouchScreen && (
           <View style={styles.touchCol}>
-            <TouchScreen3DS />
+            <Draggable
+              id="group:touchscreen"
+              editMode={editMode}
+              offset={padOffsets["group:touchscreen"] || zero}
+              onDrag={dragGroup}
+            >
+              <TouchScreen3DS active={!editMode} />
+            </Draggable>
           </View>
         )}
         <View

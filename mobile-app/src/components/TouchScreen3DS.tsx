@@ -20,16 +20,38 @@ const POLL_MS = 100; // ~10fps — plenty for a screen only tapped, not watched
  * Image component doesn't reliably decode multipart/x-mixed-replace the
  * way a browser <img> does, and polling a still image is a well-worn,
  * reliable substitute at the ~10fps this needs.
+ *
+ * Double-buffered: swapping a single <Image>'s source.uri makes RN clear it
+ * to blank while the new one decodes, which at 10 polls/sec read as a
+ * constant black flicker. Two stacked Image layers fix it — the next frame
+ * loads into the *hidden* layer, and only once it has fully decoded
+ * (onLoad) do the layers swap, so the visible one is always a complete
+ * frame, never a gap.
  */
-export default function TouchScreen3DS() {
-  const [uri, setUri] = useState(() => gamepadScreenUrl(Date.now()));
+export default function TouchScreen3DS({ active = true }: { active?: boolean }) {
+  const initialUri = gamepadScreenUrl(Date.now());
+  const [uris, setUris] = useState<[string, string]>([initialUri, initialUri]);
+  const [visible, setVisible] = useState<0 | 1>(0);
+  const nextLayer = useRef<0 | 1>(1);
   const rectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
   const rootRef = useRef<View | null>(null);
   const touching = useRef(false);
 
   useEffect(() => {
-    const t = setInterval(() => setUri(gamepadScreenUrl(Date.now())), POLL_MS);
+    const t = setInterval(() => {
+      const layer = nextLayer.current;
+      setUris((prev) => {
+        const next: [string, string] = [...prev];
+        next[layer] = gamepadScreenUrl(Date.now());
+        return next;
+      });
+    }, POLL_MS);
     return () => clearInterval(t);
+  }, []);
+
+  const onLayerLoad = useCallback((layer: 0 | 1) => {
+    setVisible(layer);
+    nextLayer.current = layer === 0 ? 1 : 0;
   }, []);
 
   const measure = useCallback(() => {
@@ -69,15 +91,30 @@ export default function TouchScreen3DS() {
     <View
       ref={rootRef}
       onLayout={measure}
-      style={styles.frame}
-      onStartShouldSetResponder={() => true}
-      onMoveShouldSetResponder={() => true}
+      style={[styles.frame, !active && styles.frameInactive]}
+      // While a parent Draggable is repositioning this whole screen (edit
+      // mode), this view must not claim the responder — RN grants it to the
+      // deepest view that returns true here, which would otherwise always
+      // beat the Draggable wrapper and make it undraggable.
+      onStartShouldSetResponder={() => active}
+      onMoveShouldSetResponder={() => active}
       onResponderGrant={onGrant}
       onResponderMove={onMove}
       onResponderRelease={onRelease}
       onResponderTerminate={onRelease}
     >
-      <Image source={{ uri }} style={styles.image} resizeMode="contain" />
+      <Image
+        source={{ uri: uris[0] }}
+        style={[styles.image, { opacity: visible === 0 ? 1 : 0 }]}
+        resizeMode="contain"
+        onLoad={() => onLayerLoad(0)}
+      />
+      <Image
+        source={{ uri: uris[1] }}
+        style={[styles.image, styles.overlay, { opacity: visible === 1 ? 1 : 0 }]}
+        resizeMode="contain"
+        onLoad={() => onLayerLoad(1)}
+      />
     </View>
   );
 }
@@ -89,4 +126,6 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: C.border, overflow: "hidden",
   },
   image: { width: "100%", height: "100%" },
+  overlay: { position: "absolute", top: 0, left: 0 },
+  frameInactive: { opacity: 0.55 },
 });
