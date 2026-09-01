@@ -237,8 +237,6 @@ function GamepadPad({
     resetPadLayout().catch(() => {});
   }, []);
 
-  const rootRef = useRef<View | null>(null);
-  const rootOrigin = useRef<Offset>({ x: 0, y: 0 });
   const rects = useRef<Record<string, Rect>>({});
   /** touch identifier → control id, kept for the life of that finger so a
    *  stick keeps following it even when dragged outside its own circle. */
@@ -276,18 +274,19 @@ function GamepadPad({
     rects.current[id] = rect;
   }, []);
 
-  const measureRoot = useCallback(() => {
-    rootRef.current?.measureInWindow((x, y) => { rootOrigin.current = { x, y }; });
-  }, []);
-
-  /** Control under a touch. Touch coords are relative to the root view, the
-   *  measured rects are relative to the window, hence the origin subtraction. */
+  /** Control under a touch. Both the touch coords (pageX/pageY, from
+   *  handleTouches) and the measured rects (measureInWindow, from
+   *  PadButton/AnalogStick's onMeasure) are already window-absolute — no
+   *  origin adjustment needed, they're the same coordinate space. (An
+   *  earlier version subtracted rootOrigin from the rect only, comparing it
+   *  against an unadjusted touch position — silently correct only because
+   *  the pad used to sit flush against the window's left edge, so that
+   *  origin was ~{0,0}; once the 3DS touch-screen mirror pushed the pad's
+   *  own x-origin rightward, every hit test started missing and no button
+   *  or stick ever registered a touch again.) */
   const hitTest = useCallback((px: number, py: number): string | null => {
-    const { x: ox, y: oy } = rootOrigin.current;
     for (const [id, r] of Object.entries(rects.current)) {
-      const x = r.x - ox;
-      const y = r.y - oy;
-      if (px >= x && px <= x + r.w && py >= y && py <= y + r.h) return id;
+      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return id;
     }
     return null;
   }, []);
@@ -318,7 +317,6 @@ function GamepadPad({
       left: { x: 0, y: 0 }, right: { x: 0, y: 0 },
     };
     const travel = stickTravel(STICK_SIZE);
-    const { x: ox, y: oy } = rootOrigin.current;
 
     for (const [tid, control] of owners.current) {
       const pos = active.get(tid);
@@ -329,8 +327,9 @@ function GamepadPad({
         const side = control.slice(6) as StickSide;
         const r = rects.current[control];
         if (!r) continue;
-        let dx = pos.x - ((r.x - ox) + r.w / 2);
-        let dy = pos.y - ((r.y - oy) + r.h / 2);
+        // Same window-absolute space as hitTest above — see its comment.
+        let dx = pos.x - (r.x + r.w / 2);
+        let dy = pos.y - (r.y + r.h / 2);
         const dist = Math.hypot(dx, dy);
         if (dist > travel) { dx *= travel / dist; dy *= travel / dist; }
         nextOffsets[side] = { x: dx, y: dy };
@@ -401,8 +400,6 @@ function GamepadPad({
           </View>
         )}
         <View
-          ref={rootRef}
-          onLayout={measureRoot}
           style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
           // One responder for the whole pad: this is what makes holding a
           // direction while tapping a button possible at all. Edit mode
