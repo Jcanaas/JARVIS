@@ -201,7 +201,15 @@ function GamepadPad({
 
   const dragGroup = useCallback((id: string, offset: Offset) => {
     setPadOffsets((prev) => {
-      const next = { ...prev, [id]: offset };
+      const next = { ...prev, [id]: { ...prev[id], x: offset.x, y: offset.y } };
+      savePadLayout(next).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const resizeGroup = useCallback((id: string, scale: number) => {
+    setPadOffsets((prev) => {
+      const next = { ...prev, [id]: { x: prev[id]?.x || 0, y: prev[id]?.y || 0, scale } };
       savePadLayout(next).catch(() => {});
       return next;
     });
@@ -349,7 +357,11 @@ function GamepadPad({
   }, [hitTest, layout.sticks, send, sendAxes]);
 
   const face = FACE_LABELS[layout.face] || FACE_LABELS.nintendo;
-  const zero: Offset = { x: 0, y: 0 };
+  const groupOffset = (id: string): Offset => {
+    const g = padOffsets[id];
+    return g ? { x: g.x, y: g.y } : { x: 0, y: 0 };
+  };
+  const groupScale = (id: string): number => padOffsets[id]?.scale ?? 1;
 
   return (
     <Modal visible transparent={false} animationType="fade" onRequestClose={onClose} supportedOrientations={["landscape"]}>
@@ -359,8 +371,10 @@ function GamepadPad({
             <Draggable
               id="group:touchscreen"
               editMode={editMode}
-              offset={padOffsets["group:touchscreen"] || zero}
+              offset={groupOffset("group:touchscreen")}
+              scale={groupScale("group:touchscreen")}
               onDrag={dragGroup}
+              onResize={resizeGroup}
             >
               <TouchScreen3DS active={!editMode} />
             </Draggable>
@@ -407,15 +421,17 @@ function GamepadPad({
               <Text style={styles.resetText}>Restaurar</Text>
             </TouchableOpacity>
           )}
-          {editMode && <Text style={styles.editHint}>Arrastra los grupos para moverlos</Text>}
+          {editMode && (
+            <Text style={styles.editHint}>Arrastra los grupos para moverlos, o su esquina para cambiar el tamaño</Text>
+          )}
 
           {(layout.shoulders || layout.triggers) && (
             <View style={styles.shoulderRow}>
-              <Draggable id="group:shoulder-l" editMode={editMode} offset={padOffsets["group:shoulder-l"] || zero} onDrag={dragGroup} style={styles.shoulderGroup}>
+              <Draggable id="group:shoulder-l" editMode={editMode} offset={groupOffset("group:shoulder-l")} scale={groupScale("group:shoulder-l")} onDrag={dragGroup} onResize={resizeGroup} style={styles.shoulderGroup}>
                 {layout.triggers && <PadButton id="btn:l2" label="L2" down={!!down.l2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
                 {layout.shoulders && <PadButton id="btn:l" label="L1" down={!!down.l} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
               </Draggable>
-              <Draggable id="group:shoulder-r" editMode={editMode} offset={padOffsets["group:shoulder-r"] || zero} onDrag={dragGroup} style={styles.shoulderGroup}>
+              <Draggable id="group:shoulder-r" editMode={editMode} offset={groupOffset("group:shoulder-r")} scale={groupScale("group:shoulder-r")} onDrag={dragGroup} onResize={resizeGroup} style={styles.shoulderGroup}>
                 {layout.shoulders && <PadButton id="btn:r" label="R1" down={!!down.r} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
                 {layout.triggers && <PadButton id="btn:r2" label="R2" down={!!down.r2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
               </Draggable>
@@ -423,19 +439,19 @@ function GamepadPad({
           )}
 
           <View style={styles.mainRow}>
-            <Draggable id="group:dpad" editMode={editMode} offset={padOffsets["group:dpad"] || zero} onDrag={dragGroup} style={styles.dpad}>
+            <Draggable id="group:dpad" editMode={editMode} offset={groupOffset("group:dpad")} scale={groupScale("group:dpad")} onDrag={dragGroup} onResize={resizeGroup} style={styles.dpad}>
               <PadButton id="btn:up" label="▲" down={!!down.up} onMeasure={onMeasure} style={[styles.dBtn, styles.dUp]} disabled={editMode} />
               <PadButton id="btn:left" label="◀" down={!!down.left} onMeasure={onMeasure} style={[styles.dBtn, styles.dLeft]} disabled={editMode} />
               <PadButton id="btn:right" label="▶" down={!!down.right} onMeasure={onMeasure} style={[styles.dBtn, styles.dRight]} disabled={editMode} />
               <PadButton id="btn:down" label="▼" down={!!down.down} onMeasure={onMeasure} style={[styles.dBtn, styles.dDown]} disabled={editMode} />
             </Draggable>
 
-            <Draggable id="group:center" editMode={editMode} offset={padOffsets["group:center"] || zero} onDrag={dragGroup} style={styles.centerCol}>
+            <Draggable id="group:center" editMode={editMode} offset={groupOffset("group:center")} scale={groupScale("group:center")} onDrag={dragGroup} onResize={resizeGroup} style={styles.centerCol}>
               <PadButton id="btn:select" label="SELECT" down={!!down.select} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
               <PadButton id="btn:start" label="START" down={!!down.start} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
             </Draggable>
 
-            <Draggable id="group:face" editMode={editMode} offset={padOffsets["group:face"] || zero} onDrag={dragGroup} style={styles.face}>
+            <Draggable id="group:face" editMode={editMode} offset={groupOffset("group:face")} scale={groupScale("group:face")} onDrag={dragGroup} onResize={resizeGroup} style={styles.face}>
               <PadButton id="btn:x" label={face.up} down={!!down.x} onMeasure={onMeasure} style={[styles.fBtn, styles.fUp]} disabled={editMode} />
               <PadButton id="btn:y" label={face.left} down={!!down.y} onMeasure={onMeasure} style={[styles.fBtn, styles.fLeft]} disabled={editMode} />
               <PadButton id="btn:a" label={face.right} down={!!down.a} onMeasure={onMeasure} style={[styles.fBtn, styles.fRight]} disabled={editMode} />
@@ -444,7 +460,7 @@ function GamepadPad({
           </View>
 
           {layout.sticks > 0 && (
-            <Draggable id="group:sticks" editMode={editMode} offset={padOffsets["group:sticks"] || zero} onDrag={dragGroup} style={styles.stickRow}>
+            <Draggable id="group:sticks" editMode={editMode} offset={groupOffset("group:sticks")} scale={groupScale("group:sticks")} onDrag={dragGroup} onResize={resizeGroup} style={styles.stickRow}>
               <AnalogStick
                 id="stick:left"
                 label={layout.sticks > 1 ? "IZQ" : "STICK"}
@@ -473,24 +489,35 @@ function GamepadPad({
   );
 }
 
+/** Scale range a group can be resized to — wide enough to matter on a phone
+ * screen, narrow enough that a group can't grow off-screen or shrink to
+ * nothing by mistake. */
+const MIN_SCALE = 0.6;
+const MAX_SCALE = 1.9;
+
 /**
- * Wraps one control group so it can be dragged to a device-local offset in
- * edit mode. Outside edit mode it's a plain positioned View — no responder
- * of its own, so it never competes with GamepadPad's single-responder
- * gameplay handling (see PadButton's docstring for why that matters).
+ * Wraps one control group so it can be dragged to a device-local offset —
+ * and, via the resize handle at its corner, scaled — in edit mode. Outside
+ * edit mode it's a plain positioned+scaled View with no responder of its
+ * own, so it never competes with GamepadPad's single-responder gameplay
+ * handling (see PadButton's docstring for why that matters).
  */
 function Draggable({
-  id, editMode, offset, onDrag, children, style,
+  id, editMode, offset, scale, onDrag, onResize, children, style,
 }: {
   id: string;
   editMode: boolean;
   offset: Offset;
+  scale: number;
   onDrag: (id: string, offset: Offset) => void;
+  onResize: (id: string, scale: number) => void;
   children: React.ReactNode;
   style?: any;
 }) {
   const start = useRef<Offset>({ x: 0, y: 0 });
   const dragging = useRef(false);
+  const resizeStart = useRef({ x: 0, y: 0, scale: 1 });
+  const resizing = useRef(false);
 
   const onGrant = useCallback((e: any) => {
     dragging.current = true;
@@ -507,7 +534,25 @@ function Draggable({
 
   const onRelease = useCallback(() => { dragging.current = false; }, []);
 
-  const positioned = [style, { transform: [{ translateX: offset.x }, { translateY: offset.y }] }];
+  const onResizeGrant = useCallback((e: any) => {
+    resizing.current = true;
+    resizeStart.current = { x: e.nativeEvent.pageX, y: e.nativeEvent.pageY, scale };
+  }, [scale]);
+
+  const onResizeMove = useCallback((e: any) => {
+    if (!resizing.current) return;
+    // Dragging the corner handle away from the group (down-right) grows it,
+    // toward it (up-left) shrinks it — the sum of both axes so the handle
+    // doesn't need to be dragged along one exact diagonal to work smoothly.
+    const dx = e.nativeEvent.pageX - resizeStart.current.x;
+    const dy = e.nativeEvent.pageY - resizeStart.current.y;
+    const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, resizeStart.current.scale + (dx + dy) / 160));
+    onResize(id, next);
+  }, [id, onResize]);
+
+  const onResizeRelease = useCallback(() => { resizing.current = false; }, []);
+
+  const positioned = [style, { transform: [{ translateX: offset.x }, { translateY: offset.y }, { scale }] }];
 
   if (!editMode) {
     return <View style={positioned}>{children}</View>;
@@ -524,6 +569,21 @@ function Draggable({
       onResponderTerminate={onRelease}
     >
       {children}
+      <View
+        style={styles.resizeHandle}
+        // A separate, deeper responder wins over the drag handler above for
+        // touches that land on the handle itself (RN grants the responder
+        // to the deepest claimant), so touching the corner resizes instead
+        // of dragging the whole group.
+        onStartShouldSetResponder={() => true}
+        onMoveShouldSetResponder={() => true}
+        onResponderGrant={onResizeGrant}
+        onResponderMove={onResizeMove}
+        onResponderRelease={onResizeRelease}
+        onResponderTerminate={onResizeRelease}
+      >
+        <Ionicons name="resize" size={13} color="#08101F" />
+      </View>
     </View>
   );
 }
@@ -587,7 +647,12 @@ const styles = StyleSheet.create({
   footnote: { color: C.textMed, fontSize: 10.5, textAlign: "center", opacity: 0.8, lineHeight: 15 },
 
   screen: { flex: 1, flexDirection: "row", backgroundColor: C.bg },
-  touchCol: { alignItems: "center", justifyContent: "center", paddingLeft: 20, paddingVertical: 12 },
+  // zIndex (+ elevation for Android, which otherwise ignores zIndex between
+  // sibling Views) above the pad: dragging this column's content past its
+  // own slot — into where the pad sits — must keep it on top, not have it
+  // vanish behind the pad's own opaque background, which paints after this
+  // sibling in the tree by default.
+  touchCol: { alignItems: "center", justifyContent: "center", paddingLeft: 20, paddingVertical: 12, zIndex: 10, elevation: 10 },
   pad: { flex: 1, backgroundColor: C.bg, justifyContent: "center", paddingHorizontal: 24, paddingVertical: 12 },
   // Narrower when sharing the screen with the 3DS touch mirror, so the pad
   // doesn't crowd it off a phone-sized landscape width.
@@ -601,6 +666,11 @@ const styles = StyleSheet.create({
   resetText: { color: C.textMed, fontSize: 11, fontWeight: "700" },
   editHint: { position: "absolute", top: 58, alignSelf: "center", color: C.textMed, fontSize: 11, opacity: 0.8 },
   draggable: { borderWidth: 1, borderColor: C.pri, borderStyle: "dashed", borderRadius: 12 },
+  resizeHandle: {
+    position: "absolute", bottom: -14, right: -14, width: 28, height: 28, borderRadius: 14,
+    backgroundColor: C.pri, borderWidth: 2, borderColor: C.bg,
+    alignItems: "center", justifyContent: "center", zIndex: 3,
+  },
   btnDisabled: { opacity: 0.55 },
   shoulderGroup: { flexDirection: "row", gap: 8 },
   stickRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 14, paddingHorizontal: 10 },

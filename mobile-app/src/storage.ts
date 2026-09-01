@@ -42,11 +42,12 @@ export function parseConnectionUrl(raw: string): Connection | null {
 
 const LAYOUT_KEY = "jarvis_pad_layout";
 
-/** Pixel offset from a control group's default position, keyed by group id
- * (e.g. "group:dpad", "group:face" — see GamepadOverlay.tsx). A device-local
- * preference, deliberately not synced to the desktop: the emulator itself
- * has no notion of where the phone draws its own buttons. */
-export type PadOffsets = Record<string, { x: number; y: number }>;
+/** Pixel offset (and optional scale) from a control group's default
+ * position/size, keyed by group id (e.g. "group:dpad", "group:face" — see
+ * GamepadOverlay.tsx). A device-local preference, deliberately not synced
+ * to the desktop: the emulator itself has no notion of where or how big
+ * the phone draws its own buttons. `scale` defaults to 1 when absent. */
+export type PadOffsets = Record<string, { x: number; y: number; scale?: number }>;
 
 export async function loadPadLayout(): Promise<PadOffsets> {
   try {

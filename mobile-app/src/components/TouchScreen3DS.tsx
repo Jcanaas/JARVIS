@@ -9,7 +9,7 @@ import { api, gamepadScreenUrl } from "../api";
  * fraction across the rendered <Image> is the same fraction across the
  * real cropped screen with no extra math. */
 const SCREEN_ASPECT = 4 / 3;
-const POLL_MS = 100; // ~10fps — plenty for a screen only tapped, not watched
+const POLL_MS = 100; // ~10fps target — plenty for a screen only tapped, not watched
 
 /**
  * Mirrors the 3DS bottom (touch) screen on the phone and forwards taps/
@@ -21,37 +21,48 @@ const POLL_MS = 100; // ~10fps — plenty for a screen only tapped, not watched
  * way a browser <img> does, and polling a still image is a well-worn,
  * reliable substitute at the ~10fps this needs.
  *
- * Double-buffered: swapping a single <Image>'s source.uri makes RN clear it
- * to blank while the new one decodes, which at 10 polls/sec read as a
- * constant black flicker. Two stacked Image layers fix it — the next frame
- * loads into the *hidden* layer, and only once it has fully decoded
- * (onLoad) do the layers swap, so the visible one is always a complete
- * frame, never a gap.
+ * Prefetch-then-swap, not double-buffered opacity layers (an earlier
+ * version of this tried that and still flickered black in practice):
+ * Image.prefetch() downloads and decodes the next frame into RN's image
+ * cache *before* it ever becomes a visible <Image>'s source, so the actual
+ * swap is a cache hit with nothing to decode — no layer is ever showing a
+ * source mid-load. The poll loop also only re-arms itself after the
+ * current fetch settles (a self-paced setTimeout, not setInterval), so a
+ * slow LAN request can't pile up requests faster than they resolve — the
+ * likely reason two layers alone didn't fix it: firing a new source into
+ * the "hidden" layer every fixed 100ms regardless of whether its previous
+ * load had finished just cancels and restarts that layer's fetch forever
+ * on a network slower than 100ms round-trip, so it never has a frame to
+ * swap to.
  */
 export default function TouchScreen3DS({ active = true }: { active?: boolean }) {
-  const initialUri = gamepadScreenUrl(Date.now());
-  const [uris, setUris] = useState<[string, string]>([initialUri, initialUri]);
-  const [visible, setVisible] = useState<0 | 1>(0);
-  const nextLayer = useRef<0 | 1>(1);
+  const [uri, setUri] = useState(() => gamepadScreenUrl(Date.now()));
   const rectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
   const rootRef = useRef<View | null>(null);
   const touching = useRef(false);
 
   useEffect(() => {
-    const t = setInterval(() => {
-      const layer = nextLayer.current;
-      setUris((prev) => {
-        const next: [string, string] = [...prev];
-        next[layer] = gamepadScreenUrl(Date.now());
-        return next;
-      });
-    }, POLL_MS);
-    return () => clearInterval(t);
-  }, []);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-  const onLayerLoad = useCallback((layer: 0 | 1) => {
-    setVisible(layer);
-    nextLayer.current = layer === 0 ? 1 : 0;
+    const poll = async () => {
+      const next = gamepadScreenUrl(Date.now());
+      try {
+        await Image.prefetch(next);
+      } catch {
+        // Network hiccup or no game running right now — keep showing the
+        // last good frame and just try again next tick.
+      }
+      if (cancelled) return;
+      setUri(next);
+      timer = setTimeout(poll, POLL_MS);
+    };
+    timer = setTimeout(poll, POLL_MS);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   const measure = useCallback(() => {
@@ -103,18 +114,7 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
       onResponderRelease={onRelease}
       onResponderTerminate={onRelease}
     >
-      <Image
-        source={{ uri: uris[0] }}
-        style={[styles.image, { opacity: visible === 0 ? 1 : 0 }]}
-        resizeMode="contain"
-        onLoad={() => onLayerLoad(0)}
-      />
-      <Image
-        source={{ uri: uris[1] }}
-        style={[styles.image, styles.overlay, { opacity: visible === 1 ? 1 : 0 }]}
-        resizeMode="contain"
-        onLoad={() => onLayerLoad(1)}
-      />
+      <Image source={{ uri }} style={styles.image} resizeMode="contain" />
     </View>
   );
 }
@@ -126,6 +126,5 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: C.border, overflow: "hidden",
   },
   image: { width: "100%", height: "100%" },
-  overlay: { position: "absolute", top: 0, left: 0 },
   frameInactive: { opacity: 0.55 },
 });
