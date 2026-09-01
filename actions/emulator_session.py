@@ -71,6 +71,7 @@ class EmulatorSession:
 
         self._frame_lock = threading.Lock()
         self._last_frame: tuple = (None, 0, 0, 0, 0)
+        self._frame_id = 0
 
         self._fps_measured = 0.0
         self._error: Optional[str] = None
@@ -159,6 +160,14 @@ class EmulatorSession:
         actions/libretro.py's current_frame() for the format."""
         with self._frame_lock:
             return self._last_frame
+
+    def frame_id(self) -> int:
+        """Increments once per rendered frame. A consumer (the MJPEG
+        encoder in actions/webui_server.py) polls this to skip re-encoding
+        an unchanged frame instead of comparing pixel buffers — cheap enough
+        to poll in a tight loop without touching the emulation thread."""
+        with self._frame_lock:
+            return self._frame_id
 
     def set_button(self, button: str, pressed: bool) -> None:
         core = self._core
@@ -284,6 +293,7 @@ class EmulatorSession:
                     core.run_frame()
                     with self._frame_lock:
                         self._last_frame = core.current_frame()
+                        self._frame_id += 1
                     core.take_audio()  # drained, not played yet — see Fase 2 plan
                     fps_frames += 1
                 if not due:

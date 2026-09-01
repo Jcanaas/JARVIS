@@ -407,6 +407,66 @@ Ruta `/api/emulator/stream` como `multipart/x-mixed-replace`, consumida por un
 y anotado junto al de emulación. Si divergen mucho, el cuello está identificado
 antes de construir la UI encima.
 
+### ✅ RESULTADOS FASE 3 — ejecutada
+
+Construido: `actions/emulator_frame.py` (conversión pura de frame del core a
+BGR — formato nativo de OpenCV, sin Qt), `frame_id()` en `EmulatorSession`
+(para que el encoder no recodifique un frame sin cambios cuando está en
+pausa), y la ruta `/api/emulator/stream` en `webui_server.py`.
+
+#### El "margen ajustado" que temía la nota no aparece en la práctica
+
+| Escenario | fps de cliente medido |
+|---|---|
+| GBA software (240x160) | **59.7 fps** |
+| PS2 hardware (640x448), calidad 85 | **59.6 fps**, 27.8 KB/frame |
+| PS2 hardware (640x448), calidad 70 | **60.0 fps**, 19.9 KB/frame |
+| PS2 hardware (640x448), calidad 50 | **59.9 fps**, 16.7 KB/frame |
+
+En los tres niveles de calidad probados en PS2, el fps de cliente iguala al de
+emulación — el coste de `cv2.imencode` no es el cuello de botella, ni siquiera
+a resolución nativa PS2 con renderer OpenGL. **Matiz que sigue en pie:** esto
+es splash/menús, no gameplay real (mismo matiz que en la Fase 1); la medida de
+gameplay de verdad es cosa de la Fase 5.
+
+Frames verificados a ojo sobre los bytes JPEG que de verdad viajaron por HTTP,
+no sobre datos internos: el texto de Metroid y el logo animado de DreamWorks
+(globos + luna) de Madagascar, ambos nítidos y con color correcto.
+
+#### Verificación real, no solo `curl` a la ruta
+
+El panel de navegador de esta sesión no pudo abrir `localhost` (limitación del
+entorno, no del código: `preview_start` sí conectó — quedó registrado un
+`GET /api/emulator/stream` con 200 en el log de Flask — pero `screenshot`
+nunca llegó a componer). Se sustituyó por una verificación igual de exigente:
+un cliente HTTP que parsea el `multipart/x-mixed-replace` de verdad
+(boundary, cabeceras `Content-Length`, cuerpo JPEG), sobre el servidor Flask
+real (`webui_server._make_app`) con una `EmulatorSession` real dentro,
+exactamente como lo consumiría el `<img>` del panel Svelte de la Fase 4.
+
+Casos de diseño probados en vivo, no solo revisados por código:
+- **Corte abrupto del cliente** (socket cerrado sin FIN limpio a media
+  respuesta): el servidor sigue respondiendo a otras rutas después — no hay
+  fuga ni caída.
+- **Sin sesión activa**: la ruta no envía frames ni casca, se queda esperando
+  (verificado con un socket crudo y timeout de 2s sin datos).
+- Cabeceras correctas: `Content-Type: multipart/x-mixed-replace;
+  boundary=jarvisframe`, `Cache-Control: no-cache, no-store, must-revalidate`.
+
+#### Tests unitarios
+
+`tests/test_emulator_frame.py` — 6 tests sobre `frame_to_bgr()` con datos
+sintéticos (sin core, sin Qt): los tres formatos de píxel del core
+(`XRGB8888`, `RGB565`, `0RGB1555`) decodificados a colores puros conocidos,
+`pitch` mayor que el ancho visible (framebuffer con stride, como haría un
+core real), y el mismo fallback a RGB565 que usa `retro.py` para formatos
+desconocidos.
+
+#### Regresiones: ninguna
+
+Suite completa: **704 passed, 2 skipped** — mismos 2 fallos preexistentes de
+la Fase 2, sin relación con este trabajo.
+
 ---
 
 ## Fase 4 — Input, rutas de biblioteca y panel Svelte

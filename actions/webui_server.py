@@ -1492,6 +1492,67 @@ def _make_app(host_ref):
             "settings_path": str(config_path("app_settings.json")),
         })
 
+    # -- Emuladores (streaming) -------------------------------------------
+    # MJPEG (multipart/x-mixed-replace) over a plain <img>, no WebSocket and
+    # no client-side decoding. The encoder polls actions/emulator_session.py
+    # for whatever frame is currently available and skips ahead if nothing
+    # changed (frame_id() lets it do that without decoding a duplicate) —
+    # the emulation thread never waits on this generator, and a slow or
+    # disconnected client can only starve itself, not the emulator.
+
+    def _mjpeg_frames(quality: int):
+        import time as _time
+
+        import cv2
+
+        from actions.emulator_frame import frame_to_bgr
+        from actions.emulator_session import get_session
+
+        session = get_session()
+        boundary = b"jarvisframe"
+        last_id = -1
+        while True:
+            if not session.is_running():
+                last_id = -1
+                _time.sleep(0.1)
+                continue
+
+            frame_id = session.frame_id()
+            if frame_id == last_id:
+                _time.sleep(1 / 120)
+                continue
+            last_id = frame_id
+
+            data, w, h, pitch, fmt = session.latest_frame()
+            bgr = frame_to_bgr(data, w, h, pitch, fmt)
+            if bgr is None:
+                _time.sleep(1 / 60)
+                continue
+
+            ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            if not ok:
+                continue
+            jpg = buf.tobytes()
+            yield (
+                b"--" + boundary + b"\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(jpg)).encode("ascii") + b"\r\n\r\n"
+                + jpg + b"\r\n"
+            )
+
+    @app.route("/api/emulator/stream")
+    def api_emulator_stream():
+        # Clamped rather than trusted: this is the one query param that
+        # reaches a C encoder (cv2.imencode) with no validation of its own.
+        quality = max(10, min(95, request.args.get("quality", default=70, type=int) or 70))
+        resp = Response(
+            _mjpeg_frames(quality),
+            mimetype="multipart/x-mixed-replace; boundary=jarvisframe",
+        )
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
     return app
 
 
