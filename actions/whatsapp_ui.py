@@ -46,7 +46,7 @@ import numpy as np
 import wave
 import tempfile
 from actions.file_processor import _process_audio
-from actions.perf_helpers import DiskImageCache
+from actions.perf_helpers import BoundedCache, DiskImageCache
 
 BG = "#0A0C16"
 PANEL = "rgba(255, 255, 255, 0.050)"
@@ -637,11 +637,11 @@ class WhatsAppWindow(QWidget):
         self._chat_items: dict[str, QListWidgetItem] = {}
         self._chat_avatar_labels: dict[str, QLabel] = {}
         self._avatar_url_labels: dict[str, list[QLabel]] = {}
-        self._avatar_cache: dict[str, bytes] = {}
+        self._avatar_cache: dict[str, bytes] = BoundedCache(300)
         self._avatar_disk_cache = DiskImageCache("wa_avatars")
         self._avatar_url_loading: set[str] = set()
         self._avatar_image_loading: set[str] = set()
-        self._name_cache: dict[str, str] = {}
+        self._name_cache: dict[str, str] = BoundedCache(1000)
         self._all_chats: list[dict] = []
         self._conversation_cache: dict[str, tuple[list[dict], str]] = {}
         self._render_queue: list[tuple[dict, str, bool]] = []
@@ -671,7 +671,7 @@ class WhatsAppWindow(QWidget):
         self._reply_to: dict | None = None
         self._edit_target_id: str | None = None
         self._media_preview_labels: dict[str, list[QLabel]] = {}
-        self._media_preview_cache: dict[str, bytes] = {}
+        self._media_preview_cache: dict[str, bytes] = BoundedCache(200)
         self._media_preview_loading: set[str] = set()
         # El bridge (Puppeteer) procesa cada /media en serie contra la misma
         # página de Chrome: abrir un chat con muchas imágenes/vídeos disparaba

@@ -13,7 +13,7 @@ from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 
 from actions import app_settings
-from actions.perf_helpers import DiskImageCache
+from actions.perf_helpers import BoundedCache, DiskImageCache
 
 from ..theme import *
 from ..icons import *
@@ -53,9 +53,9 @@ class MusicModePanelV2(QWidget):
         self._table_kind = "playlists"
         self._current_playlist: dict | None = None
         self._search_results: dict[str, list[dict]] = {"songs": [], "playlists": [], "artists": []}
-        self._thumb_cache: dict[str, bytes] = {}
+        self._thumb_cache: dict[str, bytes] = BoundedCache(400)
         self._thumb_disk_cache = DiskImageCache("yt_music_thumbs")
-        self._thumb_pixmap_cache: dict[tuple[str, int], QPixmap] = {}
+        self._thumb_pixmap_cache: dict[tuple[str, int], QPixmap] = BoundedCache(400)
         self._playlist_tracks_cache: dict[str, tuple[float, list[dict]]] = {}
         self._playlist_request = 0
         self._search_request = 0
@@ -206,8 +206,9 @@ class MusicModePanelV2(QWidget):
         self.offline_btn.clicked.connect(self._toggle_offline)
         self.offline_btn.setVisible(False)
         header_actions.addWidget(self.offline_btn)
+        # Started/stopped from showEvent/hideEvent — see below — so it only
+        # ticks while this panel is actually the one visible.
         self._offline_poll_timer = None
-        self._ensure_offline_poll_timer()
 
         header_actions.addStretch()
 
@@ -2307,6 +2308,21 @@ class MusicModePanelV2(QWidget):
         self._update_details_visibility()
         self._apply_header_responsive()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The offline-sync button poll only means anything while this panel
+        # is what the user is looking at — no need to keep ticking every
+        # 600ms in the background while another mode tab is active.
+        self._ensure_offline_poll_timer()
+        self._refresh_offline_button()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        timer = getattr(self, "_offline_poll_timer", None)
+        if timer is not None:
+            timer.stop()
+            self._offline_poll_timer = None
+
     def _details_should_show(self) -> bool:
         data = self._now_playing_data if isinstance(self._now_playing_data, dict) else {}
         return bool(data.get("title")) and self.width() >= self._DETAILS_HIDE_WIDTH
@@ -2923,9 +2939,13 @@ class FileDropZone(QWidget):
         self._hovering  = False
         self._drag_over = False
         self._dash_offset = 0.0
+        # Started/stopped from showEvent/hideEvent below: this widget lives
+        # permanently in the side panel (ui/__init__.py) behind a collapse
+        # toggle that starts closed, so a timer running from construction
+        # would animate a dashed border nobody can see for most of the
+        # session.
         self._anim_tmr = QTimer(self)
         self._anim_tmr.timeout.connect(self._animate)
-        self._anim_tmr.start(40)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -2935,6 +2955,14 @@ class FileDropZone(QWidget):
     def _animate(self):
         self._dash_offset = (self._dash_offset + 0.8) % 20
         self._canvas.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._anim_tmr.start(40)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._anim_tmr.stop()
 
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from actions.paths import MEMORY_DIR
+from actions.perf_helpers import BoundedCache
 import requests
 import hashlib
 import base64
@@ -448,6 +449,26 @@ class GmailModePanel(QWidget):
         self.reader_folder.setObjectName("GmailEyebrow")
         toolbar.addWidget(self.reader_folder)
         toolbar.addStretch()
+        self.archive_btn = QPushButton()
+        self.archive_btn.setObjectName("GmailIconButton")
+        self.archive_btn.setIcon(_line_icon("folder", C.TEXT_DIM, 17))
+        self.archive_btn.setIconSize(QSize(17, 17))
+        self.archive_btn.setToolTip("Archivar (sale de la bandeja, sigue en Todo)")
+        self.archive_btn.setFixedSize(34, 30)
+        self.archive_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.archive_btn.clicked.connect(self._archive_current_email)
+        toolbar.addWidget(self.archive_btn)
+        self.trash_btn = QPushButton()
+        self.trash_btn.setObjectName("GmailIconButton")
+        self.trash_btn.setIcon(_line_icon("trash", C.TEXT_DIM, 17))
+        self.trash_btn.setIconSize(QSize(17, 17))
+        self.trash_btn.setToolTip("Mover a la papelera")
+        self.trash_btn.setFixedSize(34, 30)
+        self.trash_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.trash_btn.clicked.connect(self._trash_current_email)
+        toolbar.addWidget(self.trash_btn)
+        self.archive_btn.setEnabled(False)
+        self.trash_btn.setEnabled(False)
         self.reader_date = QLabel("")
         self.reader_date.setObjectName("GmailDate")
         toolbar.addWidget(self.reader_date)
@@ -918,6 +939,8 @@ class GmailModePanel(QWidget):
         if email_id:
             self._current_email = email
             self._rendered_email = None
+            self.archive_btn.setEnabled(self._list_label != "TRASH")
+            self.trash_btn.setEnabled(self._list_label != "TRASH")
             self.reader_folder.setText((self._folder_name or "Bandeja").upper())
             self._set_reader_header(email)
             snippet = html_lib.escape(str(email.get("snippet") or "").strip())
@@ -928,6 +951,48 @@ class GmailModePanel(QWidget):
             self._compact_reader = True
             self._apply_responsive_layout()
             self._run("read", lambda: __import__("actions.gmail", fromlist=["read_email"]).read_email(email_id))
+
+    def _archive_current_email(self):
+        email = self._current_email
+        if not email or not email.get("id"):
+            return
+        email_id = email["id"]
+        self.archive_btn.setEnabled(False)
+        self.trash_btn.setEnabled(False)
+        self._run(
+            "archive",
+            lambda: (__import__("actions.gmail", fromlist=["archive_email"]).archive_email(email_id), email_id)[1],
+        )
+
+    def _trash_current_email(self):
+        email = self._current_email
+        if not email or not email.get("id"):
+            return
+        email_id = email["id"]
+        self.archive_btn.setEnabled(False)
+        self.trash_btn.setEnabled(False)
+        self._run(
+            "trash",
+            lambda: (__import__("actions.gmail", fromlist=["trash_email"]).trash_email(email_id), email_id)[1],
+        )
+
+    def _remove_email_from_list(self, email_id: str):
+        """Drop a just-archived/trashed email from the visible list and reader
+        without waiting for the next page load — the server-side change is
+        already done by the time this runs."""
+        self._items = [e for e in self._items if e.get("id") != email_id]
+        for row in range(self.email_list.count()):
+            item = self.email_list.item(row)
+            data = item.data(Qt.ItemDataRole.UserRole) or {}
+            if data.get("id") == email_id:
+                self.email_list.takeItem(row)
+                break
+        self._total_emails = max(0, self._total_emails - 1)
+        self.status.setText(f"{self._total_emails} correos" if self._total_emails else "No hay resultados.")
+        if self._current_email and self._current_email.get("id") == email_id:
+            self._current_email = None
+            self._rendered_email = None
+            self._show_inbox()
 
     def _is_complex_email(self, html_body: str) -> bool:
         html_body = str(html_body or "")
@@ -951,6 +1016,14 @@ class GmailModePanel(QWidget):
                 self.pagination.setEnabled(True)
             elif op == "read":
                 self.preview.setPlainText(str(result))
+            elif op in ("archive", "trash"):
+                self.status.setText("No se pudo mover el correo")
+                if self._current_email:
+                    self.archive_btn.setEnabled(self._list_label != "TRASH")
+                    self.trash_btn.setEnabled(self._list_label != "TRASH")
+            return
+        if op in ("archive", "trash"):
+            self._remove_email_from_list(result)
             return
         if op == "list":
             page_data = result if isinstance(result, dict) else {"emails": result or []}
@@ -1144,7 +1217,7 @@ class GmailModePanel(QWidget):
                 return src
             cache = getattr(self, "_email_img_cache", None)
             if cache is None:
-                cache = {}
+                cache = BoundedCache(300)
                 self._email_img_cache = cache
             if src in cache:
                 return cache[src]

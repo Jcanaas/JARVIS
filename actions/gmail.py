@@ -433,6 +433,20 @@ def read_email(email_id: str) -> Dict:
     return result
 
 
+def trash_email(email_id: str) -> None:
+    """Move a message to Papelera (Gmail's own 30-day trash, not a hard delete)."""
+    svc = _get_service()
+    svc.users().messages().trash(userId="me", id=email_id).execute()
+
+
+def archive_email(email_id: str) -> None:
+    """Remove INBOX label — the message stays in Todo/search, just off the inbox."""
+    svc = _get_service()
+    svc.users().messages().modify(
+        userId="me", id=email_id, body={"removeLabelIds": ["INBOX"]},
+    ).execute()
+
+
 def read_email_images(email_id: str) -> Dict:
     svc = _get_service()
     message = svc.users().messages().get(userId="me", id=email_id, format="full").execute()

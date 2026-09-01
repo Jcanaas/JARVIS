@@ -32,7 +32,18 @@ CREDENTIALS_FILE = config_path("google_credentials.json")
 # Per-process pipe name: two Jarvis instances (e.g. dev + installed) must not
 # talk to each other's mpv — a stale mpv on a shared pipe ends up orphaned as
 # an unclosable borderless window.
-_PIPE_PATH = rf"\\.\pipe\jarvis_mpv_video_{os.getpid()}"
+#
+# mpv's --input-ipc-server is a Windows named pipe on Windows and a Unix domain
+# socket elsewhere; actions.platform_runtime decides which transport applies.
+from actions.platform_runtime import AUDIO_IPC_WINPIPE, audio_ipc_backend
+
+_IS_WINDOWS = audio_ipc_backend() == AUDIO_IPC_WINPIPE
+if _IS_WINDOWS:
+    _PIPE_PATH = rf"\\.\pipe\jarvis_mpv_video_{os.getpid()}"
+else:
+    _PIPE_PATH = os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR") or "/tmp", f"jarvis_mpv_video_{os.getpid()}.sock"
+    )
 
 
 def _locate_mpv() -> str:
@@ -64,11 +75,32 @@ _PROCS: list[subprocess.Popen] = []
 
 
 def _kill_all_procs():
+    """Mata todo mpv de vídeo que siga vivo. Idempotente.
+
+    Se llama desde el atexit y, porque main.py cierra con os._exit(0) (que se
+    salta los atexit), también explícitamente desde su bloque de cierre.
+    """
     for proc in list(_PROCS):
         try:
             if proc.poll() is None:
                 proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+                # mpv puede quedarse atascado cerrando el vo/streaming; si no se
+                # ha ido por las buenas, no dejarlo suelto reproduciendo.
+                if proc.poll() is None:
+                    proc.kill()
         except Exception:
+            pass
+    _PROCS.clear()
+    # mpv deja atrás su socket Unix al morir; los named pipes de Windows los
+    # libera el propio SO, ahí no hay nada que borrar.
+    if not _IS_WINDOWS:
+        try:
+            os.unlink(_PIPE_PATH)
+        except OSError:
             pass
 
 
@@ -93,6 +125,21 @@ class EmbeddedVideoPlayer:
             return False
 
     def _wait_for_pipe(self, timeout_ms: int = 6000) -> bool:
+        if not _IS_WINDOWS:
+            # mpv crea el archivo de socket un instante antes de escuchar en él,
+            # así que la única señal fiable es conectar de verdad.
+            import socket
+            deadline = time.monotonic() + timeout_ms / 1000
+            while time.monotonic() < deadline:
+                try:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.4)
+                        s.connect(self.pipe)
+                    return True
+                except OSError:
+                    time.sleep(0.08)
+            return False
+
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
@@ -160,6 +207,19 @@ class EmbeddedVideoPlayer:
 
     def _send(self, cmd: list) -> bool:
         payload = (json.dumps({"command": cmd}) + "\n").encode("utf-8")
+        if not _IS_WINDOWS:
+            import socket
+            for _ in range(5):
+                try:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                        s.settimeout(2.0)
+                        s.connect(self.pipe)
+                        s.sendall(payload)
+                    return True
+                except OSError:
+                    time.sleep(0.2)
+            return False
+
         for attempt in range(5):
             try:
                 import ctypes
@@ -180,6 +240,39 @@ class EmbeddedVideoPlayer:
 
     def _get(self, prop: str):
         payload = (json.dumps({"command": ["get_property", prop], "request_id": 1}) + "\n").encode("utf-8")
+        if not _IS_WINDOWS:
+            # mpv puede intercalar líneas de evento antes de la respuesta, así
+            # que se lee hasta encontrar la que trae el resultado.
+            import socket
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.settimeout(2.0)
+                    s.connect(self.pipe)
+                    s.sendall(payload)
+                    buf = b""
+                    deadline = time.monotonic() + 2.0
+                    while time.monotonic() < deadline:
+                        try:
+                            chunk = s.recv(65536)
+                        except socket.timeout:
+                            break
+                        if not chunk:
+                            break
+                        buf += chunk
+                        for line in buf.decode("utf-8", "ignore").splitlines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except Exception:
+                                continue
+                            if isinstance(obj, dict) and obj.get("error") == "success":
+                                return obj.get("data")
+            except OSError:
+                return None
+            return None
+
         try:
             import ctypes
             import ctypes.wintypes as wt

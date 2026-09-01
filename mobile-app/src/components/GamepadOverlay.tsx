@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Modal, Pressable, Platform } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Modal, Platform } from "react-native";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { useKeepAwake } from "expo-keep-awake";
 import { Ionicons } from "@react-native-vector-icons/ionicons";
@@ -9,7 +9,10 @@ import {
   configureForegroundDisplay, ensureNotificationPermission, ensureChannel,
   presentNotification, dismissNotification, onNotificationTapped,
 } from "../notifications";
-import AnalogStick from "./AnalogStick";
+import AnalogStick, {
+  AXIS_MAX, STICK_SIZE, stickTravel,
+  type Offset, type Rect, type StickSide,
+} from "./AnalogStick";
 
 const DIGITAL_LAYOUT: PadLayout = {
   sticks: 0, triggers: false, stick_buttons: false, shoulders: false, face: "nintendo",
@@ -160,12 +163,32 @@ const FACE_LABELS: Record<string, { up: string; left: string; right: string; dow
   playstation: { up: "△", left: "□", right: "○", down: "✕" },
 };
 
+/** Throttle for analog updates while dragging; centring is always immediate. */
+const AXIS_SEND_MS = 50;
+
 function GamepadPad({
   consoleId, layout, onClose,
 }: { consoleId: string; layout: PadLayout; onClose: () => void }) {
   useKeepAwake(); // a controller that lets the screen sleep is useless
-  const [l3, setL3] = useState(false);
-  const [r3, setR3] = useState(false);
+
+  // Visual state only. What is actually sent lives in the refs below, so a
+  // re-render can never lag or duplicate a press.
+  const [down, setDown] = useState<Record<string, boolean>>({});
+  const [offsets, setOffsets] = useState<Record<StickSide, Offset>>({
+    left: { x: 0, y: 0 }, right: { x: 0, y: 0 },
+  });
+
+  const rootRef = useRef<View | null>(null);
+  const rootOrigin = useRef<Offset>({ x: 0, y: 0 });
+  const rects = useRef<Record<string, Rect>>({});
+  /** touch identifier → control id, kept for the life of that finger so a
+   *  stick keeps following it even when dragged outside its own circle. */
+  const owners = useRef<Map<number, string>>(new Map());
+  const sentButtons = useRef<Set<string>>(new Set());
+  const sentAxes = useRef<Record<StickSide, Offset>>({
+    left: { x: 0, y: 0 }, right: { x: 0, y: 0 },
+  });
+  const lastAxisSend = useRef<Record<StickSide, number>>({ left: 0, right: 0 });
 
   useEffect(() => {
     ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
@@ -190,15 +213,134 @@ function GamepadPad({
     }).catch(() => {});
   }, []);
 
+  const onMeasure = useCallback((id: string, rect: Rect) => {
+    rects.current[id] = rect;
+  }, []);
+
+  const measureRoot = useCallback(() => {
+    rootRef.current?.measureInWindow((x, y) => { rootOrigin.current = { x, y }; });
+  }, []);
+
+  /** Control under a touch. Touch coords are relative to the root view, the
+   *  measured rects are relative to the window, hence the origin subtraction. */
+  const hitTest = useCallback((px: number, py: number): string | null => {
+    const { x: ox, y: oy } = rootOrigin.current;
+    for (const [id, r] of Object.entries(rects.current)) {
+      const x = r.x - ox;
+      const y = r.y - oy;
+      if (px >= x && px <= x + r.w && py >= y && py <= y + r.h) return id;
+    }
+    return null;
+  }, []);
+
+  const handleTouches = useCallback((evt: any, ended: boolean = false) => {
+    const touches: any[] = evt?.nativeEvent?.touches || [];
+    const active = new Map<number, Offset>();
+    for (const t of touches) active.set(t.identifier, { x: t.pageX, y: t.pageY });
+    // Android keeps the lifted pointer in `touches` on an up event while iOS
+    // drops it. Take it out ourselves so a released button can't stay stuck.
+    if (ended) {
+      for (const t of (evt?.nativeEvent?.changedTouches || [])) active.delete(t.identifier);
+    }
+
+    // Fingers that lifted release whatever they were holding.
+    for (const id of Array.from(owners.current.keys())) {
+      if (!active.has(id)) owners.current.delete(id);
+    }
+    // New fingers claim whatever control they landed on.
+    for (const [tid, pos] of active) {
+      if (owners.current.has(tid)) continue;
+      const control = hitTest(pos.x, pos.y);
+      if (control) owners.current.set(tid, control);
+    }
+
+    const pressed = new Set<string>();
+    const nextOffsets: Record<StickSide, Offset> = {
+      left: { x: 0, y: 0 }, right: { x: 0, y: 0 },
+    };
+    const travel = stickTravel(STICK_SIZE);
+    const { x: ox, y: oy } = rootOrigin.current;
+
+    for (const [tid, control] of owners.current) {
+      const pos = active.get(tid);
+      if (!pos) continue;
+      if (control.startsWith("btn:")) {
+        pressed.add(control.slice(4));
+      } else if (control.startsWith("stick:")) {
+        const side = control.slice(6) as StickSide;
+        const r = rects.current[control];
+        if (!r) continue;
+        let dx = pos.x - ((r.x - ox) + r.w / 2);
+        let dy = pos.y - ((r.y - oy) + r.h / 2);
+        const dist = Math.hypot(dx, dy);
+        if (dist > travel) { dx *= travel / dist; dy *= travel / dist; }
+        nextOffsets[side] = { x: dx, y: dy };
+      }
+    }
+
+    // --- buttons: only the changes go out ---
+    let buttonsChanged = false;
+    for (const name of pressed) {
+      if (!sentButtons.current.has(name)) { send(name, true); buttonsChanged = true; }
+    }
+    for (const name of sentButtons.current) {
+      if (!pressed.has(name)) { send(name, false); buttonsChanged = true; }
+    }
+    if (buttonsChanged) {
+      sentButtons.current = pressed;
+      const map: Record<string, boolean> = {};
+      for (const name of pressed) map[name] = true;
+      setDown(map);
+    }
+
+    // --- sticks: throttled while moving, immediate on release ---
+    const now = Date.now();
+    const sides: StickSide[] = layout.sticks > 1 ? ["left", "right"] : ["left"];
+    for (const side of sides) {
+      const next = nextOffsets[side];
+      const prev = sentAxes.current[side];
+      if (next.x === prev.x && next.y === prev.y) continue;
+      const centring = next.x === 0 && next.y === 0;
+      if (!centring && now - lastAxisSend.current[side] < AXIS_SEND_MS) continue;
+      lastAxisSend.current[side] = now;
+      sentAxes.current[side] = next;
+      const clamp = (v: number) => Math.max(-1, Math.min(1, v / travel));
+      sendAxes(
+        side === "left" ? 0 : 1,
+        Math.round(clamp(next.x) * AXIS_MAX),
+        Math.round(clamp(next.y) * AXIS_MAX),
+      );
+    }
+    setOffsets(nextOffsets);
+  }, [hitTest, layout.sticks, send, sendAxes]);
+
   const face = FACE_LABELS[layout.face] || FACE_LABELS.nintendo;
-  const stickPress = (name: "l3" | "r3", setter: (v: boolean) => void) =>
-    layout.stick_buttons
-      ? (pressed: boolean) => { setter(pressed); send(name, pressed); }
-      : undefined;
 
   return (
     <Modal visible transparent={false} animationType="fade" onRequestClose={onClose} supportedOrientations={["landscape"]}>
-      <View style={styles.pad}>
+      <View
+        ref={rootRef}
+        onLayout={measureRoot}
+        style={styles.pad}
+        // One responder for the whole pad: this is what makes holding a
+        // direction while tapping a button possible at all.
+        onStartShouldSetResponder={() => true}
+        onMoveShouldSetResponder={() => true}
+        // Refuse to hand the responder over while fingers are on controls,
+        // or a stray tap would freeze them. With nothing held we let go, so
+        // the close button still works normally.
+        onResponderTerminationRequest={() => owners.current.size === 0}
+        onResponderGrant={handleTouches}
+        onResponderMove={handleTouches}
+        // Start/End fire for *every* pointer while we hold the responder,
+        // including ones whose target is a different view. Without them a
+        // crisp second-finger tap on a button — down and up between two move
+        // events — would never be seen at all.
+        onResponderStart={handleTouches}
+        onResponderEnd={(e) => handleTouches(e, true)}
+        onResponderRelease={(e) => handleTouches(e, true)}
+        onResponderTerminate={(e) => handleTouches(e, true)}
+      >
         <TouchableOpacity style={styles.closeBtn} onPress={onClose} hitSlop={12}>
           <Ionicons name="close" size={20} color={C.textMed} />
         </TouchableOpacity>
@@ -207,54 +349,58 @@ function GamepadPad({
         {(layout.shoulders || layout.triggers) && (
           <View style={styles.shoulderRow}>
             <View style={styles.shoulderGroup}>
-              {layout.triggers && <PadButton label="L2" name="l2" onSend={send} style={styles.shoulder} />}
-              {layout.shoulders && <PadButton label="L1" name="l" onSend={send} style={styles.shoulder} />}
+              {layout.triggers && <PadButton id="btn:l2" label="L2" down={!!down.l2} onMeasure={onMeasure} style={styles.shoulder} />}
+              {layout.shoulders && <PadButton id="btn:l" label="L1" down={!!down.l} onMeasure={onMeasure} style={styles.shoulder} />}
             </View>
             <View style={styles.shoulderGroup}>
-              {layout.shoulders && <PadButton label="R1" name="r" onSend={send} style={styles.shoulder} />}
-              {layout.triggers && <PadButton label="R2" name="r2" onSend={send} style={styles.shoulder} />}
+              {layout.shoulders && <PadButton id="btn:r" label="R1" down={!!down.r} onMeasure={onMeasure} style={styles.shoulder} />}
+              {layout.triggers && <PadButton id="btn:r2" label="R2" down={!!down.r2} onMeasure={onMeasure} style={styles.shoulder} />}
             </View>
           </View>
         )}
 
         <View style={styles.mainRow}>
           <View style={styles.dpad}>
-            <PadButton label="▲" name="up" onSend={send} style={[styles.dBtn, styles.dUp]} />
-            <PadButton label="◀" name="left" onSend={send} style={[styles.dBtn, styles.dLeft]} />
-            <PadButton label="▶" name="right" onSend={send} style={[styles.dBtn, styles.dRight]} />
-            <PadButton label="▼" name="down" onSend={send} style={[styles.dBtn, styles.dDown]} />
+            <PadButton id="btn:up" label="▲" down={!!down.up} onMeasure={onMeasure} style={[styles.dBtn, styles.dUp]} />
+            <PadButton id="btn:left" label="◀" down={!!down.left} onMeasure={onMeasure} style={[styles.dBtn, styles.dLeft]} />
+            <PadButton id="btn:right" label="▶" down={!!down.right} onMeasure={onMeasure} style={[styles.dBtn, styles.dRight]} />
+            <PadButton id="btn:down" label="▼" down={!!down.down} onMeasure={onMeasure} style={[styles.dBtn, styles.dDown]} />
           </View>
 
           <View style={styles.centerCol}>
-            <PadButton label="SELECT" name="select" onSend={send} style={styles.small} textStyle={styles.smallText} />
-            <PadButton label="START" name="start" onSend={send} style={styles.small} textStyle={styles.smallText} />
+            <PadButton id="btn:select" label="SELECT" down={!!down.select} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} />
+            <PadButton id="btn:start" label="START" down={!!down.start} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} />
           </View>
 
           <View style={styles.face}>
-            <PadButton label={face.up} name="x" onSend={send} style={[styles.fBtn, styles.fUp]} />
-            <PadButton label={face.left} name="y" onSend={send} style={[styles.fBtn, styles.fLeft]} />
-            <PadButton label={face.right} name="a" onSend={send} style={[styles.fBtn, styles.fRight]} />
-            <PadButton label={face.down} name="b" onSend={send} style={[styles.fBtn, styles.fDown]} />
+            <PadButton id="btn:x" label={face.up} down={!!down.x} onMeasure={onMeasure} style={[styles.fBtn, styles.fUp]} />
+            <PadButton id="btn:y" label={face.left} down={!!down.y} onMeasure={onMeasure} style={[styles.fBtn, styles.fLeft]} />
+            <PadButton id="btn:a" label={face.right} down={!!down.a} onMeasure={onMeasure} style={[styles.fBtn, styles.fRight]} />
+            <PadButton id="btn:b" label={face.down} down={!!down.b} onMeasure={onMeasure} style={[styles.fBtn, styles.fDown]} />
           </View>
         </View>
 
         {layout.sticks > 0 && (
           <View style={styles.stickRow}>
             <AnalogStick
-              side="left"
-              label={layout.sticks > 1 ? (layout.stick_buttons ? "L3" : "IZQ") : "STICK"}
-              onAxes={sendAxes}
-              onPress={stickPress("l3", setL3)}
-              pressed={l3}
+              id="stick:left"
+              label={layout.sticks > 1 ? "IZQ" : "STICK"}
+              offset={offsets.left}
+              onMeasure={onMeasure}
             />
             {layout.sticks > 1 && (
               <AnalogStick
-                side="right"
-                label={layout.stick_buttons ? "R3" : "DCH"}
-                onAxes={sendAxes}
-                onPress={stickPress("r3", setR3)}
-                pressed={r3}
+                id="stick:right"
+                label="DCH"
+                offset={offsets.right}
+                onMeasure={onMeasure}
               />
+            )}
+            {layout.stick_buttons && (
+              <View style={styles.stickButtons}>
+                <PadButton id="btn:l3" label="L3" down={!!down.l3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} />
+                <PadButton id="btn:r3" label="R3" down={!!down.r3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} />
+              </View>
             )}
           </View>
         )}
@@ -263,33 +409,33 @@ function GamepadPad({
   );
 }
 
+/**
+ * A pad button — a plain View, deliberately not a Pressable.
+ *
+ * Pressable competes for React Native's single touch responder, and winning it
+ * terminated the stick's drag, so you could not steer and press at the same
+ * time. Buttons now report their rect and let GamepadPad — the one responder —
+ * decide which of them the live touches are sitting on.
+ */
 function PadButton({
-  label, name, onSend, style, textStyle,
+  id, label, down, style, textStyle, onMeasure,
 }: {
+  id: string;
   label: string;
-  name: string;
-  onSend: (name: string, pressed: boolean) => void;
+  down: boolean;
   style?: any;
   textStyle?: any;
+  onMeasure: (id: string, rect: Rect) => void;
 }) {
-  const [down, setDown] = useState(false);
-  const heldRef = useRef(false);
+  const ref = useRef<View | null>(null);
+  const measure = useCallback(() => {
+    ref.current?.measureInWindow((x, y, w, h) => onMeasure(id, { x, y, w, h }));
+  }, [id, onMeasure]);
 
-  // onPressIn/Out rather than onPress: a gamepad needs press AND release, and
-  // it must react on touch-down, not on lift.
   return (
-    <Pressable
-      style={[styles.btn, style, down && styles.btnDown]}
-      onPressIn={() => { heldRef.current = true; setDown(true); onSend(name, true); }}
-      onPressOut={() => {
-        if (!heldRef.current) return;
-        heldRef.current = false;
-        setDown(false);
-        onSend(name, false);
-      }}
-    >
+    <View ref={ref} onLayout={measure} style={[styles.btn, style, down && styles.btnDown]}>
       <Text style={[styles.btnText, textStyle]}>{label}</Text>
-    </Pressable>
+    </View>
   );
 }
 
@@ -319,7 +465,11 @@ const styles = StyleSheet.create({
 
   pad: { flex: 1, backgroundColor: C.bg, justifyContent: "center", paddingHorizontal: 24, paddingVertical: 12 },
   shoulderGroup: { flexDirection: "row", gap: 8 },
-  stickRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 14, paddingHorizontal: 10 },
+  stickRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 14, paddingHorizontal: 10 },
+  // L3/R3 as real buttons: a touchscreen has no way to click a stick in, and
+  // firing L3 just for touching the stick (as this used to) would hold it
+  // down for the whole time you were steering.
+  stickButtons: { gap: 10, alignItems: "center" },
   closeBtn: { position: "absolute", top: 14, right: 18, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.06)", alignItems: "center", justifyContent: "center", zIndex: 2 },
   padConsole: { position: "absolute", top: 22, left: 22, color: C.textMed, fontSize: 11, fontWeight: "800", letterSpacing: 1 },
   shoulderRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 18 },

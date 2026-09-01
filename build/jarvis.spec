@@ -22,6 +22,14 @@ datas = [
     (str(ROOT / "core" / "prompt.txt"), "core"),
 ]
 
+# App icon, also used at runtime for the pywebview window/taskbar icon
+# (actions/webui_host.py's _window_icon_path — the EXE()'s own icon= below
+# only embeds it into the .exe file, it doesn't put the file on disk).
+for _icon_name in ("jarvis-icon.ico", "jarvis-icon-256.png"):
+    _icon_file = ROOT / "installer" / _icon_name
+    if _icon_file.is_file():
+        datas.append((str(_icon_file), "installer"))
+
 # Ship the developer's OAuth client so end users sign in without creating their
 # own Google Cloud project. Seeded to %LOCALAPPDATA%\Jarvis\config on first run
 # (actions/paths.py). NOTE: bundle ONLY the client secret — never tokens.
@@ -66,6 +74,11 @@ _add_tree("whatsapp_bridge", "whatsapp_bridge",
 # their node_modules — resolved at runtime via actions.paths.resource().
 _add_tree("actions/vendor", "actions/vendor", skip=(".bin", ".cache"))
 
+# Built web UI frontend (webui/dist), served by actions/webui_server.py via
+# actions.paths.resource("webui", "dist"). Must exist BEFORE running
+# PyInstaller — run `npm --prefix webui run build` first.
+_add_tree("webui/dist", "webui/dist")
+
 
 # --- Dynamic / data-heavy third-party packages --------------------------------
 hiddenimports = []
@@ -74,6 +87,10 @@ _collect_pkgs = [
     "google.genai",
     "yt_dlp", "qrcode", "comtypes", "pycaw", "duckduckgo_search", "flask",
     "youtube_transcript_api", "pptx", "dateutil", "bs4",
+    # pywebview's platform backends (winforms/cef on Windows, gtk/qt on
+    # Linux) are picked dynamically at runtime — static analysis misses them
+    # without collect_all.
+    "webview",
     # ytmusicapi needs its locales/ (gettext .mo files) — without them every
     # YTMusic() call dies at init in the frozen build.
     "ytmusicapi",
@@ -88,7 +105,10 @@ for pkg in _collect_pkgs:
         print(f"[spec] collect_all skipped {pkg}: {exc}")
 
 # Modules imported lazily/dynamically that the analysis can miss.
-for mod in ("comtypes.stream", "win32timezone"):
+# clr_loader/pythonnet back pywebview's WebView2 backend on Windows and load
+# dynamically — verify empirically on the first frozen Windows build whether
+# this is enough or clr_loader needs its own collect_all too.
+for mod in ("comtypes.stream", "win32timezone", "clr_loader"):
     try:
         hiddenimports += collect_submodules(mod)
     except Exception:

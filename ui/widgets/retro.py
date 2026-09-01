@@ -45,6 +45,15 @@ KEYMAP_HELP = (
     "Enter: Start  ·  Retroceso: Select"
 )
 
+# Left-stick keyboard directions, independent of input_config's button
+# bindings — see RetroScreen._stick_keys_held.
+_STICK_KEYS = {
+    Qt.Key.Key_W: "up",
+    Qt.Key.Key_S: "down",
+    Qt.Key.Key_A: "left",
+    Qt.Key.Key_D: "right",
+}
+
 
 def keymap_help(console_id: str = "gba") -> str:
     """Describe the *current* keyboard bindings, not the shipped defaults."""
@@ -113,8 +122,20 @@ class RetroScreen(QWidget):
         self._keymap: dict[int, str] = {}
         self._padmap: dict[str, str] = {}
         self._pad_pressed: set[str] = set()
+        # Last analog value this poller pushed, per (index, axis) — see
+        # _poll_gamepad: only changes are forwarded, so a local pad with
+        # nothing to say can't stomp the phone pad's sticks.
+        self._pad_axes: dict[tuple[int, int], int] = {}
         self._gamepad = None
         self._console_id = "gba"
+        # W/A/S/D drive the left analog stick directly. Unlike every other
+        # control here it isn't remappable through input_config — sticks only
+        # get bindings from a real pad (input_config.py deliberately leaves
+        # them off the keyboard table for ps2/n64) so the keyboard would
+        # otherwise never be able to move a game that requires the stick
+        # rather than the D-pad (e.g. PS2 titles that ignore the digital pad
+        # once analog mode is on).
+        self._stick_keys_held: set[str] = set()
         self.reload_bindings()
 
         self._timer = QTimer(self)
@@ -149,6 +170,8 @@ class RetroScreen(QWidget):
             # release, so start the new mapping from a clean slate.
             self._core.clear_input()
         self._pad_pressed.clear()
+        self._pad_axes.clear()
+        self._stick_keys_held.clear()
 
     def attach(self, core, console_id: str = "gba") -> None:
         """Bind a loaded core (with a game already in it) and start running."""
@@ -182,6 +205,8 @@ class RetroScreen(QWidget):
         if self._core is not None:
             self._core.clear_input()
         self._pad_pressed.clear()
+        self._pad_axes.clear()
+        self._stick_keys_held.clear()
         self._gamepad = None
         self._core = None
         self._image = None
@@ -274,12 +299,23 @@ class RetroScreen(QWidget):
             self._core.set_button(button, False)
         self._pad_pressed = active
         if hasattr(self._core, "set_axis"):
+            # Changes only, for the same reason as the buttons above — and here
+            # it is not an optimisation but a correctness fix. The phone pad
+            # (actions/lan_dashboard.py) writes the very same axes straight into
+            # the core, and this poller used to re-assert `axes.get(..., 0)`
+            # every frame: with no local pad attached (always, on Linux — the
+            # manager is Windows-only) that wrote 0 four times per frame and
+            # wiped the phone's stick a few ms after it arrived, so the sticks
+            # looked dead while the buttons worked.
             for index, prefix in ((ANALOG_INDEX_LEFT, "left"),
                                   (ANALOG_INDEX_RIGHT, "right")):
-                self._core.set_axis(
-                    index, ANALOG_ID_X, axes.get(f"{prefix}_x", 0))
-                self._core.set_axis(
-                    index, ANALOG_ID_Y, axes.get(f"{prefix}_y", 0))
+                for axis_id, suffix in ((ANALOG_ID_X, "x"), (ANALOG_ID_Y, "y")):
+                    value = int(axes.get(f"{prefix}_{suffix}", 0) or 0)
+                    key = (index, axis_id)
+                    if self._pad_axes.get(key, 0) == value:
+                        continue
+                    self._pad_axes[key] = value
+                    self._core.set_axis(index, axis_id, value)
 
     # ------------------------------------------------------------------
     # Audio
@@ -411,12 +447,28 @@ class RetroScreen(QWidget):
     # Input
     # ------------------------------------------------------------------
 
+    def _update_keyboard_stick(self) -> None:
+        if self._core is None or not hasattr(self._core, "set_axis"):
+            return
+        held = self._stick_keys_held
+        x = (32767 if "right" in held else 0) - (32767 if "left" in held else 0)
+        y = (32767 if "down" in held else 0) - (32767 if "up" in held else 0)
+        self._core.set_axis(ANALOG_INDEX_LEFT, ANALOG_ID_X, x)
+        self._core.set_axis(ANALOG_INDEX_LEFT, ANALOG_ID_Y, y)
+
     def keyPressEvent(self, event):
         if event.isAutoRepeat():
             return
-        button = self._keymap.get(Qt.Key(event.key()))
+        key = Qt.Key(event.key())
+        button = self._keymap.get(key)
         if button and self._core is not None:
             self._core.set_button(button, True)
+            event.accept()
+            return
+        direction = _STICK_KEYS.get(key)
+        if direction and self._core is not None:
+            self._stick_keys_held.add(direction)
+            self._update_keyboard_stick()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -424,9 +476,16 @@ class RetroScreen(QWidget):
     def keyReleaseEvent(self, event):
         if event.isAutoRepeat():
             return
-        button = self._keymap.get(Qt.Key(event.key()))
+        key = Qt.Key(event.key())
+        button = self._keymap.get(key)
         if button and self._core is not None:
             self._core.set_button(button, False)
+            event.accept()
+            return
+        direction = _STICK_KEYS.get(key)
+        if direction and self._core is not None:
+            self._stick_keys_held.discard(direction)
+            self._update_keyboard_stick()
             event.accept()
             return
         super().keyReleaseEvent(event)
@@ -440,6 +499,8 @@ class RetroScreen(QWidget):
         # or the next poll would see "no change" and never press them again.
         # The pad keeps working without focus, which is the point of a pad.
         self._pad_pressed.clear()
+        self._pad_axes.clear()
+        self._stick_keys_held.clear()
         super().focusOutEvent(event)
 
     def mousePressEvent(self, event):

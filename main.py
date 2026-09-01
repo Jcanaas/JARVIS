@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import base64
 import re
@@ -129,7 +131,6 @@ import numpy as np
 import sounddevice as sd
 from google import genai
 from google.genai import types
-from ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
 )
@@ -2775,12 +2776,24 @@ class JarvisLive:
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
+        capture_rate = SEND_SAMPLE_RATE
 
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted:
-                data = indata.tobytes()
+                pcm = indata[:, 0] if indata.ndim > 1 else indata.reshape(-1)
+                if capture_rate != SEND_SAMPLE_RATE:
+                    # Hardware doesn't accept 16kHz directly (common on onboard
+                    # ALSA codecs, e.g. "Invalid sample rate [PaErrorCode -9997]"
+                    # on some ALC256 configs) — captured at the device's native
+                    # rate instead, so downsample to what Gemini expects.
+                    n_out = int(round(len(pcm) * SEND_SAMPLE_RATE / capture_rate))
+                    if n_out > 0:
+                        x_old = np.linspace(0, 1, num=len(pcm), endpoint=False)
+                        x_new = np.linspace(0, 1, num=n_out, endpoint=False)
+                        pcm = np.interp(x_new, x_old, pcm.astype(np.float32)).astype(np.int16)
+                data = pcm.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
                     {"data": data, "mime_type": "audio/pcm"}
@@ -2815,13 +2828,25 @@ class JarvisLive:
                 continue
             try:
                 import sounddevice as _sd
-                print(f"[JARVIS] 🎤 Using mic: {_sd.query_devices(mic_device)['name']}")
+                dev_info = _sd.query_devices(mic_device)
+                print(f"[JARVIS] 🎤 Using mic: {dev_info['name']}")
+                try:
+                    _sd.check_input_settings(
+                        device=mic_device, samplerate=SEND_SAMPLE_RATE,
+                        channels=CHANNELS, dtype="int16",
+                    )
+                    capture_rate = SEND_SAMPLE_RATE
+                except Exception:
+                    capture_rate = int(dev_info.get("default_samplerate") or SEND_SAMPLE_RATE) or SEND_SAMPLE_RATE
+                    print(f"[JARVIS] 🎤 {SEND_SAMPLE_RATE}Hz no soportado por este dispositivo, "
+                          f"capturando a {capture_rate}Hz y remuestreando")
+                blocksize = max(1, round(CHUNK_SIZE * capture_rate / SEND_SAMPLE_RATE))
                 with sd.InputStream(
                     device=mic_device,
-                    samplerate=SEND_SAMPLE_RATE,
+                    samplerate=capture_rate,
                     channels=CHANNELS,
                     dtype="int16",
-                    blocksize=CHUNK_SIZE,
+                    blocksize=blocksize,
                     callback=callback,
                 ):
                     print("[JARVIS] 🎤 Mic stream open")
@@ -3103,6 +3128,59 @@ class JarvisLive:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
+def _kill_child_processes() -> None:
+    """Para todo proceso hijo que hayamos lanzado. Seguro de repetir.
+
+    Los mpv de música y vídeo y el puente Node de WhatsApp: ninguno muere solo
+    al morir Jarvis en Linux (en Windows el Job Object se encarga), así que
+    tanto el cierre normal como los handlers de señal pasan por aquí.
+    """
+    for module_name, func_name in (
+        ("actions.ytmusic_headless", "_cleanup_on_exit"),
+        ("actions.youtube_player", "_kill_all_procs"),
+        ("actions.whatsapp_bridge_process", "stop_bridge"),
+    ):
+        try:
+            module = __import__(module_name, fromlist=[func_name])
+            getattr(module, func_name)()
+        except Exception:
+            pass
+
+
+def _install_signal_cleanup() -> None:
+    """Mata los mpv hijos también cuando nos cierran por señal.
+
+    Ni SIGTERM (kill, logout, apagado) ni SIGINT (Ctrl+C) ejecutan los atexit
+    de Python, así que sin esto un cierre desde terminal dejaba mpv sonando de
+    fondo sin ventana que lo controlase. SIGKILL no se puede interceptar: ahí
+    el sistema se lleva por delante a Jarvis pero no a mpv.
+    """
+    import signal
+
+    def _handler(signum, _frame):
+        _kill_child_processes()
+        os._exit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", None)):
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):
+            pass  # p.ej. si no estamos en el hilo principal
+
+
+def _parse_cli_args():
+    import argparse
+    p = argparse.ArgumentParser(add_help=True)
+    p.add_argument(
+        "--legacy", action="store_true",
+        help="Boot the legacy PyQt6 desktop UI instead of the new web UI.",
+    )
+    args, _unknown = p.parse_known_args()
+    return args
+
+
 def main():
     # Must be the very first thing main() does: marks this process as a real
     # running instance of the app, so actions.app_settings.set() will actually
@@ -3110,6 +3188,24 @@ def main():
     # actions.app_settings directly is refused instead of silently writing
     # into the real user's config — see NOTE_settings_persistence.md.
     os.environ["JARVIS_REAL_SESSION"] = "1"
+
+    _cli_args = _parse_cli_args()
+
+    # Redetecta el sistema operativo y refresca los ajustes derivados de él
+    # (p. ej. qué transporte de IPC usa mpv). Se rehace en cada arranque a
+    # propósito: config/app_settings.json viaja entre máquinas al migrar, y un
+    # valor heredado de otro SO elegiría la implementación equivocada.
+    from actions import platform_runtime
+    _plat = platform_runtime.refresh()
+    print(f"[JARVIS] Plataforma: {_plat['platform_os']} (IPC audio: {_plat['platform_audio_ipc']})")
+    platform_runtime.force_xcb_on_wayland()
+
+    from actions import app_settings as _app_settings_mod
+    _perf_plan = _app_settings_mod.get("performance_plan", "balanced")
+    platform_runtime.apply_performance_plan(_perf_plan)
+    print(f"[JARVIS] Plan de rendimiento: {_perf_plan}")
+
+    _install_signal_cleanup()
 
     from actions.single_instance import is_already_running, focus_existing_window
     if is_already_running():
@@ -3119,12 +3215,26 @@ def main():
 
     from actions.whatsapp_bridge_process import start_bridge, stop_bridge
 
-    bridge_started = start_bridge()
-    if not bridge_started:
-        print("[JARVIS] WhatsApp bridge could not be started.")
+    # start_bridge() blocks up to 15s waiting for the Node process's HTTP
+    # server to answer — doing that before the window exists meant the whole
+    # app sat on a blank screen for however long WhatsApp took to link or
+    # reconnect. The bridge is not needed for the window to open, so run the
+    # wait off the main thread and let the UI show immediately; whatsapp_ui
+    # already polls the bridge's own /status and renders "not ready" until it
+    # answers, so there is nothing for the UI thread to wait on here.
+    _wa_enabled = bool(_app_settings_mod.get("whatsapp_enabled", True))
+    if _wa_enabled:
+        threading.Thread(target=start_bridge, daemon=True).start()
+    else:
+        print("[JARVIS] WhatsApp desactivado en Ajustes; no arranco el puente.")
 
-    ui = JarvisUI("face.png")
-    ui._app.aboutToQuit.connect(stop_bridge)
+    if _cli_args.legacy:
+        from ui import JarvisUI
+        ui = JarvisUI("face.png")
+    else:
+        from actions.webui_host import WebUIHost
+        ui = WebUIHost(dev_url=os.environ.get("JARVIS_WEBUI_DEV_URL") or None)
+    ui.on_quit(stop_bridge)
 
     from actions import lan_dashboard as _lan_dashboard_mod
     _lan_dashboard_mod.set_ui(ui)
@@ -3142,7 +3252,17 @@ def main():
                 'chat_id': entry.get('from') or '',
             })
 
-        mgr = WhatsAppManager(on_unanswered_reminder=_remind_unanswered)
+        def _on_unread_chats_changed(count):
+            try:
+                ui.set_whatsapp_unread_count(int(count))
+            except Exception:
+                pass
+
+        mgr = WhatsAppManager(
+            on_unanswered_reminder=_remind_unanswered,
+            on_unread_chats_changed=_on_unread_chats_changed,
+            enabled=_wa_enabled,
+        )
         ui.whatsapp_manager = mgr
         try:
             ui._win.whatsapp_manager = mgr
@@ -3180,6 +3300,9 @@ def main():
         # import would load a fresh, empty copy. Hand it the reference directly.
         from actions import lan_dashboard as _lan_dashboard_mod2
         _lan_dashboard_mod2.set_jarvis(jarvis)
+        if not _cli_args.legacy:
+            from actions import webui_server as _webui_server_mod
+            _webui_server_mod.set_jarvis(jarvis)
         ui.on_download_cancel = jarvis.request_download_cancel
         # connect whatsapp manager to jarvis.speak to announce incoming messages
         try:
@@ -3797,7 +3920,7 @@ def main():
             )
             ui.playback_controller = playback_controller
             ui.on_playback_command = playback_controller.submit
-            ui._app.aboutToQuit.connect(lambda: playback_controller.close(wait=False))
+            ui.on_quit(lambda: playback_controller.close(wait=False))
 
             # Poller para refrescar info de la pista actual y actualizar la UI
             _was_playing = [False]
@@ -3825,7 +3948,7 @@ def main():
             _playback_poller_stop = threading.Event()
             _last_poller_error = [0.0]
             ui._playback_poller_stop = _playback_poller_stop
-            ui._app.aboutToQuit.connect(_playback_poller_stop.set)
+            ui.on_quit(_playback_poller_stop.set)
 
             def _poller():
                 while not _playback_poller_stop.is_set():
@@ -3935,20 +4058,15 @@ def main():
         except Exception:
             pass
         try:
-            stop_bridge()
-        except Exception:
-            pass
-        try:
             controller = getattr(ui, "playback_controller", None)
             if controller is not None:
                 controller.close(wait=False)
         except Exception:
             pass
-        try:
-            import actions.ytmusic_headless as _hl
-            _hl._cleanup_on_exit()
-        except Exception:
-            pass
+        # mpv (música y vídeo) + puente Node. El mpv de vídeo solo se limpiaba
+        # vía atexit y el os._exit(0) de abajo se los salta: cada cierre dejaba
+        # un mpv huérfano reproduciendo de fondo.
+        _kill_child_processes()
         try:
             print("[JARVIS] Cerrando.", flush=True)
         except Exception:

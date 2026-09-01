@@ -154,7 +154,6 @@ class MainWindow(QMainWindow):
         self._wa_toasts: list[WhatsAppToast] = []
         self._wa_avatar_cache: dict[str, bytes] = {}
         self._wa_unread_count = 0
-        self._wa_unread_fetching = False
         # Persisted across restarts via app_settings ("right_panel_collapsed") —
         # do NOT hardcode this back to True/False, it silently reverts the
         # user's fold/unfold choice on every launch (regression fixed once already).
@@ -238,9 +237,12 @@ class MainWindow(QMainWindow):
         self._clock_tmr.start(1000)
         self._tick_clock()
 
-        self._whatsapp_badge_timer = QTimer(self)
-        self._whatsapp_badge_timer.timeout.connect(self._update_whatsapp_unread_badge)
-        self._whatsapp_badge_timer.start(4000)
+        # The badge used to run its own 4s QTimer + bridge HTTP call. The
+        # WhatsAppManager background thread already fetches the same
+        # per-chat unread counts every ~5s to reconcile its "unanswered"
+        # list (actions/whatsapp_manager.py); it now reports the chat count
+        # straight to _wa_unread_sig via on_unread_chats_changed (wired in
+        # main.py), so this doesn't need a second poller hitting the bridge.
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
@@ -410,6 +412,14 @@ class MainWindow(QMainWindow):
             class_name = widget.metaObject().className()
             if any(token in class_name for token in ("LineEdit", "TextEdit", "PlainTextEdit", "SpinBox", "DateEdit", "TimeEdit")):
                 return True
+            # The emulator screen maps single letters (A/S/Z/X, WASD-style
+            # binds, ...) to game buttons — those same letters double as mode
+            # accelerators (A → Calendario, S is free today but a custom
+            # binding could use it). Without this, pressing a game button
+            # while playing could yank the whole app to a different tab
+            # instead of reaching the core.
+            if class_name == "RetroScreen":
+                return True
             widget = widget.parentWidget()
         return False
 
@@ -418,6 +428,11 @@ class MainWindow(QMainWindow):
         try:
             if bool(app_settings.get("ui_always_on_top", False)):
                 self.set_always_on_top(True)
+        except Exception:
+            pass
+        try:
+            if not bool(app_settings.get("whatsapp_enabled", True)):
+                self.set_whatsapp_enabled(False)
         except Exception:
             pass
         try:
@@ -565,6 +580,29 @@ class MainWindow(QMainWindow):
                 panel.deleteLater()
         except Exception:
             pass
+
+    def set_whatsapp_enabled(self, enabled: bool):
+        """Show or hide WhatsApp as a destination in the app.
+
+        Turning it off in Ajustes stops the bridge, so leaving the nav entry
+        clickable would only lead to a panel spinning against a dead bridge.
+        The mode is hidden, its keyboard accelerator retired, and an open
+        WhatsApp panel torn down so nothing is left polling.
+        """
+        enabled = bool(enabled)
+        button = (self._mode_buttons or {}).get("WhatsApp")
+        if button is not None:
+            button.setVisible(enabled)
+        # Keep the single-letter shortcut in step: "W" must not jump to a
+        # mode whose button is gone.
+        if enabled:
+            self._mode_shortcuts["W"] = "WhatsApp"
+        else:
+            self._mode_shortcuts.pop("W", None)
+        if not enabled:
+            self._apply_wa_unread_badge(0)
+            if self._whatsapp_panel is not None:
+                self._close_whatsapp_mode()
 
     def set_always_on_top(self, enabled: bool):
         """Toggle the always-on-top window flag, preserving visibility."""
@@ -951,39 +989,6 @@ class MainWindow(QMainWindow):
         self._mode_buttons["Normal"].setChecked(True)
 
         return w
-
-    def _update_whatsapp_unread_badge(self):
-        """Refresh the WhatsApp badge with the number of chats pending.
-
-        Summing every chat's ``unreadCount`` produced a large opaque number
-        (old muted groups inflate it and it barely moves when you read one
-        chat). Counting *chats* with something unread matches what the user
-        sees in the chat list and drops visibly as each chat is opened. The
-        bridge call runs off the UI thread so it never blocks the interface.
-        """
-        if self._whatsapp_unread_badge is None:
-            return
-        if getattr(self, "whatsapp_manager", None) is None:
-            self._apply_wa_unread_badge(0)
-            return
-        if self._wa_unread_fetching:
-            return
-        self._wa_unread_fetching = True
-
-        def worker():
-            count = -1  # sentinel: keep the previous value on failure
-            try:
-                from actions.whatsapp import list_recent_chats
-                chats = list_recent_chats(300, timeout=8, include_pictures=False)
-                count = sum(1 for c in chats if int(c.get("unread") or 0) > 0)
-            except Exception:
-                count = -1
-            finally:
-                self._wa_unread_fetching = False
-            if count >= 0:
-                self._wa_unread_sig.emit(int(count))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _apply_wa_unread_badge(self, count: int):
         badge = self._whatsapp_unread_badge
@@ -2259,6 +2264,16 @@ class JarvisUI:
     def open_whatsapp_chat(self, contact: str = ""):
         try:
             self._win._whatsapp_chat_sig.emit(str(contact or ""))
+        except Exception:
+            pass
+
+    def on_quit(self, callback):
+        """Register a callback to run when the app is about to quit."""
+        self._app.aboutToQuit.connect(callback)
+
+    def set_whatsapp_unread_count(self, count: int):
+        try:
+            self._win._wa_unread_sig.emit(int(count))
         except Exception:
             pass
 

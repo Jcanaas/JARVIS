@@ -66,12 +66,28 @@ def set_music_logging(enabled: bool) -> str:
     return f"Music logging {'enabled' if _MUSIC_LOG_ENABLED else 'disabled'}."
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Two named-pipe slots for true simultaneous crossfade.
+# Two IPC slots for true simultaneous crossfade.
 # Playback alternates between slot 0 and slot 1 on each crossfade transition.
 # Per-process names: two Jarvis instances (dev + installed) must not attach to
-# each other's mpv processes through a shared pipe.
-_PIPE_PATHS  = [rf"\\.\pipe\jarvis_mpv_{os.getpid()}",
-                rf"\\.\pipe\jarvis_mpv2_{os.getpid()}"]
+# each other's mpv processes through a shared channel.
+#
+# mpv's --input-ipc-server takes a Windows named pipe on Windows and a Unix
+# domain socket path elsewhere, so the transport differs per platform: named
+# pipes are opened with the Win32 API, Unix sockets with socket.AF_UNIX.
+# actions.platform_runtime is the single place that decides which one.
+from actions.platform_runtime import AUDIO_IPC_WINPIPE, audio_ipc_backend
+
+_IS_WINDOWS = audio_ipc_backend() == AUDIO_IPC_WINPIPE
+if _IS_WINDOWS:
+    _PIPE_PATHS = [rf"\\.\pipe\jarvis_mpv_{os.getpid()}",
+                   rf"\\.\pipe\jarvis_mpv2_{os.getpid()}"]
+else:
+    # XDG_RUNTIME_DIR is per-user and tmpfs-backed; fall back to /tmp when unset
+    # (e.g. a bare service account). Unix socket paths are capped near 108 bytes,
+    # so keep them short.
+    _sock_dir = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    _PIPE_PATHS = [os.path.join(_sock_dir, f"jarvis_mpv_{os.getpid()}.sock"),
+                   os.path.join(_sock_dir, f"jarvis_mpv2_{os.getpid()}.sock")]
 _PIPE_PATH   = _PIPE_PATHS[0]  # kept as alias for external code
 _MPV_EXE = "mpv"
 
@@ -163,6 +179,15 @@ def _cleanup_on_exit():
                 _job_handle = None
         except Exception:
             pass
+        # mpv no borra su socket Unix al salir, así que sin esto cada arranque
+        # deja un archivo muerto en XDG_RUNTIME_DIR. Los named pipes de Windows
+        # los libera el propio SO al morir el proceso, no hay nada que limpiar.
+        if not _IS_WINDOWS:
+            for path in _PIPE_PATHS:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
 _atexit.register(_cleanup_on_exit)
 # Try to locate mpv.exe in the workspace root or tools folder, prefer that over PATH
@@ -592,7 +617,25 @@ def _locate_ytdlp() -> Optional[str]:
 
 
 def _wait_for_pipe(pipe_path: str, timeout_ms: int = 5000) -> bool:
-    """Wait until mpv's named pipe is ready using WaitNamedPipe (Windows API)."""
+    """Wait until mpv's IPC channel is ready to accept a connection.
+
+    Windows uses WaitNamedPipe; elsewhere we poll by actually connecting to the
+    Unix socket, which is the only reliable readiness signal (mpv creates the
+    socket file slightly before it starts listening).
+    """
+    if not _IS_WINDOWS:
+        import socket
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.5)
+                    s.connect(pipe_path)
+                return True
+            except (FileNotFoundError, ConnectionRefusedError, socket.timeout, OSError):
+                time.sleep(0.08)
+        return False
+
     try:
         import ctypes
         kernel32 = ctypes.windll.kernel32
@@ -732,6 +775,33 @@ def _ipc_request(cmd: list, request_id: int = 1, pipe: str | None = None) -> Opt
     pipe_path = pipe if pipe is not None else _cur_pipe()
     payload = (json.dumps({"command": cmd, "request_id": request_id}) + "\n").encode("utf-8")
 
+    if not _IS_WINDOWS:
+        # Unix domain socket. mpv answers with one JSON line per reply, but may
+        # interleave unsolicited event lines, so read until _parse_mpv_response
+        # finds the reply (it looks for the line carrying an "error" key).
+        import socket
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(2.0)
+                s.connect(pipe_path)
+                s.sendall(payload)
+                buf = b""
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    try:
+                        chunk = s.recv(65536)
+                    except socket.timeout:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                    parsed = _parse_mpv_response(buf)
+                    if parsed is not None:
+                        return parsed
+                return _parse_mpv_response(buf)
+        except Exception:
+            return None
+
     # Method 1: win32file / pywin32
     try:
         import win32file  # type: ignore
@@ -786,8 +856,16 @@ def _send_command(cmd: list, pipe: str | None = None) -> bool:
     payload = json.dumps({"command": cmd}) + "\n"
     for attempt in range(5):
         try:
-            with open(pipe_path, "w+b", buffering=0) as p:
-                p.write(payload.encode("utf-8"))
+            if _IS_WINDOWS:
+                with open(pipe_path, "w+b", buffering=0) as p:
+                    p.write(payload.encode("utf-8"))
+            else:
+                # Un socket Unix no se puede abrir con open(): hay que conectar.
+                import socket
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.settimeout(2.0)
+                    s.connect(pipe_path)
+                    s.sendall(payload.encode("utf-8"))
             return True
         except Exception:
             if attempt < 4:
@@ -1492,9 +1570,15 @@ def _artists_text(artists) -> str:
 
 def _begin_crossfade_overlap(
     next_vid: str, next_title: str, next_artists: str,
-    next_url: str, next_dur: int = 0,
+    next_url: str, next_dur: int = 0, immediate: bool = False,
 ) -> bool:
-    """Preload the incoming slot, then fade only after it is actively playing."""
+    """Preload the incoming slot, then fade only after it is actively playing.
+
+    immediate=True empieza el solape en cuanto la pista entrante está lista, sin
+    esperar a la ventana de fundido natural (los últimos ``crossfade_seconds``
+    de la saliente). Es lo que necesita un skip del usuario: esperar esa ventana
+    a mitad de una canción deja el "siguiente" sin efecto durante minutos.
+    """
     global _active_slot, _xfade_in_progress, _crossfade_fading_out
     global _autoplay_last_switch
 
@@ -1596,7 +1680,7 @@ def _begin_crossfade_overlap(
             # stream would start the fade well before the configured final seconds.
             _send_command(["set_property", "pause", True], pipe=alt_pipe)
             _send_command(["seek", 0, "absolute"], pipe=alt_pipe)
-            while not _shutting_down:
+            while not _shutting_down and not immediate:
                 if _cancelled():
                     return
                 outgoing = _read_mpv_playback_state(pipe=cur_pipe)
@@ -2184,11 +2268,14 @@ def _cancel_crossfade(timeout: float = 1.5) -> bool:
     return not _xfade_in_progress
 
 
-def _crossfade_transition(t: dict, allow_crossfade: bool = True) -> str:
+def _crossfade_transition(t: dict, allow_crossfade: bool = True, immediate: bool = False) -> str:
     """Attempt a true crossfade overlap to track t.
     Falls back to instant switch if the alt slot can't start in time, or if
     crossfade is not allowed for this transition (e.g. a manual skip while the
-    'crossfade on skip' option is off)."""
+    'crossfade on skip' option is off).
+
+    immediate=True (skip pedido por el usuario) funde en cuanto la entrante está
+    lista, en vez de esperar a los últimos segundos de la saliente."""
     if allow_crossfade and _crossfade_enabled and not _xfade_in_progress:
         local_url = ""
         try:
@@ -2203,7 +2290,8 @@ def _crossfade_transition(t: dict, allow_crossfade: bool = True) -> str:
             if not dur:
                 _, dur = _wait_cached_stream(t["videoId"], timeout=0.5)
         if _begin_crossfade_overlap(
-            t["videoId"], t["title"], t["artists"], cached_url or "", dur
+            t["videoId"], t["title"], t["artists"], cached_url or "", dur,
+            immediate=immediate,
         ):
             return f"Crossfade → '{t['title']}'."
     # Fallback: instant switch at full volume
@@ -2257,7 +2345,11 @@ def _navigate_playlist(delta: int, manual: bool) -> str:
         _crossfade_fading_out = False
         allow = (not manual) or _crossfade_on_skip
         try:
-            result = _crossfade_transition(_playlist[_playlist_idx], allow_crossfade=allow)
+            # Un skip del usuario funde ya; el auto-avance de final de pista
+            # sigue esperando su ventana natural de fundido.
+            result = _crossfade_transition(
+                _playlist[_playlist_idx], allow_crossfade=allow, immediate=manual
+            )
         except Exception:
             _playlist_idx = old_idx
             _crossfade_fading_out = old_fading

@@ -154,8 +154,21 @@ CORES: dict[str, CoreSpec] = {
         library="pcsx2_libretro",
         console_name="PlayStation 2",
         options={
-            "pcsx2_renderer": "OpenGL",
+            # TEMPORARY diagnostic: "Software" instead of "OpenGL", to split
+            # whether the black map background (DreamWorks Madagascar, level
+            # select over "La fuga de Marty") is a hardware-renderer-specific
+            # GS bug or something else. Software is pixel-accurate but far
+            # too slow to actually play with — revert to "OpenGL" once this
+            # is confirmed either way.
+            "pcsx2_renderer": "Software",
             "pcsx2_upscale_multiplier": "1x Native (PS2)",
+            # A real DualShock boots in digital mode and only enables its
+            # sticks once you press the pad's own ANALOG button — which this
+            # frontend has no way to send, so the sticks looked dead no matter
+            # what set_axis() reported. This is the core's own "Port 1 > Start
+            # in Analog Mode" option; without it, analog input is simply not
+            # read. Games that lock the pad mode themselves are unaffected.
+            "pcsx2_analog_mode1": "enabled",
         },
     ),
 }

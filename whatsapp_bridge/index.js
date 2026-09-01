@@ -187,12 +187,18 @@ const client = new Client({
   // stable pin lets the session resume across restarts. Must stay recent enough
   // that WhatsApp still accepts it for login (an old build forces re-link).
   //
-  // NOTE: pinning does NOT fix the getChats/fetchMessages/downloadMedia "r"
-  // error seen on this (LID-migrated) account — that is a whatsapp-web.js vs
-  // current-WhatsApp-Web incompatibility with no upstream fix yet. The chat
-  // list and open-conversation views fall back to the buffered /messages, so
-  // they work; full history and on-demand media stay degraded until upstream
-  // catches up.
+  // NOTE: pinning alone did not fix the getChats "r: r" error seen on this
+  // (LID-migrated) account — root cause was WhatsApp Web renaming a message
+  // key's `_serialized` property to `$1` in recent builds, which made
+  // whatsapp-web.js call IndexedDB's `.get(undefined)` and throw a DataError
+  // (minifies down to the unhelpful "r: r"). One chat's group-metadata
+  // lookup can also throw for unrelated LID reasons. Patched via
+  // patches/whatsapp-web.js+1.34.7.patch (wwebjs/whatsapp-web.js#201850,
+  // applied through patch-package on `npm install`): getMsgKeyId() tolerates
+  // the renamed property, and getChats() now processes chats one at a time
+  // so a single bad chat doesn't blank the whole list — see profile
+  // pictures/pictureUrl (only populated by a working getChats) and message
+  // read-receipts, which both depend on this.
   webVersion: '2.3000.1043180520-alpha',
   webVersionCache: {
     type: 'remote',
@@ -206,6 +212,15 @@ const client = new Client({
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
+      // This tab is never user-facing (headless, no window to switch away
+      // from), so the idle-tab power-saving features Chrome normally only
+      // applies to backgrounded tabs can just stay on permanently — trims a
+      // bit of CPU/RAM from timers, translate, and cache machinery this
+      // bridge never uses.
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
+      '--disable-features=Translate,BackForwardCache,MediaRouter',
     ],
   },
 });
@@ -297,19 +312,47 @@ function clearStaleChromiumLocks() {
 // with a stale/half-written IndexedDB (the "random names, missing messages"
 // symptom without a single detached-frame error in this run's own log).
 function killOrphanChromeForProfile() {
-  if (process.platform !== 'win32') return;
   const profileDir = path.join(DATA_DIR, '.wwebjs_auth');
+  if (process.platform === 'win32') {
+    try {
+      const escaped = profileDir.replace(/'/g, "''");
+      const cmd = `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+        `Where-Object { $_.CommandLine -like '*${escaped}*' } | ` +
+        `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+      require('child_process').execSync(
+        `powershell -NoProfile -NonInteractive -Command "${cmd.replace(/"/g, '\\"')}"`,
+        { stdio: 'ignore', timeout: 10000 },
+      );
+    } catch (e) {
+      // best effort — no matching processes, or powershell unavailable
+    }
+    return;
+  }
+  // Linux/macOS: same problem, but Job Objects don't exist here — a hard
+  // kill of the Python parent (SIGKILL, crash, power loss) leaves the
+  // headless Chrome puppeteer launched as an orphan, still holding this
+  // profile's SingletonLock. `ps` + kill by PID, matched on the profile path
+  // appearing in the command line (that's how puppeteer passes --user-data-dir).
   try {
-    const escaped = profileDir.replace(/'/g, "''");
-    const cmd = `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
-      `Where-Object { $_.CommandLine -like '*${escaped}*' } | ` +
-      `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
-    require('child_process').execSync(
-      `powershell -NoProfile -NonInteractive -Command "${cmd.replace(/"/g, '\\"')}"`,
-      { stdio: 'ignore', timeout: 10000 },
-    );
+    const out = require('child_process').execSync('ps -eo pid=,args=', {
+      encoding: 'utf8', timeout: 10000,
+    });
+    for (const line of out.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.includes(profileDir)) continue;
+      const match = trimmed.match(/^(\d+)\s/);
+      if (!match) continue;
+      const pid = parseInt(match[1], 10);
+      if (pid === process.pid) continue;
+      try {
+        process.kill(pid, 'SIGKILL');
+        console.warn(`Killed orphan Chrome for profile (pid ${pid})`);
+      } catch (e) {
+        // already gone
+      }
+    }
   } catch (e) {
-    // best effort — no matching processes, or powershell unavailable
+    // best effort — `ps` unavailable or no matching processes
   }
 }
 
@@ -364,6 +407,20 @@ async function reconnect(reason) {
   // nothing keeps the profile locked before we try to launch again.
   killBrowserTree();
   const attempt = () => {
+    // If puppeteer.launch() itself throws (e.g. "already running"), it does
+    // so *before* assigning client.pupBrowser — killBrowserTree() has no PID
+    // to act on, so it can't clean up the orphan that caused the failure.
+    // killOrphanChromeForProfile() finds it independently by matching the
+    // profile path in `ps` output, regardless of whether this client ever
+    // held a handle to it. Without repeating this on every retry (only the
+    // very first attempt, above, did it), "already running" repeats every
+    // 10s forever instead of self-healing.
+    killBrowserTree();
+    try {
+      killOrphanChromeForProfile();
+    } catch (e) {
+      // best effort
+    }
     try {
       clearStaleChromiumLocks();
     } catch (e) {

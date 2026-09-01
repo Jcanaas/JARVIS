@@ -1491,6 +1491,32 @@ def _make_app(token: str):
         except Exception:
             return None
 
+    @app.route("/api/debug/emulator_frame")
+    def api_debug_emulator_frame():
+        """Diagnostic-only: the emulator's current frame as a PNG.
+
+        Lets Claude actually see a reported graphical bug (wrong texture,
+        missing shadow, ...) instead of triangulating it purely from the
+        user's description — read-only, gated by the same token as everything
+        else here, no different in principle from /api/whatsapp/media.
+        """
+        if not _check_token():
+            return jsonify({"error": "unauthorized"}), 403
+        screen = _retro_screen()
+        if screen is None:
+            return jsonify({"error": "no_game"}), 409
+        try:
+            image = screen._build_image()
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        if image is None or image.isNull():
+            return jsonify({"error": "no_frame"}), 409
+        from PyQt6.QtCore import QBuffer, QIODevice
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buf, "PNG")
+        return Response(bytes(buf.data()), mimetype="image/png")
+
     @app.route("/api/gamepad/status")
     def api_gamepad_status():
         """Lets the phone offer to become a controller exactly while a game is
@@ -2086,6 +2112,29 @@ def _make_app(token: str):
     return app
 
 
+class _NoDelayRequestHandler:
+    """Werkzeug's dev server never sets TCP_NODELAY, so Nagle's algorithm
+    holds each small request/response (a gamepad button press, a few dozen
+    bytes each way) waiting to see if more data is coming before sending it.
+    Paired with the phone's delayed-ACK timer, that round-trips add ~40ms of
+    pure protocol latency per press — the actual perceptible "laggy" mobile
+    controller feel, on top of whatever the WiFi link itself costs. Building
+    the class lazily (not at import time) avoids importing werkzeug just to
+    define this when the dashboard is never started."""
+
+    def setup(self):
+        super().setup()
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+
+
+def _no_delay_handler_class():
+    from werkzeug.serving import WSGIRequestHandler
+    return type("NoDelayWSGIRequestHandler", (_NoDelayRequestHandler, WSGIRequestHandler), {})
+
+
 def start_dashboard(port: int | None = None) -> str:
     """Starts the dashboard in a daemon thread (idempotent — calling twice
     is a no-op). Returns the pairing URL: http://<ip>:<port>/?token=...,
@@ -2104,7 +2153,10 @@ def start_dashboard(port: int | None = None) -> str:
 
         _app = _make_app(token)
         threading.Thread(
-            target=lambda: _app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True),
+            target=lambda: _app.run(
+                host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True,
+                request_handler=_no_delay_handler_class(),
+            ),
             daemon=True,
         ).start()
         _started = True

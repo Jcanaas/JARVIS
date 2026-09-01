@@ -685,14 +685,6 @@ class GamesHubPanel(QWidget):
             self._stack.removeWidget(placeholder)
             placeholder.deleteLater()
 
-    def hideEvent(self, event):
-        # Leaving Games mode must not leave a core burning a CPU core and
-        # playing audio over whatever the user switched to. The session is
-        # paused, not torn down, so coming back resumes the same game.
-        if self.emulators_panel is not None:
-            self.emulators_panel.pause_playback()
-        super().hideEvent(event)
-
     def assistant_play(self, *args, **kwargs):
         """Forwarded so the AI assistant can still drive the Juegos tab."""
         self.show_tab(0)

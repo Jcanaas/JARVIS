@@ -47,7 +47,9 @@ from __future__ import annotations
 
 import ctypes as ct
 import os
+import re
 import threading
+import time
 from ctypes import (
     CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_double, c_float,
     c_int, c_int16, c_int32, c_int64, c_size_t, c_uint, c_uint64, c_void_p,
@@ -89,6 +91,7 @@ ENV_GET_SAVE_DIRECTORY = 31
 ENV_SET_SYSTEM_AV_INFO = 32
 ENV_SET_GEOMETRY = 37
 ENV_GET_VFS_INTERFACE = 45 | 0x10000  # RETRO_ENVIRONMENT_EXPERIMENTAL
+ENV_GET_CORE_OPTIONS_VERSION = 52
 ENV_SET_CORE_OPTIONS_V2 = 67
 ENV_SET_CORE_OPTIONS_V2_INTL = 68
 
@@ -152,6 +155,81 @@ class LibretroError(RuntimeError):
     """Raised when a core cannot be loaded or a game refused to start."""
 
 
+# Set JARVIS_INPUT_DEBUG=1 to tally every retro_input_state_t query by
+# (device, index, id) and dump it once a second, alongside the axes currently
+# held. Worth keeping: "the sticks do nothing" is otherwise indistinguishable
+# between the core never asking for RETRO_DEVICE_ANALOG and the frontend never
+# holding a value — this told those two apart in one run.
+# Set JARVIS_CORE_LOG=1 to echo whatever the core reports through
+# RETRO_ENVIRONMENT_GET_LOG_INTERFACE (shader compile failures, missing GL
+# extensions, BIOS/plugin complaints). See _on_log.
+_CORE_LOG = bool(os.environ.get("JARVIS_CORE_LOG"))
+_CORE_LOG_LEVELS = {0: "DEBUG", 1: "INFO", 2: "WARN", 3: "ERROR"}
+_CORE_LOG_SPEC = re.compile(rb"%[-+ #0-9.*]*(?:hh|h|ll|l|z|j|t|L)?([diouxXeEfgGaAcspn%])")
+
+
+def _format_core_log(fmt: bytes, args) -> str:
+    """Expand a printf format against varargs recovered from registers.
+
+    Deliberately forgiving: an unreadable argument becomes a placeholder
+    rather than an exception, because this runs inside a callback the core
+    invokes — raising here would unwind into native code.
+    """
+    out = bytearray()
+    pos = 0
+    index = 0
+    for match in _CORE_LOG_SPEC.finditer(fmt):
+        out += fmt[pos:match.start()]
+        pos = match.end()
+        kind = match.group(1)
+        if kind == b"%":
+            out += b"%"
+            continue
+        if index >= len(args):
+            out += b"<?>"
+            continue
+        arg = args[index]
+        index += 1
+        try:
+            if kind == b"s":
+                out += (ct.cast(arg, c_char_p).value or b"") if arg else b"(null)"
+            elif kind == b"p":
+                out += f"0x{int(arg or 0):x}".encode()
+            elif kind in (b"d", b"i"):
+                value = int(arg or 0) & 0xFFFFFFFF
+                out += str(value - (1 << 32) if value >> 31 else value).encode()
+            elif kind in (b"u", b"o", b"x", b"X", b"c"):
+                out += format(int(arg or 0) & 0xFFFFFFFF,
+                              {b"x": "x", b"X": "X", b"o": "o"}.get(kind, "d")).encode()
+            else:
+                # Floating point travels in xmm registers, out of reach here.
+                out += b"<?>"
+        except Exception:
+            out += b"<?>"
+    out += fmt[pos:]
+    return out.decode("utf-8", "replace").rstrip()
+
+_INPUT_DEBUG = bool(os.environ.get("JARVIS_INPUT_DEBUG"))
+_input_debug_counts: dict = {}
+_input_debug_last = 0.0
+
+
+def _input_debug_tally(port, device, index, button, axes):
+    global _input_debug_last
+    key = (port, device, index, button)
+    _input_debug_counts[key] = _input_debug_counts.get(key, 0) + 1
+    now = time.monotonic()
+    if now - _input_debug_last < 1.0:
+        return
+    _input_debug_last = now
+    analog = {k: v for k, v in _input_debug_counts.items() if k[1] == DEVICE_ANALOG}
+    joypad = sum(v for k, v in _input_debug_counts.items() if k[1] == DEVICE_JOYPAD)
+    other = sorted({k[1] for k in _input_debug_counts} - {DEVICE_JOYPAD, DEVICE_ANALOG})
+    print(f"[INPUT] joypad_queries={joypad} analog_queries={sorted(analog.items())} "
+          f"other_devices={other} axes_held={dict(axes)}", flush=True)
+    _input_debug_counts.clear()
+
+
 # --- Structs ---------------------------------------------------------------
 
 class _Geometry(Structure):
@@ -185,7 +263,17 @@ class _GameInfo(Structure):
     ]
 
 
-_LOG_CB = CFUNCTYPE(None, c_int, c_char_p)
+# retro_log_printf_t is variadic. ctypes cannot expand C varargs, so the two
+# fixed parameters alone would only ever hand us the raw format string ("%s"),
+# which is exactly what made the core's own diagnostics unreadable. Declaring
+# extra fixed pointer parameters recovers the first four: on the x86-64 SysV
+# ABI a variadic call passes its integer/pointer arguments in rdi, rsi, rdx,
+# rcx, r8, r9 in order, so args 3-6 land where these four expect them. Reading
+# them is only ever done when the format string says an argument is there —
+# see _format_core_log. Cores that pass no arguments simply leave these
+# unread. Harmless on other ABIs for the same reason: nothing is dereferenced
+# unless a conversion specifier asks for it.
+_LOG_CB = CFUNCTYPE(None, c_int, c_char_p, c_void_p, c_void_p, c_void_p, c_void_p)
 
 
 class _LogCallback(Structure):
@@ -195,6 +283,40 @@ class _LogCallback(Structure):
 class _Variable(Structure):
     """retro_variable — the core writes `key`, the frontend answers `value`."""
     _fields_ = [("key", c_char_p), ("value", c_char_p)]
+
+
+# Core options, v2 API. A modern core (LRPS2 among them) publishes its option
+# table through this and never falls back to the legacy SET_VARIABLES path, so
+# without parsing it the frontend has no idea what the core's own defaults are
+# — it can only answer "unknown" to every GET_VARIABLE it did not hardcode.
+# Layout is fixed by libretro.h; values[] is a fixed-size array terminated by a
+# NULL `value`.
+_NUM_CORE_OPTION_VALUES_MAX = 128
+
+
+class _CoreOptionValue(Structure):
+    _fields_ = [("value", c_char_p), ("label", c_char_p)]
+
+
+class _CoreOptionV2Definition(Structure):
+    _fields_ = [
+        ("key", c_char_p),
+        ("desc", c_char_p),
+        ("desc_categorized", c_char_p),
+        ("info", c_char_p),
+        ("info_categorized", c_char_p),
+        ("category_key", c_char_p),
+        ("values", _CoreOptionValue * _NUM_CORE_OPTION_VALUES_MAX),
+        ("default_value", c_char_p),
+    ]
+
+
+class _CoreOptionsV2(Structure):
+    _fields_ = [("categories", c_void_p), ("definitions", c_void_p)]
+
+
+class _CoreOptionsV2Intl(Structure):
+    _fields_ = [("us", POINTER(_CoreOptionsV2)), ("local", POINTER(_CoreOptionsV2))]
 
 
 # retro_hw_render_callback. Two directions of ownership in one struct: the
@@ -464,6 +586,14 @@ class LibretroCore:
         if cmd == ENV_GET_VARIABLE_UPDATE:
             ct.cast(data, POINTER(c_bool))[0] = False
             return True
+        if cmd == ENV_GET_CORE_OPTIONS_VERSION:
+            # A core asks this BEFORE publishing its option table, to pick
+            # which SET_CORE_OPTIONS* variant to call. Answering "unsupported"
+            # here (the previous behaviour, by omission) is why LRPS2 never
+            # sent its V2 table at all — not a parsing bug, a negotiation one:
+            # _harvest_core_options_v2 was correct but never once ran.
+            ct.cast(data, POINTER(c_uint))[0] = 2
+            return True
         if cmd == ENV_GET_VARIABLE:
             variable = ct.cast(data, POINTER(_Variable))
             key = variable[0].key
@@ -541,21 +671,82 @@ class LibretroCore:
                 )
             info[0].iface = ct.cast(ct.pointer(self._vfs_iface), c_void_p)
             return True
+        if cmd in (ENV_SET_CORE_OPTIONS_V2, ENV_SET_CORE_OPTIONS_V2_INTL):
+            # Acknowledging this while discarding the table was a half-truth:
+            # the core is told the frontend owns its options, then hears
+            # "unknown" for every one it did not get hardcoded here. Harvest
+            # the declared defaults so unset options resolve to exactly what
+            # the core intended.
+            try:
+                if cmd == ENV_SET_CORE_OPTIONS_V2_INTL:
+                    intl = ct.cast(data, POINTER(_CoreOptionsV2Intl))
+                    options = intl[0].us if intl and intl[0].us else None
+                else:
+                    options = ct.cast(data, POINTER(_CoreOptionsV2))
+                if options and options[0].definitions:
+                    self._harvest_core_options_v2(options[0].definitions)
+            except Exception:
+                pass  # a malformed table must not take the core down
+            return True
         if cmd in (
             ENV_SET_INPUT_DESCRIPTORS, ENV_SET_MESSAGE,
             ENV_SET_PERFORMANCE_LEVEL, ENV_SET_SUPPORT_NO_GAME,
-            ENV_SET_CORE_OPTIONS_V2, ENV_SET_CORE_OPTIONS_V2_INTL,
             ENV_SET_KEYBOARD_CALLBACK, ENV_SET_AUDIO_CALLBACK,
         ):
             return True
+        if _CORE_LOG:
+            # Ground truth beats guessing the exact libretro.h enum value for
+            # every core-options variant a core might use (v0/v1/v2/INTL,
+            # DISPLAY, ...). Whatever shows up here, unhandled, is what to
+            # look up next instead of adding constants speculatively.
+            print(f"[ENV] unhandled cmd={cmd} (0x{cmd:x})", flush=True)
         return False
 
-    def _on_log(self, level: int, message) -> None:
-        # retro_log_printf_t is variadic. ctypes callbacks safely accept the
-        # two fixed arguments, but cannot expand C varargs for Python-side
-        # formatting. LRPS2 requires a non-NULL function even when the
-        # frontend does not consume its logs, so this deliberately acts as a
-        # quiet sink instead of letting the core call through a null pointer.
+    def _harvest_core_options_v2(self, definitions) -> None:
+        """Record each option's declared default, without touching the values
+        the caller asked for explicitly."""
+        defs = ct.cast(definitions, POINTER(_CoreOptionV2Definition))
+        for index in range(4096):  # bounded: the table ends at a NULL key
+            entry = defs[index]
+            if not entry.key:
+                break
+            if entry.key in self._options:
+                continue  # an explicit choice always wins
+            default = entry.default_value
+            if not default and entry.values[0].value:
+                default = entry.values[0].value  # implicit default: first value
+            if default:
+                self._options[entry.key] = default
+            if _CORE_LOG:
+                choices = []
+                for slot in entry.values:
+                    if not slot.value:
+                        break
+                    choices.append(slot.value.decode("utf-8", "replace"))
+                print(f"[COREOPT] {entry.key.decode()} = "
+                      f"{(default or b'?').decode('utf-8', 'replace')}"
+                      f"  {choices}", flush=True)
+
+    def _on_log(self, level: int, message, *args) -> None:
+        # LRPS2 requires a non-NULL function even when the frontend does not
+        # consume its logs, so this stays a quiet sink by default rather than
+        # letting the core call through a null pointer. `args` carries the
+        # first four varargs recovered by _LOG_CB — see its comment.
+        #
+        # JARVIS_CORE_LOG=1 surfaces it anyway: the raw format string is
+        # usually enough to read ("Failed to compile shader: %s"), and a core
+        # complaining about a missing GL extension or a broken shader has
+        # nowhere else to say so — dropping it silently is what made
+        # "some textures/shaders don't work" impossible to diagnose.
+        if not _CORE_LOG:
+            return None
+        try:
+            text = _format_core_log(message, args) if message else ""
+        except Exception:
+            return None
+        if text:
+            tag = _CORE_LOG_LEVELS.get(int(level), str(level))
+            print(f"[CORE:{tag}] {text}", flush=True)
         return None
 
     # ------------------------------------------------------------------
@@ -792,6 +983,8 @@ class LibretroCore:
         pass  # input is pushed by the widget, nothing to sample here
 
     def _on_input_state(self, port: int, device: int, index: int, button: int) -> int:
+        if _INPUT_DEBUG:
+            _input_debug_tally(port, device, index, button, self._axes)
         if port != 0:
             return 0
         if device == DEVICE_JOYPAD:
@@ -823,7 +1016,7 @@ class LibretroCore:
             self.frame_width = int(av.geometry.base_width)
             self.frame_height = int(av.geometry.base_height)
 
-    def load_game(self, rom_path: str | Path) -> None:
+    def load_game(self, rom_path: str | Path, device: int = DEVICE_JOYPAD) -> None:
         rom = Path(rom_path)
         if not rom.is_file():
             raise LibretroError(f"No existe la ROM: {rom}")
@@ -850,7 +1043,13 @@ class LibretroCore:
         if not self._lib.retro_load_game(ct.byref(info)):
             raise LibretroError("El core rechazó la ROM")
         self._loaded = True
-        self._lib.retro_set_controller_port_device(0, DEVICE_JOYPAD)
+        # `device` defaults to JOYPAD and every caller currently leaves it at
+        # that: passing DEVICE_ANALOG here to fix PS2/N64 sticks was tried and
+        # reverted — PCSX2's core took it as "nothing plugged into this port"
+        # and dropped digital buttons too (keyboard and the phone pad both
+        # stopped working, BIOS reported no controller). Whatever fixes analog
+        # sticks on those cores, it isn't this call.
+        self._lib.retro_set_controller_port_device(0, device)
         self._read_av_info()
 
     def _init_hw_render(self) -> None:

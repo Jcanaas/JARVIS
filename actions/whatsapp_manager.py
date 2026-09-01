@@ -171,6 +171,7 @@ class WhatsAppManager:
         message_sender=None,
         start_thread: bool = True,
         on_unanswered_reminder=None,
+        on_unread_chats_changed=None,
         reminder_after_secs: float = 3 * 3600,
         startup_grace_secs: float = 15.0,
         backlog_age_secs: float = 90.0,
@@ -179,6 +180,7 @@ class WhatsAppManager:
         auto_transcribe: Optional[bool] = None,
         unread_fetcher=None,
         unread_sync_interval: float = 5.0,
+        enabled: bool = True,
     ):
         self.poll_interval = poll_interval
         # Startup flood guard: WhatsApp Web re-syncing on connect can dump a
@@ -202,10 +204,20 @@ class WhatsAppManager:
         # "Responder esto" reminder: nudge once per message if an incoming
         # message sits unanswered (not in _pending as sent) past this long.
         self.on_unanswered_reminder = on_unanswered_reminder
+        # Lets the UI's unread badge piggyback on this same poll instead of
+        # running its own separate timer + bridge HTTP call for the same data
+        # (see ui/__init__.py's WhatsApp badge).
+        self.on_unread_chats_changed = on_unread_chats_changed
         self.reminder_after_secs = reminder_after_secs
         self._reminded: set = set()
         self._last_reminder_scan = 0.0
         self._stop = threading.Event()
+        # Pause, not stop: "apagar WhatsApp" in Ajustes has to be reversible
+        # without restarting Jarvis, and a stopped thread cannot be restarted.
+        # While clear, the loop idles instead of polling the bridge.
+        self._enabled = threading.Event()
+        if enabled:
+            self._enabled.set()
         self._lock = threading.Lock()
         # _seen: in-session dedup set — does NOT load old file IDs.
         # This avoids stale IDs from previous sessions blocking new messages.
@@ -241,6 +253,10 @@ class WhatsAppManager:
         _err_count = 0
         _backoff = 1.0
         while not self._stop.is_set():
+            if not self._enabled.is_set():
+                # Wakes the moment it is re-enabled, so the toggle feels instant.
+                self._enabled.wait(timeout=1.0)
+                continue
             try:
                 msgs = fetch_messages(self._last_ts)
                 # reset backoff on success
@@ -408,6 +424,11 @@ class WhatsAppManager:
             return False
         if counts is None:
             return False
+        if self.on_unread_chats_changed:
+            try:
+                self.on_unread_chats_changed(sum(1 for v in counts.values() if v > 0))
+            except Exception as exc:
+                print(f"[WA] on_unread_chats_changed callback error: {exc}", file=sys.stderr)
         with self._lock:
             reconciled = _reconcile_pending_entries(self._pending, counts)
             if reconciled == self._pending:
@@ -475,6 +496,16 @@ class WhatsAppManager:
 
     def stop(self):
         self._stop.set()
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Pause/resume bridge polling without tearing the manager down."""
+        if enabled:
+            self._enabled.set()
+        else:
+            self._enabled.clear()
+
+    def is_enabled(self) -> bool:
+        return self._enabled.is_set()
 
     def _transcribe_entry_audio(self, entry: Dict[str, Any], msg_bridge: Dict[str, Any]) -> None:
         """Transcribe audio message asynchronously. Updates entry with 'transcription' key."""

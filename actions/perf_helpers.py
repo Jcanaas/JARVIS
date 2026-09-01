@@ -12,6 +12,30 @@ from typing import Callable, Optional
 from PyQt6.QtGui import QImage, QPixmap
 
 
+class BoundedCache(dict):
+    """An in-memory dict cache that evicts its oldest entry once it grows
+    past ``max_size``, instead of holding every key ever inserted for the
+    life of the process.
+
+    Meant as a fast-path in front of something slower and durable (a disk
+    cache, a network fetch) — losing an old entry just means the next lookup
+    falls through to that slower path again, not data loss. Eviction is
+    insertion-order FIFO (relies on dict preserving insertion order), not
+    true LRU: a re-set of an existing key does not move it to the back. Good
+    enough for caches like "avatar bytes by URL" where re-inserts of the
+    same key are rare.
+    """
+
+    def __init__(self, max_size: int = 500):
+        super().__init__()
+        self._max_size = max(1, int(max_size))
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        while len(self) > self._max_size:
+            del self[next(iter(self))]
+
+
 class DiskImageCache:
     """LRU disk cache for images (network or local). TTL = 7 days."""
 
@@ -55,7 +79,14 @@ class DiskImageCache:
 
 
 class SharedThreadPool:
-    """Global thread pool (4 workers) for image I/O and decode tasks."""
+    """Global thread pool for image I/O and decode tasks.
+
+    Worker count follows the "performance_plan" setting (Ajustes →
+    Rendimiento) — read once, at creation, since a ThreadPoolExecutor can't
+    be resized after the fact; changing the plan takes effect on next
+    restart. Falls back to the balanced default (4) if platform_runtime is
+    unavailable for any reason.
+    """
     _instance = None
     _lock = threading.Lock()
 
@@ -63,8 +94,13 @@ class SharedThreadPool:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
+                    try:
+                        from actions.platform_runtime import thread_pool_size
+                        workers = thread_pool_size()
+                    except Exception:
+                        workers = 4
                     cls._instance = super().__new__(cls)
-                    cls._instance.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jarvis_img")
+                    cls._instance.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="jarvis_img")
         return cls._instance
 
     def submit(self, fn: Callable, *args, **kwargs):

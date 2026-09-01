@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import *
 from ..theme import *
 from ..icons import *
 from ..widgets import *
-from actions.perf_helpers import DiskImageCache
+from actions.perf_helpers import BoundedCache, DiskImageCache
 
 class _AspectVideo(QWidget):
     """Keeps a child surface at a fixed aspect ratio, centered (no double black bars)."""
@@ -336,7 +336,7 @@ class YouTubeModePanel(QWidget):
         super().__init__(parent)
         self._progress_hook = progress_hook
         self._by_id: dict[str, dict] = {}
-        self._thumb_cache: dict[str, bytes] = {}
+        self._thumb_cache: dict[str, bytes] = BoundedCache(400)
         self._thumb_disk_cache = DiskImageCache("yt_thumbs")
         self._thumb_loading: set[str] = set()
         self._thumb_targets: dict[str, list[QLabel]] = {}

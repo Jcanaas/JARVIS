@@ -90,6 +90,10 @@ _DEFAULTS: dict = {
     "lan_dashboard_enabled": False,
     "lan_dashboard_port": 8765,
     "lan_dashboard_token": "",
+    # New desktop web UI (actions/webui_server.py) — loopback-only (127.0.0.1),
+    # always on when booted without --legacy. Separate port from
+    # lan_dashboard_port since both can run at once.
+    "webui_port": 8877,
 }
 
 

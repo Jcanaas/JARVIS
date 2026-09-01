@@ -946,6 +946,14 @@ class EmulatorsModePanel(QWidget):
             chips_flow.addWidget(chip)
         console_row.addWidget(chips_holder, 1)
 
+        import_local_btn = QPushButton("＋  Importar ROM…")
+        import_local_btn.setFixedHeight(34)
+        import_local_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        import_local_btn.setStyleSheet(_ghost_btn_qss())
+        import_local_btn.setToolTip("Añade un ROM que ya tengas descargado en tu PC")
+        import_local_btn.clicked.connect(self._import_local_rom)
+        console_row.addWidget(import_local_btn, 0, Qt.AlignmentFlag.AlignTop)
+
         controls_btn = QPushButton("🎮  Controles")
         controls_btn.setFixedHeight(34)
         controls_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1585,6 +1593,13 @@ class EmulatorsModePanel(QWidget):
             spec = er.CORES.get(console_id)
             core = libretro.load(core_path, er.system_dir(), er.saves_dir(),
                                  options=spec.options if spec else None)
+            # NOTE: announcing RETRO_DEVICE_ANALOG here (instead of the default
+            # JOYPAD) was tried to fix PS2 analog sticks, but PCSX2's core took
+            # it to mean "no pad connected at all" — it stopped seeing digital
+            # buttons too, on both keyboard and the phone pad, and the in-game
+            # BIOS reported no controller. The sticks are a core-side pad-mode
+            # problem, not a port-device one: see "pcsx2_analog_mode1" in
+            # actions/emulator_runtime.py.
             core.load_game(str(rom_path))
         except Exception as exc:
             self._set_status(f"No pude arrancar el juego: {exc}")
@@ -1632,19 +1647,25 @@ class EmulatorsModePanel(QWidget):
 
     def _import_local_rom(self):
         from PyQt6.QtWidgets import QFileDialog
+        from actions import rom_catalog as rc
 
         console_id = self._console_id
+        console = rc.CONSOLES.get(console_id)
+        exts = console.rom_exts if console else (".iso", ".chd", ".cso", ".zso")
+        pattern = " ".join(f"*{ext}" for ext in exts)
+        label = console.name if console else "ROM"
         path, _ = QFileDialog.getOpenFileName(
-            self, "Selecciona una imagen de disco",
-            "", "Imágenes de disco (*.iso *.chd *.cso *.zso);;Todos los archivos (*)")
+            self, f"Selecciona un ROM de {label}",
+            "", f"ROMs de {label} ({pattern});;Todos los archivos (*)")
         if not path:
             return
         try:
             from actions import game_library as gl
             entry = gl.add_local_rom(path, console_id)
-            self._set_status(f"Añadido: {entry.title}")
+            self._set_status(f"Añadido a tu biblioteca: {entry.title}")
         except Exception as exc:
             self._set_status(f"No pude importar el archivo: {exc}")
+            return
         self._import_page.refresh_library(console_id)
 
     def _open_controls(self):

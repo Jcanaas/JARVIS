@@ -6,6 +6,7 @@
       2. Ensure the WhatsApp bridge has its production node_modules.
       3. Download a portable Node.js runtime (bundled with the app).
       3b. Download the VLC runtime (libvlc + plugins) for video playback.
+      3d. Build the web UI frontend (webui/dist), bundled by jarvis.spec.
       4. Freeze the app with PyInstaller (build/jarvis.spec) -> dist/Jarvis.
       5. Copy the portable Node and VLC runtimes into the dist.
       6. Compile the Inno Setup installer (if ISCC is available).
@@ -94,6 +95,22 @@ if (-not $SkipYtdlp -and -not (Test-Path $YtdlpExe)) {
     Write-Host "==> Downloading yt-dlp.exe (standalone binary for mpv)..." -ForegroundColor Cyan
     Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile $YtdlpExe
 }
+
+# --- 3d. Build the web UI frontend (webui/dist) --------------------------------
+# jarvis.spec bundles webui/dist into the frozen app (actions/webui_server.py
+# serves it at runtime) — it must exist and be up to date before PyInstaller
+# runs, since the spec reads the directory at analysis time.
+$WebUi = Join-Path $Root "webui"
+Write-Host "==> Building web UI frontend (webui/)..." -ForegroundColor Cyan
+if (-not (Test-Path (Join-Path $WebUi "node_modules"))) {
+    Push-Location $WebUi
+    npm install
+    Pop-Location
+}
+Push-Location $WebUi
+npm run build
+Pop-Location
+if ($LASTEXITCODE -ne 0) { throw "webui frontend build failed." }
 
 # --- 4. PyInstaller freeze ----------------------------------------------------
 Write-Host "==> Freezing app with PyInstaller..." -ForegroundColor Cyan

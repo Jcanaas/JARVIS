@@ -1,0 +1,191 @@
+/* Same palette as the desktop app (ui/theme.py) and the LAN dashboard web
+   page (actions/lan_dashboard.py) — kept in sync by hand, same convention
+   already used by mobile-app/src/theme.ts. Dark blue-violet HUD look. */
+
+:root {
+  --bg: #0A0C16;
+  --panel: #141829;
+  --panel-2: #1E2338;
+  --border: #3A4160;
+  --border-b: #6B76A5;
+  --border-a: #252C48;
+
+  --pri: #B6C4FF;
+  --pri-dim: #5E82FF;
+  --pri-gho: #131C46;
+  --acc: #A7AFFF;
+  --acc-2: #8FA8FF;
+
+  --green: #4ADE80;
+  --green-d: #22C55E;
+  --red: #FF5E82;
+
+  --muted: #9AA3C0;
+  --text: #F2F3FA;
+  --text-dim: #C9CDE4;
+  --text-med: #9AA3C0;
+
+  --white: #FFFFFF;
+  --dark: #060812;
+  --bar-bg: #0D1020;
+
+  --glass: rgba(255, 255, 255, 0.055);
+  --glass-2: rgba(255, 255, 255, 0.095);
+  --glass-d: rgba(8, 10, 22, 0.78);
+  --shadow: rgba(0, 0, 0, 0.35);
+
+  --font-ui: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", ui-monospace, monospace;
+
+  --nav-w: 88px;
+  --right-w: 300px;
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+
+/* The window is often far narrower in CSS pixels than it looks: on a HiDPI
+   screen a 1180px-wide window is only ~625 CSS px, and a fixed 88px rail
+   plus a 300px side panel left barely 240px for the actual panel. Shrink
+   the chrome instead of squeezing the content. */
+@media (max-width: 1000px) {
+  :root {
+    --nav-w: 72px;
+    --right-w: 250px;
+  }
+}
+
+@media (max-width: 760px) {
+  :root {
+    --nav-w: 60px;
+    --right-w: 220px;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+#app {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-b);
+}
+
+button {
+  font-family: inherit;
+}
+
+input, textarea, select {
+  font-family: inherit;
+  color: inherit;
+}
+
+/* Native <input type="checkbox"> renders as the raw OS widget (a plain
+   white/gray square in WebKitGTK) with nothing here to theme it — jarring
+   against the dark HUD chrome. Qt's equivalent is ui/widgets/buttons.py's
+   ToggleSwitch (46x26, 20px knob, 3px inset, #1E293B off / --pri-dim on) —
+   replicated here in pure CSS so every checkbox in the app (Settings,
+   filters, rule dialogs) gets the same iOS-style switch without having to
+   touch each usage site. */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 46px;
+  height: 26px;
+  min-width: 46px;
+  border-radius: 13px;
+  background: #1E293B;
+  border: 1px solid var(--border-a);
+  position: relative;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+input[type="checkbox"]::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--white);
+  transition: transform 0.15s ease;
+}
+input[type="checkbox"]:checked {
+  background: var(--pri-dim);
+  border-color: var(--pri-dim);
+}
+input[type="checkbox"]:checked::after {
+  transform: translateX(20px);
+}
+input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--pri);
+  outline-offset: 2px;
+}
+
+/* Native <select> keeps the OS dropdown chrome (fine) but its closed-state
+   box was unstyled outside a few panels' own .row rules — give it the same
+   dark chip look everywhere, with a custom chevron instead of the raw OS
+   arrow so it doesn't look like a foreign element against the HUD theme. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--panel-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239AA3C0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 8px center / 14px 14px;
+  border: 1px solid var(--border-a);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 6px 26px 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+select:focus-visible {
+  outline: 2px solid var(--pri);
+  outline-offset: 1px;
+}
+
+/* Number inputs default to a tiny, browser-dependent width and native
+   spinner arrows that don't match anything else in the UI. */
+input[type="number"] {
+  width: 64px;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+}

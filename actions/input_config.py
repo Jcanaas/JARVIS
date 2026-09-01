@@ -108,6 +108,7 @@ _KEY_A, _KEY_Q, _KEY_S, _KEY_W, _KEY_X, _KEY_Z = (
     0x41, 0x51, 0x53, 0x57, 0x58, 0x5A
 )
 _KEY_SPACE = 0x20
+_KEY_C, _KEY_D, _KEY_E, _KEY_V = 0x43, 0x44, 0x45, 0x56
 
 _BASE_KEYBOARD: dict[str, list[int]] = {
     "up": [_KEY_UP],
@@ -167,6 +168,17 @@ def _profile_defaults(console_id: str) -> tuple[dict[str, list[int]],
         for direction in ("up", "down", "left", "right"):
             pad[direction] = [signal for signal in pad[direction]
                               if not signal.startswith("xinput:ls")]
+        # W/A/S/D drive the left stick directly (see RetroScreen's dedicated
+        # stick handling) and must be free of button bindings, or pressing a
+        # movement key would also fire whatever button used to sit on it.
+        # The buttons that collided (Triangulo/Cuadrado on PS2, B on N64, and
+        # the right shoulder on both) move to C/V/E instead.
+        if "y" in keyboard:
+            keyboard["y"] = [_KEY_V]
+        if "x" in keyboard:
+            keyboard["x"] = [_KEY_C]
+        if "r" in keyboard:
+            keyboard["r"] = [_KEY_E]
     return keyboard, pad
 
 

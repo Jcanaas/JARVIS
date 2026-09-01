@@ -37,13 +37,18 @@ class SettingsModePanel(QWidget):
         ("APIs",       "apis"),
         ("General",    "profile"),
         ("Apariencia", "appearance"),
+        ("Rendimiento", "performance"),
         ("Inicio",     "startup"),
         ("Acerca de",  "about"),
     ]
 
+    # Bridge start/stop runs off the UI thread; this carries its outcome back.
+    _wa_power_sig = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("SettingsPanel")
+        self._wa_power_sig.connect(self._apply_wa_power_status)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -105,6 +110,7 @@ class SettingsModePanel(QWidget):
             "anime": self._build_anime_page,
             "apis": self._build_apis_page,
             "appearance": self._build_appearance_page,
+            "performance": self._build_performance_page,
             "startup": self._build_startup_page,
             "profile": self._build_profile_page,
             "about": self._build_about_page,
@@ -265,6 +271,25 @@ class SettingsModePanel(QWidget):
         intro.setWordWrap(True)
         intro.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; font-size: 12px; border: none;")
         l.addWidget(intro)
+
+        power_card, power_body = self._make_card("CONEXIÓN")
+        self._wa_enabled_switch = ToggleSwitch(bool(app_settings.get("whatsapp_enabled", True)))
+        self._wa_enabled_switch.toggled.connect(self._on_wa_enabled)
+        self._add_row(
+            power_body, "WhatsApp activado",
+            "Al apagarlo se cierra el puente de WhatsApp y su navegador en segundo "
+            "plano, que es lo que más recursos consume de la app. No se cierra tu "
+            "sesión: al volver a encenderlo se reconecta sin escanear el QR.",
+            self._wa_enabled_switch, first=True,
+        )
+        self._wa_power_status = QLabel("")
+        self._wa_power_status.setWordWrap(True)
+        self._wa_power_status.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; font-size: 11px; border: none;"
+        )
+        self._wa_power_status.setVisible(False)
+        power_body.addWidget(self._wa_power_status)
+        l.addWidget(power_card)
 
         notif_card, notif_body = self._make_card("NOTIFICACIONES")
         self._wa_notif_switch = ToggleSwitch(bool(app_settings.get("whatsapp_notifications", True)))
@@ -1453,6 +1478,60 @@ class SettingsModePanel(QWidget):
         l.addStretch(1)
         return w
 
+    def _build_performance_page(self) -> QWidget:
+        from actions import platform_runtime
+
+        w = QWidget()
+        w.setStyleSheet("QWidget { border: none; background: transparent; }")
+        l = QVBoxLayout(w)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(14)
+
+        card, body = self._make_card("PLAN DE ENERGÍA")
+
+        self._perf_plan_combo = QComboBox()
+        for label, val in (
+            ("Ahorro — menos CPU, deja recursos libres para otras apps", "saver"),
+            ("Equilibrado (recomendado)", "balanced"),
+            ("Rendimiento — usa más CPU para ir más fluido", "performance"),
+        ):
+            self._perf_plan_combo.addItem(label, val)
+        current_plan = str(app_settings.get("performance_plan", "balanced"))
+        pi = self._perf_plan_combo.findData(current_plan)
+        self._perf_plan_combo.setCurrentIndex(pi if pi >= 0 else 1)
+        self._perf_plan_combo.setFixedHeight(32)
+        self._perf_plan_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._perf_plan_combo.setStyleSheet(self._combo_qss())
+        self._perf_plan_combo.currentIndexChanged.connect(self._on_performance_plan_changed)
+        self._add_row(
+            body, "Plan de energía",
+            "Prioridad del proceso y nº de tareas en paralelo (miniaturas, "
+            "descargas...). La prioridad se aplica al momento; el nº de "
+            "tareas en paralelo pide reiniciar JARVIS.",
+            self._perf_plan_combo, first=True,
+        )
+
+        l.addWidget(card)
+        l.addStretch(1)
+
+        note = QLabel(
+            "En Linux/macOS, subir la prioridad por encima de \"Equilibrado\" "
+            "puede no tener efecto sin permisos de administrador — el sistema "
+            "operativo lo bloquea para un usuario normal. Bajarla (Ahorro) "
+            "siempre funciona."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; font-size: 11px;")
+        l.addWidget(note)
+        l.addStretch(3)
+        return w
+
+    def _on_performance_plan_changed(self, _index: int):
+        from actions import platform_runtime
+        plan = self._perf_plan_combo.currentData() or "balanced"
+        app_settings.set("performance_plan", plan)
+        platform_runtime.apply_performance_plan(plan)
+
     def _build_anime_page(self) -> QWidget:
         from actions.anime_search import get_sfw, set_sfw
         w = QWidget()
@@ -1700,6 +1779,67 @@ class SettingsModePanel(QWidget):
         profile = {key: edit.text().strip() for key, edit in self._autofill_edits.items()}
         profile = {k: v for k, v in profile.items() if v}
         app_settings.set("form_profile", profile)
+
+    def _on_wa_enabled(self, checked: bool) -> None:
+        """Turn the whole WhatsApp integration on or off.
+
+        Starting and stopping the bridge both block for seconds (spawning Node
+        + headless Chrome, or waiting on a terminate), so the process work goes
+        to a worker thread and only the status label comes back to the UI.
+        """
+        enabled = bool(checked)
+        app_settings.set("whatsapp_enabled", enabled)
+
+        window = self.window()
+        manager = getattr(window, "whatsapp_manager", None)
+        if manager is not None:
+            try:
+                manager.set_enabled(enabled)
+            except Exception:
+                pass
+        # Hide/show WhatsApp as a destination (and clear its badge). Without
+        # this the mode stays clickable with the bridge dead behind it.
+        try:
+            window.set_whatsapp_enabled(enabled)
+        except Exception:
+            pass
+
+        self._wa_power_status.setVisible(True)
+        self._wa_power_status.setText(
+            "Conectando WhatsApp…" if enabled else "Cerrando WhatsApp…"
+        )
+
+        def worker():
+            try:
+                from actions.whatsapp_bridge_process import (
+                    bridge_running, start_bridge, stop_bridge,
+                )
+                if enabled:
+                    ok = start_bridge()
+                    msg = ("WhatsApp conectado." if ok else
+                           "No pude arrancar el puente de WhatsApp; míralo en el registro.")
+                else:
+                    stop_bridge()
+                    # stop_bridge only ends the process this session spawned. A
+                    # bridge left over from an earlier run survives it, and
+                    # claiming otherwise would be a lie the user can't see.
+                    if bridge_running():
+                        msg = ("WhatsApp pausado, pero el puente sigue corriendo: no lo "
+                               "arrancó esta sesión, así que hay que cerrarlo a mano.")
+                    else:
+                        msg = "WhatsApp apagado. Su navegador en segundo plano ya no corre."
+            except Exception as exc:
+                msg = f"No pude cambiarlo: {exc}"
+            try:
+                self._wa_power_sig.emit(msg)
+            except RuntimeError:
+                pass  # panel closed while we worked
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_wa_power_status(self, message: str) -> None:
+        self._wa_power_status.setVisible(True)
+        self._wa_power_status.setText(message)
 
     def _on_wa_notifications(self, checked: bool) -> None:
         app_settings.set("whatsapp_notifications", bool(checked))
