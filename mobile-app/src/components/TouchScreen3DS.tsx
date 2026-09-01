@@ -21,22 +21,21 @@ const POLL_MS = 100; // ~10fps target — plenty for a screen only tapped, not w
  * way a browser <img> does, and polling a still image is a well-worn,
  * reliable substitute at the ~10fps this needs.
  *
- * Prefetch-then-swap, not double-buffered opacity layers (an earlier
- * version of this tried that and still flickered black in practice):
- * Image.prefetch() downloads and decodes the next frame into RN's image
- * cache *before* it ever becomes a visible <Image>'s source, so the actual
- * swap is a cache hit with nothing to decode — no layer is ever showing a
- * source mid-load. The poll loop also only re-arms itself after the
- * current fetch settles (a self-paced setTimeout, not setInterval), so a
- * slow LAN request can't pile up requests faster than they resolve — the
- * likely reason two layers alone didn't fix it: firing a new source into
- * the "hidden" layer every fixed 100ms regardless of whether its previous
- * load had finished just cancels and restarts that layer's fetch forever
- * on a network slower than 100ms round-trip, so it never has a frame to
- * swap to.
+ * Fetches the bytes itself and swaps in a data: URI, rather than handing
+ * <Image> a network URL each tick (tried first: setInterval overwriting a
+ * hidden layer's source.uri — flickered; tried second: Image.prefetch()
+ * before swapping a single <Image>'s uri — still flickered, because
+ * prefetch's cache isn't guaranteed to be the same cache <Image> reads from
+ * across RN/Fresco versions, so the "prefetched" swap was still doing a
+ * real network fetch behind <Image> either way). A data: URI has no network
+ * layer left to race against — by the time setUri runs, the full JPEG is
+ * already sitting in JS memory, so there's nothing left to load underneath
+ * whatever is on screen. The poll loop is a self-paced setTimeout chain
+ * (not setInterval), so a slow LAN response can't pile up requests faster
+ * than they resolve.
  */
 export default function TouchScreen3DS({ active = true }: { active?: boolean }) {
-  const [uri, setUri] = useState(() => gamepadScreenUrl(Date.now()));
+  const [uri, setUri] = useState<string | null>(null);
   const rectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
   const rootRef = useRef<View | null>(null);
   const touching = useRef(false);
@@ -46,18 +45,25 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const poll = async () => {
-      const next = gamepadScreenUrl(Date.now());
       try {
-        await Image.prefetch(next);
+        const res = await fetch(gamepadScreenUrl(Date.now()));
+        if (res.ok) {
+          const blob = await res.blob();
+          const dataUri = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(reader.error || new Error("read failed"));
+            reader.onload = () => resolve(String(reader.result));
+            reader.readAsDataURL(blob);
+          });
+          if (!cancelled) setUri(dataUri);
+        }
       } catch {
         // Network hiccup or no game running right now — keep showing the
         // last good frame and just try again next tick.
       }
-      if (cancelled) return;
-      setUri(next);
-      timer = setTimeout(poll, POLL_MS);
+      if (!cancelled) timer = setTimeout(poll, POLL_MS);
     };
-    timer = setTimeout(poll, POLL_MS);
+    timer = setTimeout(poll, 0);
 
     return () => {
       cancelled = true;
@@ -114,14 +120,21 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
       onResponderRelease={onRelease}
       onResponderTerminate={onRelease}
     >
-      <Image source={{ uri }} style={styles.image} resizeMode="contain" />
+      {!!uri && <Image source={{ uri }} style={styles.image} resizeMode="contain" />}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  // A fixed base width rather than "100%": this component gets wrapped in
+  // GamepadOverlay.tsx's Draggable with no explicit size of its own, so a
+  // percentage width here would need that wrapper to already have a
+  // resolved width — a percentage inside an auto-sized wrapper is exactly
+  // the kind of circular sizing Yoga can get wrong, and it's also what the
+  // Draggable resize handle anchors its corner position against. A fixed
+  // number sidesteps both.
   frame: {
-    width: "100%", maxWidth: 320, aspectRatio: SCREEN_ASPECT,
+    width: 260, aspectRatio: SCREEN_ASPECT,
     backgroundColor: "#000", borderRadius: radius.md,
     borderWidth: 1, borderColor: C.border, overflow: "hidden",
   },

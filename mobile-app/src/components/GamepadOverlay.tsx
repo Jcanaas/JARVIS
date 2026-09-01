@@ -570,7 +570,11 @@ function Draggable({
     >
       {children}
       <View
-        style={styles.resizeHandle}
+        // The raw responder View API (unlike Touchable*/Pressable) doesn't
+        // support hitSlop, so the actual touchable area is padded out to a
+        // real finger-sized target (48x48) around the small visible circle,
+        // instead of relying on hitting that circle's own bounds exactly.
+        style={styles.resizeHandleHit}
         // A separate, deeper responder wins over the drag handler above for
         // touches that land on the handle itself (RN grants the responder
         // to the deepest claimant), so touching the corner resizes instead
@@ -582,7 +586,9 @@ function Draggable({
         onResponderRelease={onResizeRelease}
         onResponderTerminate={onResizeRelease}
       >
-        <Ionicons name="resize" size={13} color="#08101F" />
+        <View style={styles.resizeHandle}>
+          <Ionicons name="resize" size={13} color="#08101F" />
+        </View>
       </View>
     </View>
   );
@@ -666,10 +672,17 @@ const styles = StyleSheet.create({
   resetText: { color: C.textMed, fontSize: 11, fontWeight: "700" },
   editHint: { position: "absolute", top: 58, alignSelf: "center", color: C.textMed, fontSize: 11, opacity: 0.8 },
   draggable: { borderWidth: 1, borderColor: C.pri, borderStyle: "dashed", borderRadius: 12 },
-  resizeHandle: {
-    position: "absolute", bottom: -14, right: -14, width: 28, height: 28, borderRadius: 14,
-    backgroundColor: C.pri, borderWidth: 2, borderColor: C.bg,
+  // A real View (raw responder API) has no hitSlop, so the touchable region
+  // is this bigger transparent box — the small coloured circle inside it is
+  // only the visual, centred within it, not the hit target itself.
+  resizeHandleHit: {
+    position: "absolute", bottom: -24, right: -24, width: 48, height: 48,
     alignItems: "center", justifyContent: "center", zIndex: 3,
+  },
+  resizeHandle: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: C.pri, borderWidth: 2, borderColor: C.bg,
+    alignItems: "center", justifyContent: "center",
   },
   btnDisabled: { opacity: 0.55 },
   shoulderGroup: { flexDirection: "row", gap: 8 },
