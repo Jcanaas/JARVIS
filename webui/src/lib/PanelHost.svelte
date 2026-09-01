@@ -13,6 +13,7 @@
   import TVShows from '../panels/TVShows.svelte'
   import Anime from '../panels/Anime.svelte'
   import YouTube from '../panels/YouTube.svelte'
+  import Emulators from '../panels/Emulators.svelte'
 
   const COMPONENTS = {
     home: Home,
@@ -27,6 +28,7 @@
     tv: TVShows,
     anime: Anime,
     youtube: YouTube,
+    games: Emulators,
   }
 
   let currentLabel = $derived(PANELS.find((p) => p.id === $activePanel)?.label ?? $activePanel)

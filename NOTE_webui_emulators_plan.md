@@ -497,6 +497,92 @@ clases de movies/anime/youtube que ya existen al final del archivo.
 **Criterio de salida:** GBA/SNES jugables de principio a fin desde el panel web.
 Primer hito realmente utilizable.
 
+### ✅ RESULTADOS FASE 4 — ejecutada, hito "jugable de principio a fin" alcanzado
+
+**Backend:** 17 rutas nuevas en `webui_server.py`, todas bajo `/api/emulator/*`
+(estado, ciclo de vida, input, save states, biblioteca, consolas, pad, cores
++ instalación, catálogo de búsqueda/populares/descarga). El catálogo
+(`rom_catalog`) y cores (`install_core`) quedaron **solo en backend, probados,
+sin UI todavía** — el bullet de frontend del plan original solo pedía
+"biblioteca", no un flujo de descarga, así que ahí se paró a propósito para no
+meter alcance no pedido.
+
+**Alcance recortado a propósito:** `game_library.list_entries()` mezcla ROMs
+con juegos de Steam/Epic (`ui/panels/games.py`, el hub "Juegos" con FitGirl
+Repacks). Ese hub es una función aparte que **NO** aparece en ningún sitio de
+`NOTE_webui_emulators.md` ni de este plan — todas las rutas de biblioteca
+filtran explícitamente a `kind=="rom"`.
+
+**Mando del móvil:** `lan_dashboard.py` ganó `_active_emulator()`, que mira
+primero el widget Qt (`_retro_screen()`) y cae a la sesión headless
+(`emulator_session.get_session()`) si no hay nada ahí — ambos exponen
+`set_button`/`set_axis`/`clear_input` con la misma forma, así que
+`api_gamepad_status`/`api_gamepad_input` no necesitaron saber cuál de los dos
+tenían delante. Verificado con el core real (no solo con mocks): el botón
+pulsado desde `/api/gamepad/input` aparece en `sess._core._pressed`.
+
+**Frontend:** `webui/src/panels/Emulators.svelte` — biblioteca en grid,
+reproductor con `<img>` de streaming, mando táctil generado a partir de
+`pad_layout()` (D-pad, ABXY, hombros/gatillos condicionales, stick analógico
+si `sticks>=1` aunque GBA/SNES no lo ejerciten todavía), teclado (mismo mapeo
+por defecto que `input_config._BASE_KEYBOARD`), guardar/cargar estado,
+pantalla completa. Registrado en `nav.js`/`PanelHost.svelte` — el hueco
+`{ id: 'games', available: false }` ya existía, solo hubo que activarlo.
+
+#### Verificación real en navegador, no solo `test_client()`
+
+Con la biblioteca de tests ya en verde, se sirvió el `dist/` compilado de
+verdad detrás de `webui_host._boot_headless_qt()` + Flask, y se navegó con el
+Browser pane de esta sesión:
+
+- **Biblioteca real:** 7 tarjetas cargadas desde `/api/emulator/library`,
+  incluyendo un juego de N64 (`Super Mario 64`) que ni siquiera se sabía que
+  estaba en `~/.jarvis/roms/` hasta este momento.
+- **Clic en "Metroid - Zero Mission" → jugando de verdad:** el `<img>` recibió
+  el MJPEG real (`naturalWidth=240`, resolución GBA), a **60 fps**. Se
+  capturó un frame directamente del `<img>` renderizado vía `<canvas>` y se
+  verificó a ojo: el starfield real de la intro de Metroid, no un frame en
+  negro ni basura.
+- **Mando táctil real:** `pointerdown`/`pointerup` sobre el botón "A" del DOM
+  disparó `POST /api/emulator/input` (200, confirmado en el log de Flask).
+- **Ciclo completo confirmado en el log del servidor:** `start` → `input` ×2
+  → `stop`, los cuatro con 200.
+- El panel táctil renderizó exactamente los controles esperados para GBA
+  (D-pad, Select/Start, Y/X/A/B, L/R) y **omitió correctamente** el stick
+  analógico (`pad_layout("gba").sticks == 0`).
+
+**Un hallazgo aparte, fuera del alcance de esta fase:** la pantalla
+"Conectando con J.A.R.V.I.S…" (`Splash.svelte`) se quedó colgada
+indefinidamente en el navegador automatizado de esta sesión — reproducible
+**ya en el panel de Inicio**, antes de tocar nada de Emuladores, en código
+(`App.svelte`/`Splash.svelte`/`sse.js`) que esta fase no modificó. Todas las
+llamadas de red que la bloquean (`/api/state`, `/api/setup/status`)
+devolvían 200 con normalidad; el bloqueo parece del lado del navegador
+automatizado (una conexión SSE de larga duración interactuando raro con este
+entorno concreto), no del backend. Se rodeó ocultando el overlay por JS para
+poder seguir verificando con clics de coordenadas reales — no se tocó
+`App.svelte` para no arreglar a ciegas algo no reproducido en el target real
+(pywebview/WebKitGTK). **Merece una comprobación aparte en la app de
+escritorio de verdad**, no dar por sentado que es solo cosa de este entorno.
+
+#### Tests
+
+`tests/test_webui_server.py` — clase `EmulatorRouteTests` nueva, 26 tests
+(contrato de cada ruta, mapeo de errores a 409/404/400, publicación de
+eventos SSE de progreso vía `SynchronousThread`, siguiendo el patrón exacto
+de `MoviesRouteTests`). `tests/test_lan_dashboard.py` ganó 3 tests para el
+fallback de `_active_emulator()` (Qt activo, headless activo, Qt gana si
+ambos están — caso que no debería poder pasar en producción pero que
+conviene que no explote si pasa).
+
+#### Regresiones: ninguna
+
+733 passed, 2 skipped — mismos dos fallos preexistentes de fases anteriores.
+`npm run build` limpio (0 errores, 0 avisos propios tras corregir dos usos de
+`bind:this` que Svelte 5 quiere declarados con `$state()` — el único aviso
+restante es de accesibilidad en el stick analógico, de la misma clase que ya
+tolera el resto del código base, p. ej. `Calendar.svelte`).
+
 ---
 
 ## Fase 5 — Subir a PS2

@@ -1491,6 +1491,29 @@ def _make_app(token: str):
         except Exception:
             return None
 
+    def _active_emulator():
+        """(input target, console_id) for whichever emulator is actually
+        live right now — the legacy Qt widget, or the headless web session
+        from actions/emulator_session.py — or (None, "") if neither is
+        running. Both expose set_button()/set_axis()/clear_input() directly
+        (a LibretroCore does, and so does EmulatorSession, as a passthrough),
+        so /api/gamepad/input doesn't need to know which one it got. Only one
+        can ever be live at a time — actions/libretro.py's load() is a
+        process-global singleton — so checking the Qt screen first and
+        falling back to the web session can't pick the wrong one."""
+        screen = _retro_screen()
+        if screen is not None and getattr(screen, "core", None) is not None:
+            return screen.core, str(getattr(screen, "_console_id", "") or "")
+
+        try:
+            from actions.emulator_session import get_session
+            session = get_session()
+        except Exception:
+            return None, ""
+        if session.is_running():
+            return session, session.console_id
+        return None, ""
+
     @app.route("/api/debug/emulator_frame")
     def api_debug_emulator_frame():
         """Diagnostic-only: the emulator's current frame as a PNG.
@@ -1523,10 +1546,9 @@ def _make_app(token: str):
         actually running, instead of making the user go looking for it."""
         if not _check_token():
             return jsonify({"error": "unauthorized"}), 403
-        screen = _retro_screen()
-        if screen is None:
+        _core, console_id = _active_emulator()
+        if not console_id:
             return jsonify({"active": False, "console": "", "buttons": [], "announce": _gamepad_announce})
-        console_id = str(getattr(screen, "_console_id", "") or "")
         try:
             from actions.emulator_runtime import pad_layout
             layout = pad_layout(console_id)
@@ -1556,8 +1578,7 @@ def _make_app(token: str):
     def api_gamepad_input():
         if not _check_token():
             return jsonify({"error": "unauthorized"}), 403
-        screen = _retro_screen()
-        core = getattr(screen, "core", None) if screen is not None else None
+        core, _console_id = _active_emulator()
         if core is None:
             return jsonify({"error": "no_game"}), 409
 

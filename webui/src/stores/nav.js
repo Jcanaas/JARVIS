@@ -13,7 +13,7 @@ export const PANELS = [
   { id: 'movies', label: 'Películas', subtitle: 'Streaming', icon: 'movies', key: 'P', available: true },
   { id: 'anime', label: 'Anime', subtitle: 'Streaming', icon: 'anime', key: 'N', available: true },
   { id: 'tv', label: 'TV', subtitle: 'En directo', icon: 'tv', key: 'T', available: true },
-  { id: 'games', label: 'Emuladores', subtitle: 'Juegos', icon: 'games', key: 'U', available: false },
+  { id: 'games', label: 'Emuladores', subtitle: 'Juegos', icon: 'games', key: 'U', available: true },
   { id: 'calendar', label: 'Calendario', subtitle: 'Agenda', icon: 'calendar', key: 'A', available: true },
   { id: 'cardtrader', label: 'CardTrader', subtitle: 'Mercado de cartas', icon: 'cardtrader', key: 'G', available: true },
   { id: 'settings', label: 'Ajustes', subtitle: 'Configuración', icon: 'settings', key: 'J', available: true },

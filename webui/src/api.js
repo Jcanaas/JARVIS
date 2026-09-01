@@ -104,6 +104,20 @@ export const getAnimeTorrents = (tmdbId, season = 0, episode = 0) =>
 export const searchYoutube = (q) => getJSON(`/api/youtube/search?q=${encodeURIComponent(q)}`)
 export const getYoutubeRecommendations = () => getJSON('/api/youtube/recommendations')
 
+// Emuladores — actions/emulator_session.py, one session per process.
+// /api/emulator/stream (MJPEG) is consumed directly as an <img src>, no
+// wrapper needed here.
+export const getEmulatorLibrary = () => getJSON('/api/emulator/library')
+export const getEmulatorStatus = () => getJSON('/api/emulator/status')
+export const startEmulator = (entryId) => postJSON('/api/emulator/start', { entry_id: entryId })
+export const stopEmulator = () => postJSON('/api/emulator/stop', {})
+export const pauseEmulator = (paused) => postJSON('/api/emulator/pause', { paused })
+export const resetEmulator = () => postJSON('/api/emulator/reset', {})
+export const sendEmulatorInput = (body) => postJSON('/api/emulator/input', body)
+export const saveEmulatorState = () => postJSON('/api/emulator/state/save', {})
+export const loadEmulatorState = () => postJSON('/api/emulator/state/load', {})
+export const getEmulatorPad = (consoleId) => getJSON(`/api/emulator/pad?console_id=${encodeURIComponent(consoleId)}`)
+
 // Calendar
 export const getCalendarEvents = (timeMin, timeMax) =>
   getJSON(`/api/calendar/events?time_min=${encodeURIComponent(timeMin)}&time_max=${encodeURIComponent(timeMax)}`)

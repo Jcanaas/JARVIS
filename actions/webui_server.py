@@ -1492,6 +1492,252 @@ def _make_app(host_ref):
             "settings_path": str(config_path("app_settings.json")),
         })
 
+    # -- Emuladores --------------------------------------------------------
+    # ui/panels/emulators.py's EmulatorsModePanel + LibraryModePanel, minus
+    # the Steam/FitGirl "Juegos" hub tab (ui/panels/games.py) — that half is
+    # a separate, unrelated feature never covered by this port. "library"
+    # below is filtered to kind=="rom" for the same reason.
+    #
+    # One session per process: actions/emulator_session.get_session() is a
+    # singleton (mirrors actions/libretro.py's own one-core-per-process
+    # rule), so every route below just fetches it fresh rather than holding
+    # a reference — there's only ever one to hold.
+
+    def _emulator_error(exc: Exception):
+        from actions.emulator_session import EmulatorSessionError
+        if isinstance(exc, EmulatorSessionError):
+            return jsonify({"error": str(exc)}), 409
+        return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/emulator/status")
+    def api_emulator_status():
+        from actions.emulator_session import get_session
+        from actions import emulator_runtime as er
+        status = get_session().status()
+        status["layout"] = er.pad_layout(status.get("console", ""))
+        return jsonify(status)
+
+    @app.route("/api/emulator/start", methods=["POST"])
+    def api_emulator_start():
+        data = request.get_json(silent=True) or {}
+        entry_id = str(data.get("entry_id") or "").strip()
+        if not entry_id:
+            return jsonify({"error": "missing_entry_id"}), 400
+        try:
+            from actions import game_library as gl
+            from actions.emulator_session import get_session
+
+            entry = next(
+                (e for e in gl.list_entries(include_pc=False)
+                 if e.entry_id == entry_id and e.kind == "rom"),
+                None,
+            )
+            if entry is None:
+                return jsonify({"error": "not_found"}), 404
+
+            session = get_session()
+            session.start(entry.console_id, entry.path, entry.title)
+            gl.mark_played(entry_id)
+            return jsonify({"ok": True, "status": session.status()})
+        except Exception as e:
+            return _emulator_error(e)
+
+    @app.route("/api/emulator/stop", methods=["POST"])
+    def api_emulator_stop():
+        from actions.emulator_session import get_session
+        get_session().stop()
+        return jsonify({"ok": True})
+
+    @app.route("/api/emulator/pause", methods=["POST"])
+    def api_emulator_pause():
+        from actions.emulator_session import get_session
+        data = request.get_json(silent=True) or {}
+        get_session().pause(bool(data.get("paused", True)))
+        return jsonify({"ok": True})
+
+    @app.route("/api/emulator/reset", methods=["POST"])
+    def api_emulator_reset():
+        from actions.emulator_session import get_session
+        get_session().reset()
+        return jsonify({"ok": True})
+
+    @app.route("/api/emulator/input", methods=["POST"])
+    def api_emulator_input():
+        # No token check: unlike actions/lan_dashboard.py's phone-facing
+        # /api/gamepad/input (opt-in, reachable from the LAN), this server
+        # only ever binds 127.0.0.1 — same trust model as every other route
+        # in this file. lan_dashboard.py's own gamepad routes reach the same
+        # session through _active_emulator(), so the phone pad keeps working
+        # in web mode too; this route is this panel's own on-screen pad.
+        from actions.emulator_session import get_session
+        from actions.lan_dashboard import _GAMEPAD_BUTTONS
+
+        session = get_session()
+        if not session.is_running():
+            return jsonify({"error": "no_game"}), 409
+
+        data = request.get_json(silent=True) or {}
+        try:
+            for entry in data.get("buttons") or []:
+                name = str(entry.get("name", "")).strip().lower()
+                if name in _GAMEPAD_BUTTONS:
+                    session.set_button(name, bool(entry.get("pressed")))
+            for entry in data.get("axes") or []:
+                session.set_axis(
+                    int(entry.get("index", 0)),
+                    int(entry.get("axis", 0)),
+                    int(entry.get("value", 0)),
+                )
+            if data.get("clear"):
+                session.clear_input()
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        return jsonify({"ok": True})
+
+    @app.route("/api/emulator/state/save", methods=["POST"])
+    def api_emulator_state_save():
+        from actions.emulator_session import get_session
+        try:
+            get_session().save_state()
+            return jsonify({"ok": True})
+        except Exception as e:
+            return _emulator_error(e)
+
+    @app.route("/api/emulator/state/load", methods=["POST"])
+    def api_emulator_state_load():
+        from actions.emulator_session import get_session
+        try:
+            get_session().load_state()
+            return jsonify({"ok": True})
+        except Exception as e:
+            return _emulator_error(e)
+
+    @app.route("/api/emulator/library")
+    def api_emulator_library():
+        try:
+            from actions import game_library as gl
+            entries = [e for e in gl.list_entries(include_pc=False) if e.kind == "rom"]
+            return jsonify([e.to_dict() for e in entries])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/emulator/consoles")
+    def api_emulator_consoles():
+        from actions import rom_catalog as rc
+        from actions import emulator_runtime as er
+        return jsonify([
+            {
+                "id": c.id,
+                "name": c.name,
+                "short": c.short,
+                "rom_exts": list(c.rom_exts),
+                "has_catalog": c.has_catalog,
+                "core_available": er.has_core(c.id),
+            }
+            for c in rc.CONSOLES.values()
+        ])
+
+    @app.route("/api/emulator/pad")
+    def api_emulator_pad():
+        from actions import emulator_runtime as er
+        return jsonify(er.pad_layout(request.args.get("console_id") or ""))
+
+    @app.route("/api/emulator/cores")
+    def api_emulator_cores():
+        from actions import emulator_runtime as er
+        out = {console_id: er.core_status(console_id) for console_id in er.CORES}
+        if "ps2" in out:
+            try:
+                from actions import bios
+                out["ps2"]["bios_present"] = bios.has_ps2_bios(er.system_dir())
+            except Exception:
+                pass
+        return jsonify(out)
+
+    @app.route("/api/emulator/cores/install", methods=["POST"])
+    def api_emulator_cores_install():
+        data = request.get_json(silent=True) or {}
+        console_id = str(data.get("console_id") or "").strip()
+        from actions import emulator_runtime as er
+        if console_id not in er.CORES:
+            return jsonify({"error": "unknown_console"}), 404
+
+        def _run():
+            def progress(fraction, done, total):
+                publish("emulator_core_progress",
+                       {"console_id": console_id, "fraction": fraction})
+            try:
+                er.install_core(console_id, progress=progress)
+                publish("emulator_core_ready", {"console_id": console_id})
+            except Exception as e:
+                publish("emulator_core_error", {"console_id": console_id, "error": str(e)})
+
+        threading.Thread(target=_run, daemon=True).start()
+        return jsonify({"ok": True}), 202
+
+    def _rom_dict(rom) -> dict:
+        from dataclasses import asdict
+        from actions import rom_catalog as rc
+        d = asdict(rom)
+        d["size_label"] = rom.size_label
+        d["downloaded"] = rc.local_path(rom) is not None
+        return d
+
+    @app.route("/api/emulator/catalog/search")
+    def api_emulator_catalog_search():
+        console_id = request.args.get("console_id") or "gba"
+        q = request.args.get("q") or ""
+        region = request.args.get("region") or ""
+        try:
+            from actions import rom_catalog as rc
+            roms = rc.search(q, console_id=console_id, region=region, limit=60)
+            return jsonify([_rom_dict(r) for r in roms])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/emulator/catalog/popular")
+    def api_emulator_catalog_popular():
+        console_id = request.args.get("console_id") or "gba"
+        try:
+            from actions import rom_catalog as rc
+            roms = rc.popular(console_id, limit=60)
+            return jsonify([_rom_dict(r) for r in roms])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/emulator/catalog/download", methods=["POST"])
+    def api_emulator_catalog_download():
+        data = request.get_json(silent=True) or {}
+        console_id = str(data.get("console_id") or "").strip()
+        stem = str(data.get("stem") or "").strip()
+        if not console_id or not stem:
+            return jsonify({"error": "missing_console_id_or_stem"}), 400
+
+        try:
+            from actions import rom_catalog as rc
+            rom = next((r for r in rc.get_index(console_id) if r.stem == stem), None)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        if rom is None:
+            return jsonify({"error": "not_found"}), 404
+
+        def _run():
+            from actions import rom_catalog as rc
+            from actions import game_library as gl
+
+            def progress(fraction, done, total):
+                publish("emulator_download_progress", {"stem": stem, "fraction": fraction})
+
+            try:
+                path = rc.download(rom, progress=progress)
+                gl.add_rom(rom, path)
+                publish("emulator_download_ready", {"stem": stem, "path": str(path)})
+            except Exception as e:
+                publish("emulator_download_error", {"stem": stem, "error": str(e)})
+
+        threading.Thread(target=_run, daemon=True).start()
+        return jsonify({"ok": True}), 202
+
     # -- Emuladores (streaming) -------------------------------------------
     # MJPEG (multipart/x-mixed-replace) over a plain <img>, no WebSocket and
     # no client-side decoding. The encoder polls actions/emulator_session.py

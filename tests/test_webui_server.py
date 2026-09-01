@@ -625,5 +625,294 @@ class MoviesRouteTests(unittest.TestCase):
         self.assertEqual(resp.get_json()[0]["id"], "xyz98765432")
 
 
+class EmulatorRouteTests(unittest.TestCase):
+    """ui/panels/emulators.py's EmulatorsModePanel + LibraryModePanel, minus
+    the Steam/FitGirl Juegos hub (out of scope — see webui_server.py's own
+    comment on the route group). Routes are mocked at the module boundary
+    (actions.emulator_session / .game_library / .rom_catalog / .emulator_runtime)
+    rather than driving a real core — that end-to-end path (real ROM, real
+    Qt-headless session, real Flask app) was verified live while building
+    this phase; these tests are about each route's own contract."""
+
+    def setUp(self):
+        from actions.webui_host import WebUIHost
+        self.host = WebUIHost(port=8877)
+        from actions import webui_server
+        self.webui_server = webui_server
+        self.app = webui_server._make_app(self.host)
+        self.client = self.app.test_client()
+
+    # -- status / lifecycle -------------------------------------------------
+
+    def test_status_when_idle(self):
+        session = MagicMock()
+        session.status.return_value = {
+            "running": False, "console": "", "title": "", "paused": False,
+            "fps": 0.0, "hw_render": False,
+        }
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.get("/api/emulator/status")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertFalse(body["running"])
+        self.assertIn("layout", body)
+
+    def test_start_missing_entry_id(self):
+        resp = self.client.post("/api/emulator/start", json={})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_start_not_found(self):
+        with patch("actions.game_library.list_entries", return_value=[]):
+            resp = self.client.post("/api/emulator/start", json={"entry_id": "rom:missing"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_start_success_marks_played_and_returns_status(self):
+        import types as _types
+        entry = _types.SimpleNamespace(
+            entry_id="rom:test", kind="rom", console_id="gba",
+            path="/roms/test.gba", title="Test Game",
+        )
+        session = MagicMock()
+        session.status.return_value = {"running": True, "console": "gba"}
+        with patch("actions.game_library.list_entries", return_value=[entry]), \
+             patch("actions.game_library.mark_played") as mock_played, \
+             patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/start", json={"entry_id": "rom:test"})
+        self.assertEqual(resp.status_code, 200)
+        session.start.assert_called_once_with("gba", "/roms/test.gba", "Test Game")
+        mock_played.assert_called_once_with("rom:test")
+
+    def test_start_conflict_maps_to_409(self):
+        import types as _types
+        from actions.emulator_session import EmulatorSessionError
+        entry = _types.SimpleNamespace(
+            entry_id="rom:test", kind="rom", console_id="gba",
+            path="/roms/test.gba", title="Test Game",
+        )
+        session = MagicMock()
+        session.start.side_effect = EmulatorSessionError("ya en marcha")
+        with patch("actions.game_library.list_entries", return_value=[entry]), \
+             patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/start", json={"entry_id": "rom:test"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("ya en marcha", resp.get_json()["error"])
+
+    def test_stop_calls_session_stop(self):
+        session = MagicMock()
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/stop")
+        self.assertEqual(resp.status_code, 200)
+        session.stop.assert_called_once()
+
+    def test_pause_forwards_the_flag(self):
+        session = MagicMock()
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/pause", json={"paused": True})
+        self.assertEqual(resp.status_code, 200)
+        session.pause.assert_called_once_with(True)
+
+    def test_reset_calls_session_reset(self):
+        session = MagicMock()
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/reset")
+        self.assertEqual(resp.status_code, 200)
+        session.reset.assert_called_once()
+
+    # -- input ----------------------------------------------------------------
+
+    def test_input_without_a_running_session_is_a_conflict(self):
+        session = MagicMock()
+        session.is_running.return_value = False
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/input", json={"buttons": []})
+        self.assertEqual(resp.status_code, 409)
+
+    def test_input_forwards_buttons_axes_and_clear(self):
+        session = MagicMock()
+        session.is_running.return_value = True
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/input", json={
+                "buttons": [{"name": "a", "pressed": True}, {"name": "bogus", "pressed": True}],
+                "axes": [{"index": 0, "axis": 1, "value": 200}],
+                "clear": True,
+            })
+        self.assertEqual(resp.status_code, 200)
+        session.set_button.assert_called_once_with("a", True)
+        session.set_axis.assert_called_once_with(0, 1, 200)
+        session.clear_input.assert_called_once()
+
+    # -- save states ------------------------------------------------------------
+
+    def test_state_save_success(self):
+        session = MagicMock()
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/state/save")
+        self.assertEqual(resp.status_code, 200)
+        session.save_state.assert_called_once()
+
+    def test_state_save_without_a_session_is_a_conflict(self):
+        from actions.emulator_session import EmulatorSessionError
+        session = MagicMock()
+        session.save_state.side_effect = EmulatorSessionError("No hay ninguna sesión activa")
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/state/save")
+        self.assertEqual(resp.status_code, 409)
+
+    def test_state_load_without_a_saved_state_is_a_conflict(self):
+        from actions.emulator_session import EmulatorSessionError
+        session = MagicMock()
+        session.load_state.side_effect = EmulatorSessionError("No hay ningún estado guardado")
+        with patch("actions.emulator_session.get_session", return_value=session):
+            resp = self.client.post("/api/emulator/state/load")
+        self.assertEqual(resp.status_code, 409)
+
+    # -- library / consoles / pad / cores ----------------------------------------
+
+    def test_library_filters_to_rom_entries_only(self):
+        import types as _types
+        rom_entry = _types.SimpleNamespace(kind="rom", to_dict=lambda: {"kind": "rom", "title": "A ROM"})
+        steam_entry = _types.SimpleNamespace(kind="steam", to_dict=lambda: {"kind": "steam", "title": "A Steam game"})
+        with patch("actions.game_library.list_entries", return_value=[rom_entry, steam_entry]) as mocked:
+            resp = self.client.get("/api/emulator/library")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual([e["kind"] for e in body], ["rom"])
+        mocked.assert_called_once_with(include_pc=False)
+
+    def test_consoles_lists_the_catalog_with_core_availability(self):
+        import types as _types
+        console = _types.SimpleNamespace(
+            id="gba", name="Game Boy Advance", short="GBA",
+            rom_exts=(".gba",), has_catalog=True,
+        )
+        with patch("actions.rom_catalog.CONSOLES", {"gba": console}), \
+             patch("actions.emulator_runtime.has_core", return_value=True):
+            resp = self.client.get("/api/emulator/consoles")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json(), [{
+            "id": "gba", "name": "Game Boy Advance", "short": "GBA",
+            "rom_exts": [".gba"], "has_catalog": True, "core_available": True,
+        }])
+
+    def test_pad_returns_the_console_specific_layout(self):
+        with patch("actions.emulator_runtime.pad_layout", return_value={"sticks": 2}) as mocked:
+            resp = self.client.get("/api/emulator/pad?console_id=ps2")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json(), {"sticks": 2})
+        mocked.assert_called_once_with("ps2")
+
+    def test_cores_reports_ps2_bios_presence(self):
+        with patch("actions.emulator_runtime.CORES", {"gba": object(), "ps2": object()}), \
+             patch("actions.emulator_runtime.core_status",
+                   side_effect=lambda cid: {"available": True, "console": cid}), \
+             patch("actions.bios.has_ps2_bios", return_value=True):
+            resp = self.client.get("/api/emulator/cores")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertTrue(body["ps2"]["bios_present"])
+        self.assertNotIn("bios_present", body["gba"])
+
+    def test_cores_install_rejects_an_unknown_console(self):
+        with patch("actions.emulator_runtime.CORES", {}):
+            resp = self.client.post("/api/emulator/cores/install", json={"console_id": "n64"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cores_install_publishes_progress_and_ready(self):
+        published = []
+        with patch("threading.Thread", SynchronousThread), \
+             patch.object(self.webui_server, "publish", side_effect=lambda t, d: published.append((t, d))), \
+             patch("actions.emulator_runtime.CORES", {"gba": object()}), \
+             patch("actions.emulator_runtime.install_core") as mock_install:
+            resp = self.client.post("/api/emulator/cores/install", json={"console_id": "gba"})
+        self.assertEqual(resp.status_code, 202)
+        mock_install.assert_called_once()
+        self.assertEqual(mock_install.call_args.args[0], "gba")
+        self.assertIn(("emulator_core_ready", {"console_id": "gba"}), published)
+
+    def test_cores_install_publishes_error_on_failure(self):
+        published = []
+        with patch("threading.Thread", SynchronousThread), \
+             patch.object(self.webui_server, "publish", side_effect=lambda t, d: published.append((t, d))), \
+             patch("actions.emulator_runtime.CORES", {"gba": object()}), \
+             patch("actions.emulator_runtime.install_core", side_effect=RuntimeError("boom")):
+            resp = self.client.post("/api/emulator/cores/install", json={"console_id": "gba"})
+        self.assertEqual(resp.status_code, 202)
+        self.assertIn(("emulator_core_error", {"console_id": "gba", "error": "boom"}), published)
+
+    # -- catalog ------------------------------------------------------------
+
+    def test_catalog_search_success(self):
+        from actions.rom_catalog import Rom
+        rom = Rom(title="Metroid", console_id="gba", stem="Metroid", size_bytes=100)
+        with patch("actions.rom_catalog.search", return_value=[rom]), \
+             patch("actions.rom_catalog.local_path", return_value=None):
+            resp = self.client.get("/api/emulator/catalog/search?q=metroid&console_id=gba")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body[0]["title"], "Metroid")
+        self.assertFalse(body[0]["downloaded"])
+
+    def test_catalog_popular_success(self):
+        from actions.rom_catalog import Rom
+        rom = Rom(title="Pokemon", console_id="gba", stem="Pokemon", size_bytes=100)
+        with patch("actions.rom_catalog.popular", return_value=[rom]), \
+             patch("actions.rom_catalog.local_path", return_value=Path("/roms/Pokemon.gba")):
+            resp = self.client.get("/api/emulator/catalog/popular?console_id=gba")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()[0]["downloaded"])
+
+    def test_catalog_download_missing_params(self):
+        resp = self.client.post("/api/emulator/catalog/download", json={})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_catalog_download_not_found(self):
+        with patch("actions.rom_catalog.get_index", return_value=[]):
+            resp = self.client.post(
+                "/api/emulator/catalog/download",
+                json={"console_id": "gba", "stem": "missing"},
+            )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_catalog_download_publishes_progress_and_ready(self):
+        import types as _types
+        rom = _types.SimpleNamespace(stem="Metroid", console_id="gba")
+        published = []
+
+        def fake_download(rom_arg, progress=None, cancel=None):
+            if progress:
+                progress(0.5, 50, 100)
+            return Path("/roms/Metroid.gba")
+
+        with patch("threading.Thread", SynchronousThread), \
+             patch.object(self.webui_server, "publish", side_effect=lambda t, d: published.append((t, d))), \
+             patch("actions.rom_catalog.get_index", return_value=[rom]), \
+             patch("actions.rom_catalog.download", side_effect=fake_download), \
+             patch("actions.game_library.add_rom") as mock_add:
+            resp = self.client.post(
+                "/api/emulator/catalog/download",
+                json={"console_id": "gba", "stem": "Metroid"},
+            )
+        self.assertEqual(resp.status_code, 202)
+        types_seen = [t for t, _ in published]
+        self.assertIn("emulator_download_progress", types_seen)
+        self.assertIn("emulator_download_ready", types_seen)
+        mock_add.assert_called_once_with(rom, Path("/roms/Metroid.gba"))
+
+    def test_catalog_download_publishes_error_on_failure(self):
+        import types as _types
+        rom = _types.SimpleNamespace(stem="Metroid", console_id="gba")
+        published = []
+        with patch("threading.Thread", SynchronousThread), \
+             patch.object(self.webui_server, "publish", side_effect=lambda t, d: published.append((t, d))), \
+             patch("actions.rom_catalog.get_index", return_value=[rom]), \
+             patch("actions.rom_catalog.download", side_effect=RuntimeError("sin espacio")):
+            resp = self.client.post(
+                "/api/emulator/catalog/download",
+                json={"console_id": "gba", "stem": "Metroid"},
+            )
+        self.assertEqual(resp.status_code, 202)
+        self.assertIn(("emulator_download_error", {"stem": "Metroid", "error": "sin espacio"}), published)
+
+
 if __name__ == "__main__":
     unittest.main()

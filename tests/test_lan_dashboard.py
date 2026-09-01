@@ -680,6 +680,78 @@ class LanDashboardTests(unittest.TestCase):
         self.assertEqual(client.post("/api/gamepad/input?token=wrong", json={}).status_code, 403)
         self.assertEqual(client.post("/api/gamepad/announce?token=wrong").status_code, 403)
 
+    # -- Falls back to the headless web session (actions/emulator_session.py)
+    # when the legacy Qt widget isn't attached — see _active_emulator, added
+    # so the phone pad keeps working in web mode, not just --legacy. --------
+
+    def test_gamepad_status_falls_back_to_the_headless_session(self):
+        from actions import lan_dashboard
+        from ui.widgets import retro
+
+        session = MagicMock()
+        session.is_running.return_value = True
+        session.console_id = "ps2"
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=None), \
+                patch("actions.emulator_session.get_session", return_value=session):
+            body = client.get(f"/api/gamepad/status?token={token}").get_json()
+
+        self.assertTrue(body["active"])
+        self.assertEqual(body["console"], "ps2")
+        self.assertEqual(body["layout"]["sticks"], 2)  # PS2's own pad shape
+
+    def test_gamepad_input_falls_back_to_the_headless_session(self):
+        from actions import lan_dashboard
+        from ui.widgets import retro
+
+        session = MagicMock()
+        session.is_running.return_value = True
+        session.console_id = "gba"
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=None), \
+                patch("actions.emulator_session.get_session", return_value=session):
+            r = client.post(
+                f"/api/gamepad/input?token={token}",
+                json={"buttons": [{"name": "a", "pressed": True}]},
+            )
+
+        self.assertEqual(r.status_code, 200)
+        session.set_button.assert_called_once_with("a", True)
+
+    def test_gamepad_prefers_the_qt_widget_over_the_headless_session(self):
+        """Only one core is ever live at a time (actions/libretro.py's load()
+        is a process-global singleton) but the fallback order still matters
+        if a stale session object lingers after --legacy exits — the Qt
+        widget, when attached, must win."""
+        import types as _types
+        from actions import lan_dashboard
+        from ui.widgets import retro
+
+        qt_core = MagicMock()
+        screen = _types.SimpleNamespace(core=qt_core, _console_id="snes")
+        stale_session = MagicMock()
+        stale_session.is_running.return_value = True
+        stale_session.console_id = "gba"
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=screen), \
+                patch("actions.emulator_session.get_session", return_value=stale_session):
+            body = client.get(f"/api/gamepad/status?token={token}").get_json()
+
+        self.assertEqual(body["console"], "snes")
+        stale_session.is_running.assert_not_called()
+
     def test_voice_transcribes_and_returns_the_text(self):
         import io
         from actions import lan_dashboard, file_processor
