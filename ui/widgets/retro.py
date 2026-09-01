@@ -24,6 +24,8 @@ from __future__ import annotations
 import threading
 import time
 
+from actions.emulator_pacing import advance_frame_debt as _advance_frame_debt
+
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
@@ -506,15 +508,6 @@ class RetroScreen(QWidget):
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         super().mousePressEvent(event)
-
-
-def _advance_frame_debt(debt: float, elapsed: float, fps: float,
-                        max_catchup: int = 4) -> tuple[int, float]:
-    """Return frames due while dropping backlog older than max_catchup."""
-    debt = min(max(0.0, debt + max(0.0, elapsed) * max(1.0, fps)),
-               float(max_catchup))
-    due = int(debt)
-    return due, debt - due
 
 
 class _StreamingS16Resampler:

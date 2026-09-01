@@ -296,7 +296,10 @@ funcionando byte a byte. Es el único cambio que este plan hace en `retro.py`.
 - `status()` — console, título, fps real, pausa, hw_render sí/no
 
 **Detalles que no se pueden improvisar:**
-- El hilo es dueño del `QApplication`, del contexto GL y del bucle: invariante 2.
+- El hilo de la sesión es dueño del contexto GL y del bucle de pacing
+  (invariante 2); el `QApplication` en sí lo crea `webui_host.py` en el hilo
+  principal, una vez por proceso (invariante 2b) — la sesión solo lo exige
+  con un guard explícito, nunca lo crea ella misma.
 - Autosave de SRAM periódico, como el `QTimer` de `emulators.py:661`.
 - **Audio: fuera de alcance en esta fase.** `QAudioSink` está atado al widget y
   al hilo de Qt; meterlo aquí mezcla dos problemas. Se drena `take_audio()` y se
@@ -310,6 +313,77 @@ vida, passthrough de input, doble `start()`, `stop()` sin `start()`.
 
 **Criterio de salida:** tests verdes, `--legacy` sigue jugando igual,
 `tests/test_libretro.py` y `test_emulator_input.py` siguen verdes.
+
+### ✅ RESULTADOS FASE 2 — ejecutada
+
+Construido: `actions/emulator_pacing.py` (función pura, extraída de
+`retro.py:511`), `actions/emulator_session.py` (`EmulatorSession` completa con
+la API de arriba) y un cambio en `actions/webui_host.py`.
+
+#### Bug real cazado por el test de integración, no por revisión de código
+
+El plan decía "el hilo es dueño del `QApplication`" — probado en la Fase 1 y
+correcto para emular, pero **revienta al cerrar** (ver invariante 2b, añadida
+tras la Fase 1). La solución correcta es que `webui_host.mainloop()` cree el
+`QApplication` en el **hilo principal**, antes de `webview.start()`, en una
+función nueva `_boot_headless_qt()`.
+
+El primer intento de esa función tenía un bug sutil: creaba el `QApplication`
+como variable **local** dentro de la función, sin guardar ninguna referencia
+Python fuera de ella. PyQt6 hace que Python sea dueño de un `QApplication` sin
+padre — en cuanto la función terminaba, el recolector de basura se lo llevaba
+por delante junto con el singleton de Qt, y `QApplication.instance()` volvía a
+dar `None` como si nunca se hubiera creado. Los prototipos de la Fase 1 no lo
+detectaron porque guardaban `app = QApplication(...)` en el ámbito del script,
+vivo todo el proceso por casualidad — aquí no había ese ámbito. Lo detectó un
+test de integración que reproduce el proceso completo (`_boot_headless_qt()`
+real + ventana `webview` real + `EmulatorSession` real), no una revisión de
+código: el fallo solo aparece al ejecutar. **Fix:** referencia módulo-global
+`actions.webui_host._qt_app`, igual que el patrón que ya usa el módulo para
+otros objetos de ciclo de vida largo (`_app`, `_started` en `webui_server.py`).
+
+`_boot_headless_qt()` es *best-effort*: si PyQt6 falla al importar o crear el
+`QApplication`, se loguea (`print(f"[WebUIHost] ...")`) y el arranque del resto
+de la web UI sigue — Emuladores es opcional, no puede tumbar el modo web
+entero.
+
+#### Verificación end-to-end (no solo unitaria)
+
+Antes de los tests unitarios con mocks, se probó el camino real: hilo
+principal con `_boot_headless_qt()` tal cual quedó en el repo, una ventana
+`webview` de verdad abierta y viva, y una `EmulatorSession` real dentro,
+**dos veces** (GBA software y PS2 hardware):
+
+| Escenario | Resultado |
+|---|---|
+| GBA, `_boot_headless_qt()` real + ventana webview real | ✅ 59.0 fps, `EXIT=0` |
+| PS2 hardware, mismo arnés | ✅ 59.9 fps, `hw_render=True`, `EXIT=0` |
+
+Cubre: `start()`/`stop()` reales, pausa/reanudación, doble `start()` rechazado,
+`stop()` sin `start()` (no revienta), `save_state()`/`load_state()`
+round-trip, contra un core PS2 real con renderer OpenGL forzado (el
+`"Software"` de `emulator_runtime.py:151` es solo el diagnóstico temporal del
+bug de fondo negro, no aplica aquí).
+
+#### Tests unitarios
+
+`tests/test_emulator_session.py` — 14 tests con un `_FakeCore` (sin Qt real,
+sin ROM real, corre en CI): ciclo de vida, pacing, passthrough de input,
+guardado/carga de estado, SRAM, doble `start()`, `stop()` sin `start()`, el
+guard contra la ausencia de `QApplication`, y que `retro.py` sigue usando
+**exactamente** la misma función de pacing (`assertIs`, no solo
+"se comporta igual"). 3 ejecuciones seguidas sin fallos intermitentes.
+
+#### Regresiones: ninguna
+
+Suite completa: **698 passed, 2 skipped** — los únicos 2 fallos
+(`test_ps2_uses_the_hardware_renderer`, `test_log_interface_returns_a_callable_function_pointer`)
+son **preexistentes**, confirmado haciendo `git stash` y reproduciéndolos en
+el HEAD anterior a esta fase. El primero es el mismo `"Software"` temporal de
+`emulator_runtime.py:151` (Fase 5 lo revierte); el segundo es ajeno a
+emuladores (ctypes en `libretro.py:570`), no tocado por este plan.
+`ui/widgets/retro.py` se comprobó además con `assertIs`, no solo con
+"produce el mismo resultado": es literalmente la misma función.
 
 ---
 

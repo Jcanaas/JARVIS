@@ -21,6 +21,12 @@ from actions.paths import config_path, resource
 
 API_FILE = config_path("api_keys.json")
 
+# Holds the process's one QApplication (see _boot_headless_qt). PyQt6 makes
+# Python own a parentless QApplication, so a local reference that goes out of
+# scope gets garbage-collected — which destroys the singleton right along
+# with it. A module-level reference is what keeps it alive for the process.
+_qt_app = None
+
 
 def _window_icon_path() -> str | None:
     """Path pywebview should use for the window/taskbar icon, or None if the
@@ -32,6 +38,35 @@ def _window_icon_path() -> str | None:
     name = "jarvis-icon.ico" if sys.platform == "win32" else "jarvis-icon-256.png"
     path = resource("installer", name)
     return str(path) if path.is_file() else None
+
+
+def _boot_headless_qt() -> None:
+    """Create the process's one QApplication, here, on the main thread,
+    before webview.start() takes it over.
+
+    This exists for actions/emulator_session.py: the embedded-emulators
+    core needs a QOffscreenSurface/QOpenGLContext (see actions/libretro.py),
+    which needs a live QApplication event loop in the process. Creating the
+    QApplication on a background thread instead — the seemingly obvious
+    place, since this thread is about to be handed to GTK — emulates fine
+    but segfaults the whole process at interpreter shutdown, reproduced
+    across every QPA platform plugin in testing; it's Qt's own
+    "QCoreApplication belongs to the main thread" rule, not fixable from
+    the emulator side. So it has to happen here, exactly once, and nothing
+    below ever calls exec() on it — webview.start() below is the process's
+    only real event loop.
+
+    Best-effort: the emulators panel is optional, so a missing/broken
+    PyQt6 install degrades to "no emulators", not a failed boot.
+    """
+    global _qt_app
+    try:
+        from PyQt6.QtWidgets import QApplication
+        import sys
+
+        _qt_app = QApplication.instance() or QApplication(sys.argv[:1])
+    except Exception as exc:
+        print(f"[WebUIHost] Emuladores no disponibles (PyQt6): {exc}")
 
 
 class _WebRoot:
@@ -85,6 +120,7 @@ class _WebRoot:
                     pass
 
         window.events.closed += _on_closed
+        _boot_headless_qt()
         webview.start(icon=_window_icon_path())
 
 
