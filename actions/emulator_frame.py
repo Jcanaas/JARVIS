@@ -46,3 +46,40 @@ def frame_to_bgr(data, width: int, height: int, pitch: int,
     g = ((px >> 5) & 0x3F) << 2
     b = (px & 0x1F) << 3
     return np.stack([b, g, r], axis=-1).astype(np.uint8)
+
+
+# Azahar's citra_libretro renders the 3DS top+bottom screens into one
+# combined framebuffer and reads touch as RETRO_DEVICE_POINTER over that
+# *whole* frame (src/citra_libretro/input/mouse_tracker.cpp), clipping
+# internally against its own bottom-screen layout rect. With the default
+# layout option, verified empirically against a real running core: the
+# bottom (touch) screen occupies x in [10%, 90%] and y in [50%, 100%] of the
+# combined frame. Proportions, not fixed pixels, so this keeps working if
+# resolution_factor changes the frame size.
+_BOTTOM_SCREEN_X0, _BOTTOM_SCREEN_X1 = 0.10, 0.90
+_BOTTOM_SCREEN_Y0, _BOTTOM_SCREEN_Y1 = 0.50, 1.00
+
+# RETRO_DEVICE_ID_POINTER_X/Y range over the full frame.
+_POINTER_RANGE = 0x7FFF
+
+
+def crop_bottom_screen_3ds(bgr: np.ndarray) -> np.ndarray:
+    """Crops the 3DS touch screen out of a combined top+bottom BGR frame."""
+    height, width = bgr.shape[:2]
+    x0 = int(width * _BOTTOM_SCREEN_X0)
+    x1 = int(width * _BOTTOM_SCREEN_X1)
+    y0 = int(height * _BOTTOM_SCREEN_Y0)
+    y1 = int(height * _BOTTOM_SCREEN_Y1)
+    return bgr[y0:y1, x0:x1]
+
+
+def touch_to_pointer(fx: float, fy: float) -> tuple[int, int]:
+    """Converts a touch fraction (0..1, 0..1) *within the bottom-screen crop*
+    into the RETRO_DEVICE_POINTER coordinates (-0x7fff..0x7fff) Azahar
+    expects over the full combined frame — the exact inverse of the crop
+    above, followed by mouse_tracker.cpp's own normalization."""
+    frame_fx = _BOTTOM_SCREEN_X0 + max(0.0, min(1.0, fx)) * (_BOTTOM_SCREEN_X1 - _BOTTOM_SCREEN_X0)
+    frame_fy = _BOTTOM_SCREEN_Y0 + max(0.0, min(1.0, fy)) * (_BOTTOM_SCREEN_Y1 - _BOTTOM_SCREEN_Y0)
+    px = round(frame_fx * 2 * _POINTER_RANGE - _POINTER_RANGE)
+    py = round(frame_fy * 2 * _POINTER_RANGE - _POINTER_RANGE)
+    return px, py

@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from actions.emulator_frame import frame_to_bgr
+from actions.emulator_frame import crop_bottom_screen_3ds, frame_to_bgr, touch_to_pointer
 from actions.libretro import PIXEL_0RGB1555, PIXEL_RGB565, PIXEL_XRGB8888
 
 
@@ -64,6 +64,54 @@ class FrameToBgrTests(unittest.TestCase):
         out_known = frame_to_bgr(red565, 1, 1, 2, PIXEL_RGB565)
         out_unknown = frame_to_bgr(red565, 1, 1, 2, pixel_format=99)
         np.testing.assert_array_equal(out_known, out_unknown)
+
+
+class CropBottomScreen3dsTests(unittest.TestCase):
+    def test_crops_the_expected_proportional_rect(self):
+        # A 400x480 combined frame, matching the real Azahar default layout
+        # this proportion was measured against.
+        frame = np.zeros((480, 400, 3), dtype=np.uint8)
+        cropped = crop_bottom_screen_3ds(frame)
+        self.assertEqual(cropped.shape, (240, 320, 3))
+
+    def test_crop_is_a_view_into_the_expected_region(self):
+        frame = np.zeros((480, 400, 3), dtype=np.uint8)
+        frame[240:480, 40:360] = [1, 2, 3]  # paint exactly the bottom screen
+        cropped = crop_bottom_screen_3ds(frame)
+        self.assertTrue((cropped == [1, 2, 3]).all())
+
+
+class TouchToPointerTests(unittest.TestCase):
+    def test_center_of_crop_maps_to_expected_frame_position(self):
+        # The crop's horizontal center coincides with the frame's (10%-90%
+        # is symmetric), but its vertical center sits at 75% down the frame
+        # (50%-100%), not at the frame's own vertical center.
+        px, py = touch_to_pointer(0.5, 0.5)
+        self.assertLess(abs(px), 5)
+        expected_py = round(0.75 * 2 * 0x7FFF - 0x7FFF)
+        self.assertEqual(py, expected_py)
+
+    def test_top_left_of_crop_maps_to_expected_frame_position(self):
+        # Crop's top-left corner sits at 10% across / 50% down the full
+        # frame, not the frame's own top-left corner.
+        px, py = touch_to_pointer(0.0, 0.0)
+        expected_px = round(0.10 * 2 * 0x7FFF - 0x7FFF)
+        expected_py = round(0.50 * 2 * 0x7FFF - 0x7FFF)
+        self.assertEqual(px, expected_px)
+        self.assertEqual(py, expected_py)
+
+    def test_bottom_right_of_crop_maps_to_expected_frame_position(self):
+        px, py = touch_to_pointer(1.0, 1.0)
+        expected_px = round(0.90 * 2 * 0x7FFF - 0x7FFF)
+        expected_py = round(1.00 * 2 * 0x7FFF - 0x7FFF)
+        self.assertEqual(px, expected_px)
+        self.assertEqual(py, expected_py)
+
+    def test_clamps_out_of_range_fractions(self):
+        px, py = touch_to_pointer(-1.0, 2.0)
+        px_ok, py_ok = touch_to_pointer(0.0, 1.0)
+        self.assertEqual(px, px_ok)
+        self.assertEqual(py, py_ok)
 
 
 if __name__ == "__main__":

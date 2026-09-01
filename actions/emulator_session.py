@@ -190,6 +190,11 @@ class EmulatorSession:
         if core is not None:
             core.set_axis(index, axis, value)
 
+    def set_pointer(self, x: int, y: int, pressed: bool) -> None:
+        core = self._core
+        if core is not None:
+            core.set_pointer(x, y, pressed)
+
     def clear_input(self) -> None:
         core = self._core
         if core is not None:

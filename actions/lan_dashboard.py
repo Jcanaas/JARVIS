@@ -1561,6 +1561,10 @@ def _make_app(token: str):
             # Sticks/triggers exist only on some consoles; the phone draws the
             # pad from this instead of showing a PS2 layout for a Game Boy.
             "layout": layout,
+            # Tells the phone whether to request /api/gamepad/screen and show
+            # the touch overlay — only the 3DS has a second, touch-driven
+            # screen to mirror.
+            "has_touch_screen": console_id == "3ds",
             # Bumped by /api/gamepad/announce. The phone re-opens its prompt
             # when this changes, so the desktop can call the pad back after
             # the user dismissed it.
@@ -1598,6 +1602,98 @@ def _make_app(token: str):
                 core.clear_input()
         except Exception as e:
             print(f"[LanDashboard] gamepad input failed: {e}")
+            return jsonify({"error": str(e)}), 500
+        return jsonify({"ok": True})
+
+    def _active_emulator_frame():
+        """(data, width, height, pitch, pixel_format) for whichever emulator
+        _active_emulator() picked, or all-None if there's no frame yet.
+        LibretroCore and EmulatorSession expose the same 5-tuple under
+        different names (current_frame() vs latest_frame()) — see
+        actions/emulator_session.py's latest_frame() docstring."""
+        core, console_id = _active_emulator()
+        if core is None:
+            return (None, 0, 0, 0, 0), console_id
+        getter = getattr(core, "latest_frame", None) or getattr(core, "current_frame", None)
+        if getter is None:
+            return (None, 0, 0, 0, 0), console_id
+        return getter(), console_id
+
+    def _gamepad_screen_frames(quality: int):
+        import time as _time
+
+        import cv2
+
+        from actions.emulator_frame import crop_bottom_screen_3ds, frame_to_bgr
+
+        boundary = b"jarvisframe"
+        while True:
+            (data, w, h, pitch, fmt), console_id = _active_emulator_frame()
+            if console_id != "3ds" or data is None:
+                _time.sleep(0.1)
+                continue
+
+            bgr = frame_to_bgr(data, w, h, pitch, fmt)
+            if bgr is None:
+                _time.sleep(1 / 60)
+                continue
+
+            cropped = crop_bottom_screen_3ds(bgr)
+            ok, buf = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            if not ok:
+                continue
+            jpg = buf.tobytes()
+            yield (
+                b"--" + boundary + b"\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(jpg)).encode("ascii") + b"\r\n\r\n"
+                + jpg + b"\r\n"
+            )
+            _time.sleep(1 / 60)
+
+    @app.route("/api/gamepad/screen")
+    def api_gamepad_screen():
+        """MJPEG stream of just the 3DS bottom (touch) screen, cropped out of
+        the combined framebuffer — for the phone to mirror and touch, tied to
+        /api/gamepad/touch below. 404s for any console but 3DS instead of
+        streaming a screen there's nothing to touch."""
+        if not _check_token():
+            return jsonify({"error": "unauthorized"}), 403
+        _core, console_id = _active_emulator()
+        if console_id != "3ds":
+            return jsonify({"error": "no_touch_screen"}), 404
+        quality = max(10, min(95, request.args.get("quality", default=70, type=int) or 70))
+        resp = Response(
+            _gamepad_screen_frames(quality),
+            mimetype="multipart/x-mixed-replace; boundary=jarvisframe",
+        )
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+
+    @app.route("/api/gamepad/touch", methods=["POST"])
+    def api_gamepad_touch():
+        """Touch on the phone's mirrored bottom-screen image, translated to
+        the RETRO_DEVICE_POINTER coordinates Azahar reads touch through. body:
+        {x, y, pressed} with x/y normalized 0..1 *within the cropped image*
+        the phone is showing — it doesn't need to know the real framebuffer
+        size, only its own image's aspect."""
+        if not _check_token():
+            return jsonify({"error": "unauthorized"}), 403
+        core, console_id = _active_emulator()
+        if core is None or console_id != "3ds":
+            return jsonify({"error": "no_game"}), 409
+
+        data = request.get_json(silent=True) or {}
+        try:
+            from actions.emulator_frame import touch_to_pointer
+            x = float(data.get("x", 0))
+            y = float(data.get("y", 0))
+            pressed = bool(data.get("pressed"))
+            px, py = touch_to_pointer(x, y)
+            core.set_pointer(px, py, pressed)
+        except Exception as e:
+            print(f"[LanDashboard] gamepad touch failed: {e}")
             return jsonify({"error": str(e)}), 500
         return jsonify({"ok": True})
 

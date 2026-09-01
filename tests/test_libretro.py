@@ -64,6 +64,42 @@ class LibretroLoadGameTests(unittest.TestCase):
         self.assertTrue(core._loaded)
 
 
+class LibretroPointerInputTests(unittest.TestCase):
+    def _core(self):
+        core = LibretroCore.__new__(LibretroCore)
+        core._pressed = set()
+        core._axes = {}
+        core._pointer_x = 0
+        core._pointer_y = 0
+        core._pointer_pressed = False
+        return core
+
+    def test_set_pointer_clamps_and_is_read_back_through_input_state(self):
+        from actions.libretro import DEVICE_POINTER, ID_POINTER_PRESSED, ID_POINTER_X, ID_POINTER_Y
+
+        core = self._core()
+        core.set_pointer(100_000, -100_000, True)
+
+        self.assertEqual(core._on_input_state(0, DEVICE_POINTER, 0, ID_POINTER_X), 0x7FFF)
+        self.assertEqual(core._on_input_state(0, DEVICE_POINTER, 0, ID_POINTER_Y), -0x7FFF)
+        self.assertEqual(core._on_input_state(0, DEVICE_POINTER, 0, ID_POINTER_PRESSED), 1)
+
+    def test_pointer_released_reports_zero(self):
+        from actions.libretro import DEVICE_POINTER, ID_POINTER_PRESSED
+
+        core = self._core()
+        core.set_pointer(10, 10, False)
+        self.assertEqual(core._on_input_state(0, DEVICE_POINTER, 0, ID_POINTER_PRESSED), 0)
+
+    def test_clear_input_resets_pointer(self):
+        core = self._core()
+        core.set_pointer(500, -500, True)
+        core.clear_input()
+        self.assertEqual(core._pointer_x, 0)
+        self.assertEqual(core._pointer_y, 0)
+        self.assertFalse(core._pointer_pressed)
+
+
 class LibretroEnvironmentTests(unittest.TestCase):
     def test_log_interface_returns_a_callable_function_pointer(self):
         class LogInterface(ct.Structure):

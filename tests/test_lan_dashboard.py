@@ -752,6 +752,159 @@ class LanDashboardTests(unittest.TestCase):
         self.assertEqual(body["console"], "snes")
         stale_session.is_running.assert_not_called()
 
+    # -- 3DS touch screen mirroring (Fase D) --------------------------------
+
+    def test_gamepad_status_reports_touch_screen_only_for_3ds(self):
+        import types as _types
+        from actions import lan_dashboard
+        from ui.widgets import retro
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        screen = _types.SimpleNamespace(core=MagicMock(), _console_id="3ds")
+        with patch.object(retro, "active_screen", return_value=screen):
+            body = client.get(f"/api/gamepad/status?token={token}").get_json()
+        self.assertTrue(body["has_touch_screen"])
+
+        screen = _types.SimpleNamespace(core=MagicMock(), _console_id="ps2")
+        with patch.object(retro, "active_screen", return_value=screen):
+            body = client.get(f"/api/gamepad/status?token={token}").get_json()
+        self.assertFalse(body["has_touch_screen"])
+
+    def test_gamepad_screen_404s_for_a_console_without_a_touch_screen(self):
+        import types as _types
+        from actions import lan_dashboard
+        from ui.widgets import retro
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        screen = _types.SimpleNamespace(core=MagicMock(), _console_id="ps2")
+        with patch.object(retro, "active_screen", return_value=screen):
+            r = client.get(f"/api/gamepad/screen?token={token}")
+        self.assertEqual(r.status_code, 404)
+
+    def test_gamepad_screen_404s_with_no_game_running(self):
+        from actions import lan_dashboard
+        from ui.widgets import retro
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=None):
+            r = client.get(f"/api/gamepad/screen?token={token}")
+        self.assertEqual(r.status_code, 404)
+
+    def test_gamepad_screen_rejects_a_bad_token(self):
+        from actions import lan_dashboard
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        r = client.get("/api/gamepad/screen?token=wrong")
+        self.assertEqual(r.status_code, 403)
+
+    def test_gamepad_touch_translates_coordinates_and_forwards_to_the_core(self):
+        import types as _types
+        from actions import lan_dashboard
+        from actions.emulator_frame import touch_to_pointer
+        from ui.widgets import retro
+
+        core = MagicMock()
+        screen = _types.SimpleNamespace(core=core, _console_id="3ds")
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=screen):
+            r = client.post(
+                f"/api/gamepad/touch?token={token}",
+                json={"x": 0.25, "y": 0.75, "pressed": True},
+            )
+
+        self.assertEqual(r.status_code, 200)
+        expected_px, expected_py = touch_to_pointer(0.25, 0.75)
+        core.set_pointer.assert_called_once_with(expected_px, expected_py, True)
+
+    def test_gamepad_touch_without_a_game_is_a_conflict(self):
+        from actions import lan_dashboard
+        from ui.widgets import retro
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=None):
+            r = client.post(
+                f"/api/gamepad/touch?token={token}",
+                json={"x": 0.5, "y": 0.5, "pressed": False},
+            )
+        self.assertEqual(r.status_code, 409)
+
+    def test_gamepad_touch_refuses_a_non_3ds_console(self):
+        """A stray touch event must not be reinterpreted as pointer input on
+        a console that has no pointer device — nothing would read it, but
+        set_pointer() shouldn't be called with garbage either."""
+        import types as _types
+        from actions import lan_dashboard
+        from ui.widgets import retro
+
+        core = MagicMock()
+        screen = _types.SimpleNamespace(core=core, _console_id="ps2")
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=screen):
+            r = client.post(
+                f"/api/gamepad/touch?token={token}",
+                json={"x": 0.5, "y": 0.5, "pressed": True},
+            )
+
+        self.assertEqual(r.status_code, 409)
+        core.set_pointer.assert_not_called()
+
+    def test_gamepad_touch_rejects_a_bad_token(self):
+        from actions import lan_dashboard
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        r = client.post("/api/gamepad/touch?token=wrong", json={})
+        self.assertEqual(r.status_code, 403)
+
+    def test_gamepad_touch_falls_back_to_the_headless_session(self):
+        from actions import lan_dashboard
+        from actions.emulator_frame import touch_to_pointer
+        from ui.widgets import retro
+
+        session = MagicMock()
+        session.is_running.return_value = True
+        session.console_id = "3ds"
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=None), \
+                patch("actions.emulator_session.get_session", return_value=session):
+            r = client.post(
+                f"/api/gamepad/touch?token={token}",
+                json={"x": 0.0, "y": 1.0, "pressed": False},
+            )
+
+        self.assertEqual(r.status_code, 200)
+        expected_px, expected_py = touch_to_pointer(0.0, 1.0)
+        session.set_pointer.assert_called_once_with(expected_px, expected_py, False)
+
     def test_voice_transcribes_and_returns_the_text(self):
         import io
         from actions import lan_dashboard, file_processor

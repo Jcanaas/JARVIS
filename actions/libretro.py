@@ -135,12 +135,18 @@ _HW_FBO_SIZE = 2048
 
 DEVICE_JOYPAD = 1
 DEVICE_ANALOG = 5
+DEVICE_POINTER = 6
 JOYPAD_MASK = 256
 ANALOG_INDEX_LEFT = 0
 ANALOG_INDEX_RIGHT = 1
 ANALOG_INDEX_BUTTON = 2
 ANALOG_ID_X = 0
 ANALOG_ID_Y = 1
+
+# RETRO_DEVICE_ID_POINTER_*
+ID_POINTER_X = 0
+ID_POINTER_Y = 1
+ID_POINTER_PRESSED = 2
 
 # RETRO_DEVICE_ID_JOYPAD_*
 JOYPAD = {
@@ -445,6 +451,9 @@ class LibretroCore:
         self._audio: bytearray = bytearray()
         self._pressed: set[int] = set()
         self._axes: dict[tuple[int, int], int] = {}
+        self._pointer_x = 0
+        self._pointer_y = 0
+        self._pointer_pressed = False
         self._rotation = 0
         self._loaded = False
 
@@ -998,6 +1007,14 @@ class LibretroCore:
             return 1 if button in self._pressed else 0
         if device == DEVICE_ANALOG:
             return self._axes.get((index, button), 0)
+        if device == DEVICE_POINTER:
+            if button == ID_POINTER_X:
+                return self._pointer_x
+            if button == ID_POINTER_Y:
+                return self._pointer_y
+            if button == ID_POINTER_PRESSED:
+                return 1 if self._pointer_pressed else 0
+            return 0
         return 0
 
     # ------------------------------------------------------------------
@@ -1276,9 +1293,18 @@ class LibretroCore:
         else:
             self._axes.pop(key, None)
 
+    def set_pointer(self, x: int, y: int, pressed: bool) -> None:
+        """Set the libretro pointer device (-0x7fff..0x7fff, full framebuffer)."""
+        self._pointer_x = max(-0x7fff, min(0x7fff, int(x)))
+        self._pointer_y = max(-0x7fff, min(0x7fff, int(y)))
+        self._pointer_pressed = bool(pressed)
+
     def clear_input(self) -> None:
         self._pressed.clear()
         self._axes.clear()
+        self._pointer_x = 0
+        self._pointer_y = 0
+        self._pointer_pressed = False
 
     # ------------------------------------------------------------------
     # Save states + battery saves
