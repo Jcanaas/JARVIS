@@ -11,6 +11,35 @@ import { api, gamepadScreenUrl } from "../api";
 const SCREEN_ASPECT = 4 / 3;
 const POLL_MS = 100; // ~10fps target — plenty for a screen only tapped, not watched
 
+const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/** Hand-rolled base64 — deliberately not Blob/FileReader.readAsDataURL
+ * (tried, and threw a runtime error on-device asking to add a package:
+ * RN's Blob support isn't uniformly there without one). fetch()'s
+ * arrayBuffer() has none of that baggage, and encoding it ourselves needs
+ * nothing beyond the JS that already ships. */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunks: string[] = [];
+  let i = 0;
+  for (; i + 2 < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    chunks.push(
+      BASE64_CHARS[(n >> 18) & 63], BASE64_CHARS[(n >> 12) & 63],
+      BASE64_CHARS[(n >> 6) & 63], BASE64_CHARS[n & 63],
+    );
+  }
+  const remaining = bytes.length - i;
+  if (remaining === 1) {
+    const n = bytes[i] << 16;
+    chunks.push(BASE64_CHARS[(n >> 18) & 63], BASE64_CHARS[(n >> 12) & 63], "==");
+  } else if (remaining === 2) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8);
+    chunks.push(BASE64_CHARS[(n >> 18) & 63], BASE64_CHARS[(n >> 12) & 63], BASE64_CHARS[(n >> 6) & 63], "=");
+  }
+  return chunks.join("");
+}
+
 /**
  * Mirrors the 3DS bottom (touch) screen on the phone and forwards taps/
  * drags on it as real touch input to the emulator core.
@@ -22,17 +51,20 @@ const POLL_MS = 100; // ~10fps target — plenty for a screen only tapped, not w
  * reliable substitute at the ~10fps this needs.
  *
  * Fetches the bytes itself and swaps in a data: URI, rather than handing
- * <Image> a network URL each tick (tried first: setInterval overwriting a
- * hidden layer's source.uri — flickered; tried second: Image.prefetch()
- * before swapping a single <Image>'s uri — still flickered, because
- * prefetch's cache isn't guaranteed to be the same cache <Image> reads from
- * across RN/Fresco versions, so the "prefetched" swap was still doing a
- * real network fetch behind <Image> either way). A data: URI has no network
- * layer left to race against — by the time setUri runs, the full JPEG is
- * already sitting in JS memory, so there's nothing left to load underneath
- * whatever is on screen. The poll loop is a self-paced setTimeout chain
- * (not setInterval), so a slow LAN response can't pile up requests faster
- * than they resolve.
+ * <Image> a network URL each tick — three things were tried here: a plain
+ * setInterval overwriting a hidden layer's source.uri (flickered);
+ * Image.prefetch() before swapping a single <Image>'s uri (still
+ * flickered — prefetch's cache isn't guaranteed to be the same cache
+ * <Image> reads from); fetch().blob() + FileReader.readAsDataURL (threw a
+ * runtime error on-device — RN's Blob support needs an extra package this
+ * project doesn't have). fetch().arrayBuffer() needs none of that: it's
+ * the same Fetch API primitive already used everywhere else in this app,
+ * and encoding it to base64 ourselves (below) has no external dependency
+ * at all. By the time setUri runs the full JPEG is already sitting in JS
+ * memory as a string, so there's nothing left to load underneath whatever
+ * is on screen. The poll loop is a self-paced setTimeout chain (not
+ * setInterval), so a slow LAN response can't pile up requests faster than
+ * they resolve.
  */
 export default function TouchScreen3DS({ active = true }: { active?: boolean }) {
   const [uri, setUri] = useState<string | null>(null);
@@ -48,13 +80,8 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
       try {
         const res = await fetch(gamepadScreenUrl(Date.now()));
         if (res.ok) {
-          const blob = await res.blob();
-          const dataUri = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onerror = () => reject(reader.error || new Error("read failed"));
-            reader.onload = () => resolve(String(reader.result));
-            reader.readAsDataURL(blob);
-          });
+          const buffer = await res.arrayBuffer();
+          const dataUri = `data:image/jpeg;base64,${arrayBufferToBase64(buffer)}`;
           if (!cancelled) setUri(dataUri);
         }
       } catch {
