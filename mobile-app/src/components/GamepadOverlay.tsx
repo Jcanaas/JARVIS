@@ -280,35 +280,31 @@ function GamepadPad({
   });
   const lastAxisSend = useRef<Record<StickSide, number>>({ left: 0, right: 0 });
 
-  // The pad's own on-screen position, per measureInWindow() — needed again
-  // (a previous version of this file removed it, reasoning touch.pageX/Y
-  // and a button's own measureInWindow() were already in the same
-  // coordinate space so no adjustment was needed; true while this screen
-  // was still a <Modal>, which got its own separate native Window with
-  // pageX/Y and measureInWindow both relative to it. Now that it's a plain
-  // View in the main window (see styles.overlayFull's comment), pageX/Y
-  // and measureInWindow have drifted apart by exactly this view's own
-  // window position — confirmed with real numbers from a live device:
-  // touch reported (656,201), btn:a measured at (688,233) — a (32,32)
-  // difference matching rootRef's own measureInWindow() almost exactly.
+  // The pad's own root View. Every button/stick measures its rect relative
+  // to *this* (via measureLayout, see AnalogStick's rootRef doc) instead of
+  // the native window (measureInWindow) — and touches are read via
+  // locationX/Y, which React Native already reports relative to the same
+  // responder view. Both sides of the hit test are now relative to the same
+  // ancestor, so there is nothing left to reconcile between them: the
+  // previous approach (pageX/Y vs. measureInWindow, subtracting this view's
+  // own window position by hand) kept drifting every time the surrounding
+  // rendering changed — Modal's own Window, then a plain View in the main
+  // window, then hidden status/nav bars each shifted that subtraction
+  // differently. Same-ancestor-relative measurement can't drift against
+  // itself.
   const rootRef = useRef<View | null>(null);
-  const rootOrigin = useRef<Offset>({ x: 0, y: 0 });
 
-  // Forces every PadButton/AnalogStick (and the root pad view itself, for
-  // rootOrigin above) to re-run measureInWindow() periodically — see
-  // PadButton's remeasureTick doc for why onLayout alone isn't enough
-  // here: the 3DS touch-screen mirror sitting to the pad's left (a sibling
-  // with its own async-loaded content) can shift every control's
-  // *absolute* window position after their first layout pass without ever
-  // changing their layout frame *relative to their own parent*, which is
-  // all onLayout actually watches — leaving stale coordinates behind,
-  // silently, forever, if nothing re-measures them afterward.
+  // Forces every PadButton/AnalogStick to re-run measureLayout()
+  // periodically — see PadButton's remeasureTick doc for why onLayout
+  // alone isn't enough here: the 3DS touch-screen mirror sitting to the
+  // pad's left (a sibling with its own async-loaded content) can shift a
+  // control's position after their first layout pass without ever changing
+  // their layout frame *relative to their own parent*, which is all
+  // onLayout actually watches — leaving stale coordinates behind, silently,
+  // forever, if nothing re-measures them afterward.
   const [remeasureTick, setRemeasureTick] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => {
-      setRemeasureTick((v) => v + 1);
-      rootRef.current?.measureInWindow((x, y) => { rootOrigin.current = { x, y }; });
-    }, 400);
+    const t = setInterval(() => setRemeasureTick((v) => v + 1), 400);
     return () => clearInterval(t);
   }, []);
 
@@ -350,30 +346,13 @@ function GamepadPad({
     rects.current[id] = rect;
   }, []);
 
-  /** Control under a touch. touch.pageX/pageY and a button's own
-   *  measureInWindow() are NOT reliably the same coordinate space — which
-   *  one turned out to depend on how this screen itself is rendered, not
-   *  just on the layout inside it:
-   *  - As a <Modal> (original version): pageX/Y and measureInWindow were
-   *    both relative to the Modal's own separate native Window, so no
-   *    adjustment was needed — subtracting rootOrigin from the rect only
-   *    was *wrong* there and broke every hit test once the 3DS touch-
-   *    screen mirror pushed the pad off the window's left edge.
-   *  - As a plain View in the main window (current version, since Modal
-   *    couldn't be made to cover the whole screen on Android — see
-   *    styles.overlayFull): pageX/Y and measureInWindow drifted apart
-   *    again, this time by rootOrigin itself — confirmed with real numbers
-   *    from a live device (touch (656,201) vs. btn:a's rect at (688,233),
-   *    a (32,32) gap matching the pad's own measureInWindow position).
-   *  Subtracting rootOrigin from the rect side handles both — it was a
-   *  literal no-op in the Modal case (origin ~{0,0}) and is the correction
-   *  this one actually needs. */
+  /** Control under a touch. Both the touch position (locationX/Y, below)
+   *  and every rect (measureLayout(rootRef, ...), see AnalogStick's rootRef
+   *  doc) are relative to the same ancestor — the pad's own root View — so
+   *  no reconciliation between coordinate spaces is needed here. */
   const hitTest = useCallback((px: number, py: number): string | null => {
-    const { x: ox, y: oy } = rootOrigin.current;
     for (const [id, r] of Object.entries(rects.current)) {
-      const x = r.x - ox;
-      const y = r.y - oy;
-      if (px >= x && px <= x + r.w && py >= y && py <= y + r.h) return id;
+      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return id;
     }
     return null;
   }, []);
@@ -381,7 +360,7 @@ function GamepadPad({
   const handleTouches = useCallback((evt: any, ended: boolean = false) => {
     const touches: any[] = evt?.nativeEvent?.touches || [];
     const active = new Map<number, Offset>();
-    for (const t of touches) active.set(t.identifier, { x: t.pageX, y: t.pageY });
+    for (const t of touches) active.set(t.identifier, { x: t.locationX, y: t.locationY });
     // Android keeps the lifted pointer in `touches` on an up event while iOS
     // drops it. Take it out ourselves so a released button can't stay stuck.
     if (ended) {
@@ -426,9 +405,8 @@ function GamepadPad({
         const side = control.slice(6) as StickSide;
         const r = rects.current[control];
         if (!r) continue;
-        // Same rootOrigin correction as hitTest above — see its comment.
-        let dx = pos.x - (r.x - rootOrigin.current.x + r.w / 2);
-        let dy = pos.y - (r.y - rootOrigin.current.y + r.h / 2);
+        let dx = pos.x - (r.x + r.w / 2);
+        let dy = pos.y - (r.y + r.h / 2);
         const dist = Math.hypot(dx, dy);
         if (dist > travel) { dx *= travel / dist; dy *= travel / dist; }
         nextOffsets[side] = { x: dx, y: dy };
@@ -493,7 +471,6 @@ function GamepadPad({
       <View style={styles.screen}>
         <View
           ref={rootRef}
-          onLayout={() => rootRef.current?.measureInWindow((x, y) => { rootOrigin.current = { x, y }; })}
           style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
           // One responder for the whole pad: this is what makes holding a
           // direction while tapping a button possible at all. Edit mode
@@ -545,34 +522,34 @@ function GamepadPad({
           {(layout.shoulders || layout.triggers) && (
             <View style={styles.shoulderRow}>
               <Draggable id="group:shoulder-l" editMode={editMode} offset={groupOffset("group:shoulder-l")} scale={groupScale("group:shoulder-l")} zIndex={groupZIndex("group:shoulder-l")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.shoulderGroup}>
-                {layout.triggers && <PadButton id="btn:l2" label="L2" down={!!down.l2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} />}
-                {layout.shoulders && <PadButton id="btn:l" label="L1" down={!!down.l} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} />}
+                {layout.triggers && <PadButton id="btn:l2" label="L2" down={!!down.l2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />}
+                {layout.shoulders && <PadButton id="btn:l" label="L1" down={!!down.l} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />}
               </Draggable>
               <Draggable id="group:shoulder-r" editMode={editMode} offset={groupOffset("group:shoulder-r")} scale={groupScale("group:shoulder-r")} zIndex={groupZIndex("group:shoulder-r")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.shoulderGroup}>
-                {layout.shoulders && <PadButton id="btn:r" label="R1" down={!!down.r} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} />}
-                {layout.triggers && <PadButton id="btn:r2" label="R2" down={!!down.r2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} />}
+                {layout.shoulders && <PadButton id="btn:r" label="R1" down={!!down.r} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />}
+                {layout.triggers && <PadButton id="btn:r2" label="R2" down={!!down.r2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />}
               </Draggable>
             </View>
           )}
 
           <View style={styles.mainRow}>
             <Draggable id="group:dpad" editMode={editMode} offset={groupOffset("group:dpad")} scale={groupScale("group:dpad")} zIndex={groupZIndex("group:dpad")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.dpad}>
-              <PadButton id="btn:up" label="▲" down={!!down.up} onMeasure={onMeasure} style={[styles.dBtn, styles.dUp]} disabled={editMode} remeasureTick={remeasureTick} />
-              <PadButton id="btn:left" label="◀" down={!!down.left} onMeasure={onMeasure} style={[styles.dBtn, styles.dLeft]} disabled={editMode} remeasureTick={remeasureTick} />
-              <PadButton id="btn:right" label="▶" down={!!down.right} onMeasure={onMeasure} style={[styles.dBtn, styles.dRight]} disabled={editMode} remeasureTick={remeasureTick} />
-              <PadButton id="btn:down" label="▼" down={!!down.down} onMeasure={onMeasure} style={[styles.dBtn, styles.dDown]} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:up" label="▲" down={!!down.up} onMeasure={onMeasure} style={[styles.dBtn, styles.dUp]} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
+              <PadButton id="btn:left" label="◀" down={!!down.left} onMeasure={onMeasure} style={[styles.dBtn, styles.dLeft]} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
+              <PadButton id="btn:right" label="▶" down={!!down.right} onMeasure={onMeasure} style={[styles.dBtn, styles.dRight]} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
+              <PadButton id="btn:down" label="▼" down={!!down.down} onMeasure={onMeasure} style={[styles.dBtn, styles.dDown]} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
             </Draggable>
 
             <Draggable id="group:center" editMode={editMode} offset={groupOffset("group:center")} scale={groupScale("group:center")} zIndex={groupZIndex("group:center")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.centerCol}>
-              <PadButton id="btn:select" label="SELECT" down={!!down.select} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} />
-              <PadButton id="btn:start" label="START" down={!!down.start} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:select" label="SELECT" down={!!down.select} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
+              <PadButton id="btn:start" label="START" down={!!down.start} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
             </Draggable>
 
             <Draggable id="group:face" editMode={editMode} offset={groupOffset("group:face")} scale={groupScale("group:face")} zIndex={groupZIndex("group:face")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.face}>
-              <PadButton id="btn:x" label={face.up} down={!!down.x} onMeasure={onMeasure} style={[styles.fBtn, styles.fUp]} disabled={editMode} remeasureTick={remeasureTick} />
-              <PadButton id="btn:y" label={face.left} down={!!down.y} onMeasure={onMeasure} style={[styles.fBtn, styles.fLeft]} disabled={editMode} remeasureTick={remeasureTick} />
-              <PadButton id="btn:a" label={face.right} down={!!down.a} onMeasure={onMeasure} style={[styles.fBtn, styles.fRight]} disabled={editMode} remeasureTick={remeasureTick} />
-              <PadButton id="btn:b" label={face.down} down={!!down.b} onMeasure={onMeasure} style={[styles.fBtn, styles.fDown]} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:x" label={face.up} down={!!down.x} onMeasure={onMeasure} style={[styles.fBtn, styles.fUp]} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
+              <PadButton id="btn:y" label={face.left} down={!!down.y} onMeasure={onMeasure} style={[styles.fBtn, styles.fLeft]} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
+              <PadButton id="btn:a" label={face.right} down={!!down.a} onMeasure={onMeasure} style={[styles.fBtn, styles.fRight]} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
+              <PadButton id="btn:b" label={face.down} down={!!down.b} onMeasure={onMeasure} style={[styles.fBtn, styles.fDown]} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
             </Draggable>
           </View>
 
@@ -584,6 +561,7 @@ function GamepadPad({
                 offset={offsets.left}
                 onMeasure={onMeasure}
                 remeasureTick={remeasureTick}
+                rootRef={rootRef}
               />
               {layout.sticks > 1 && (
                 <AnalogStick
@@ -592,12 +570,13 @@ function GamepadPad({
                   offset={offsets.right}
                   onMeasure={onMeasure}
                   remeasureTick={remeasureTick}
+                  rootRef={rootRef}
                 />
               )}
               {layout.stick_buttons && (
                 <View style={styles.stickButtons}>
-                  <PadButton id="btn:l3" label="L3" down={!!down.l3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} />
-                  <PadButton id="btn:r3" label="R3" down={!!down.r3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} />
+                  <PadButton id="btn:l3" label="L3" down={!!down.l3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
+                  <PadButton id="btn:r3" label="R3" down={!!down.r3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} rootRef={rootRef} />
                 </View>
               )}
             </Draggable>
@@ -749,7 +728,7 @@ function Draggable({
  * decide which of them the live touches are sitting on.
  */
 function PadButton({
-  id, label, down, style, textStyle, onMeasure, disabled, remeasureTick,
+  id, label, down, style, textStyle, onMeasure, disabled, remeasureTick, rootRef,
 }: {
   id: string;
   label: string;
@@ -761,17 +740,26 @@ function PadButton({
    *  (see GamepadPad), so this button won't receive input either way; this
    *  just dims it to make that visually obvious. */
   disabled?: boolean;
-  /** Bumped periodically by the parent to force a fresh measureInWindow()
+  /** Bumped periodically by the parent to force a fresh measureLayout()
    * even when onLayout hasn't refired — see AnalogStick's copy of this
    * same prop for the full explanation (a sibling appearing/resizing shifts
-   * a control's *absolute* window position without changing its layout
-   * frame *relative to its own parent*, the only thing onLayout watches). */
+   * a control's position without changing its layout frame *relative to
+   * its own parent*, the only thing onLayout watches). */
   remeasureTick?: number;
+  /** The pad's own root View — see AnalogStick's copy of this same prop
+   * for why measuring relative to it (not the native window) is what
+   * actually fixed touch/button-position agreement, after measureInWindow
+   * kept drifting against pageX/Y every time this screen's own rendering
+   * context changed (a <Modal>'s separate Window, then a plain View in
+   * the main window, then hiding the status/nav bars — three different
+   * "native window" answers for what should be the same screen). */
+  rootRef: React.RefObject<View | null>;
 }) {
   const ref = useRef<View | null>(null);
   const measure = useCallback(() => {
-    ref.current?.measureInWindow((x, y, w, h) => onMeasure(id, { x, y, w, h }));
-  }, [id, onMeasure]);
+    if (!rootRef.current) return;
+    ref.current?.measureLayout(rootRef.current, (x, y, w, h) => onMeasure(id, { x, y, w, h }), () => {});
+  }, [id, onMeasure, rootRef]);
 
   useEffect(() => { measure(); }, [remeasureTick, measure]);
 

@@ -34,6 +34,7 @@ export default function AnalogStick({
   pressed,
   onMeasure,
   remeasureTick,
+  rootRef,
 }: {
   /** Control id the pad uses to address this stick, e.g. "stick:left". */
   id: string;
@@ -43,22 +44,32 @@ export default function AnalogStick({
   /** L3/R3 highlight — the pad decides, this only renders it. */
   pressed?: boolean;
   onMeasure: (id: string, rect: Rect) => void;
-  /** Bumped periodically by the parent to force a fresh measureInWindow()
+  /** Bumped periodically by the parent to force a fresh measureLayout()
    * even when onLayout hasn't refired — see its own comment in
    * GamepadOverlay.tsx for why that matters (a sibling appearing/resizing
-   * shifts this control's *absolute* window position without changing its
-   * layout frame *relative to its own parent*, which is the only thing
-   * onLayout watches; a stale absolute measurement from before that shift
-   * would otherwise never get corrected). */
+   * shifts this control's position without changing its layout frame
+   * *relative to its own parent*, which is the only thing onLayout
+   * watches; a stale measurement from before that shift would otherwise
+   * never get corrected). */
   remeasureTick?: number;
+  /** The pad's own root View — every control measures relative to *this*,
+   * not the native window (measureInWindow), so its position agrees with
+   * touch events (also reported relative to the same root, via
+   * locationX/Y) regardless of what's rendering this screen (a <Modal>'s
+   * own separate Window, a plain View in the main window, differing
+   * status-bar/insets — measureInWindow drifted every time one of those
+   * changed; a same-ancestor-relative measurement can't drift against
+   * itself). */
+  rootRef: React.RefObject<View | null>;
 }) {
   const radius = size / 2;
   const knob = size * 0.42;
   const baseRef = useRef<View | null>(null);
 
   const measure = useCallback(() => {
-    baseRef.current?.measureInWindow((x, y, w, h) => onMeasure(id, { x, y, w, h }));
-  }, [id, onMeasure]);
+    if (!rootRef.current) return;
+    baseRef.current?.measureLayout(rootRef.current, (x, y, w, h) => onMeasure(id, { x, y, w, h }), () => {});
+  }, [id, onMeasure, rootRef]);
 
   useEffect(() => { measure(); }, [remeasureTick, measure]);
 
