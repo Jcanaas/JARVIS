@@ -10,13 +10,6 @@ import { api, gamepadScreenUrl } from "../api";
  * fraction across the rendered image is the same fraction across the real
  * cropped screen with no extra math. */
 const SCREEN_ASPECT = 4 / 3;
-// The 3DS's own bottom screen updates at up to 30fps like the top one, and
-// a real 3DS session measured server round-trips at ~5ms (checked directly
-// against actions/lan_dashboard.py's /api/gamepad/screen, 40 requests back
-// to back) — plenty of headroom to match that instead of visibly lagging
-// behind the top screen shown elsewhere (the desktop web panel, or a
-// second phone glance at the game).
-const POLL_MS = 33; // ~30fps
 
 /**
  * Mirrors the 3DS bottom (touch) screen on the phone and forwards taps/
@@ -62,18 +55,26 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
   const [status, setStatus] = useState("loading…");
   const loadedOnce = useRef(false);
 
-  // Self-paced, not a fixed setInterval: a plain interval fires a *new*
-  // request every POLL_MS regardless of whether the previous one has
-  // finished. That's fine at the ~5ms round-trips measured against an idle
-  // core, but during real gameplay the core's own render thread holds the
-  // GIL/frame lock far more, and a slower response time than the 33ms
-  // interval means requests pile up faster than they drain — a growing
-  // backlog that (per user report) never resolves, image or error, because
-  // nothing is actually stuck, there's just an ever-growing queue in front
-  // of every request. Only ever having one in flight — the next one fires
-  // POLL_MS after the *previous one finishes*, from onLoad/onError below —
-  // can't pile up, and the mirror rate quietly adapts to however fast the
-  // backend can actually go instead of demanding a fixed rate.
+  // Self-paced, not a fixed setInterval: firing a *new* request every fixed
+  // N ms regardless of whether the last one finished let a slow response
+  // pile up requests faster than they drain — a growing backlog that (per
+  // an earlier report) never resolves, image or error, because nothing is
+  // individually stuck, there's just an ever-growing queue in front of
+  // every request. Only ever having one in flight — the next one fires
+  // right after the *previous one finishes*, from onLoad/onError below —
+  // can't pile up.
+  //
+  // No artificial delay between them either: real timing measurements
+  // (actions/lan_dashboard.py's api_gamepad_screen() prints its own
+  // frame/crop/resize/encode breakdown, compared against this component's
+  // own round-trip readout in the debug overlay) confirmed the backend
+  // itself responds in ~2-3ms even during real gameplay — the ~85-100ms
+  // per-cycle a real device measured was mostly network/transport time
+  // *plus* a flat 33ms of dead time this component used to insert after
+  // every load, a leftover from when this used a fixed setInterval and no
+  // longer serves any purpose now that only one request is ever in flight.
+  // Firing immediately lets the mirror run at whatever rate the network can
+  // actually sustain instead of adding a self-imposed ceiling on top of it.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // TEMPORARY — paired with the round-trip time shown in the debug overlay
   // below and actions/lan_dashboard.py's own server-side timing breakdown
@@ -152,11 +153,11 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
         onLoad={() => {
           loadedOnce.current = true;
           setStatus(`ok ${Date.now() - requestStartedAt.current}ms`);
-          scheduleNext(POLL_MS);
+          scheduleNext(0);
         }}
         onError={(e: any) => {
           setStatus(`error ${Date.now() - requestStartedAt.current}ms: ${e?.error || "unknown"}`);
-          scheduleNext(POLL_MS);
+          scheduleNext(0);
         }}
       />
       {/* TEMPORARY — see the status state's own comment above. */}
