@@ -68,6 +68,26 @@ class InputProfileTests(unittest.TestCase):
             "OpenGL",
         )
 
+    def test_ps2_upscale_multiplier_is_2x_not_native(self):
+        # Bumped from the original "1x Native (PS2)" once the desktop/mobile
+        # UIs started stretching the native frame to fill real screen space
+        # instead of showing it near-native-sized — measured directly:
+        # 60.0fps sustained through BIOS/menus/30s of real gameplay at 2x,
+        # not just an assumption that there was headroom.
+        self.assertEqual(
+            emulator_runtime.CORES["ps2"].options["pcsx2_upscale_multiplier"],
+            "2x Native (~720p)",
+        )
+
+    def test_3ds_resolution_factor_is_3_not_the_cores_native_default(self):
+        # The core's own default is "1" (never overridden before) — measured
+        # directly: 3 sustains 59.3fps, 4 drops to 50.4fps (3DS targets
+        # 60fps), so 3 is the highest factor still full-speed here.
+        self.assertEqual(
+            emulator_runtime.CORES["3ds"].options["citra_resolution_factor"],
+            "3",
+        )
+
     def test_3ds_uses_opengl_not_vulkan(self):
         # Vulkan+RADV crashes immediately on AMD GPUs on Arch Linux — exactly
         # this machine's iGPU (see NOTE_webui_emulators_plan.md's Fase 6).

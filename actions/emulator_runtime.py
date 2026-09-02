@@ -164,7 +164,17 @@ CORES: dict[str, CoreSpec] = {
             # level select over "La fuga de Marty") — see the plan's Fase 5
             # results for how that investigation concluded.
             "pcsx2_renderer": "OpenGL",
-            "pcsx2_upscale_multiplier": "1x Native (PS2)",
+            # 1x Native was the original, deliberately conservative choice
+            # (no headroom evidence to justify more, per Fase 5's own
+            # measurement: 57.2fps average over 250s of real gameplay). Once
+            # the desktop/mobile UIs started actually stretching the native
+            # frame to fill real screen space (rather than showing it near
+            # native size), that low a resolution read as blocky/low-
+            # bitrate rather than just small. Bumped one step and measured
+            # again the same way — 60.0fps sustained through BIOS, menus,
+            # and 30s of real walking gameplay (Madagascar) at 2x — solid
+            # headroom, not just idle-menu numbers.
+            "pcsx2_upscale_multiplier": "2x Native (~720p)",
             # A real DualShock boots in digital mode and only enables its
             # sticks once you press the pad's own ANALOG button — which this
             # frontend has no way to send, so the sticks looked dead no matter
@@ -195,6 +205,14 @@ CORES: dict[str, CoreSpec] = {
             "citra_graphics_api": "OpenGL",
             "citra_use_hw_shader": "enabled",
             "citra_layout_option": "default",
+            # Never set before, so the core defaulted to its own "1" (native
+            # ~400x240 per screen) — extremely low next to a real PC/phone
+            # display once the frame is actually stretched to fill it
+            # (rather than shown near its tiny native size). Measured
+            # directly: 3 sustains 59.3fps, 4 drops to 50.4fps (3DS targets
+            # 60fps) — 3 is the highest factor that's still full-speed on
+            # this machine, not a guess.
+            "citra_resolution_factor": "3",
         },
     ),
 }

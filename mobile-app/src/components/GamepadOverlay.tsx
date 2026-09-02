@@ -133,6 +133,8 @@ export default function GamepadOverlay() {
       transparent
       animationType="fade"
       onRequestClose={() => { dismissedRef.current = true; setPrompt(false); }}
+      statusBarTranslucent
+      navigationBarTranslucent
     >
       <View style={styles.backdrop}>
         <View style={styles.dialog}>
@@ -421,7 +423,20 @@ function GamepadPad({
   const groupZIndex = (id: string): number => zOrder[id] || 0;
 
   return (
-    <Modal visible transparent={false} animationType="fade" onRequestClose={onClose} supportedOrientations={["landscape"]}>
+    <Modal
+      visible
+      transparent={false}
+      animationType="fade"
+      onRequestClose={onClose}
+      supportedOrientations={["landscape"]}
+      // Expo SDK 54+ makes edge-to-edge mandatory on Android (targeting
+      // Android 16) — without these, RN's core Modal doesn't draw behind
+      // the status/navigation bars, leaving a real gap so the pad never
+      // actually covers the whole physical screen. Not needed on iOS
+      // (harmless there either way).
+      statusBarTranslucent
+      navigationBarTranslucent
+    >
       <View style={styles.screen}>
         <View
           style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
