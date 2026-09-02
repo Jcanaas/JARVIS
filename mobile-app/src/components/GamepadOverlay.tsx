@@ -311,17 +311,30 @@ function GamepadPad({
 
   // The pad's own root View. Every button/stick measures its rect relative
   // to *this* (via measureLayout, see AnalogStick's rootRef doc) instead of
-  // the native window (measureInWindow) — and touches are read via
-  // locationX/Y, which React Native already reports relative to the same
-  // responder view. Both sides of the hit test are now relative to the same
-  // ancestor, so there is nothing left to reconcile between them: the
-  // previous approach (pageX/Y vs. measureInWindow, subtracting this view's
-  // own window position by hand) kept drifting every time the surrounding
-  // rendering changed — Modal's own Window, then a plain View in the main
-  // window, then hidden status/nav bars each shifted that subtraction
-  // differently. Same-ancestor-relative measurement can't drift against
-  // itself.
+  // the native window (measureInWindow).
+  //
+  // Touches, however, are read via pageX/Y again (see handleTouches below),
+  // not locationX/Y — a real device proved locationX/Y wrong for this,
+  // not just fragile: a full dump of every rect (all sane, non-overlapping,
+  // shown by a user's own console log) alongside "most button presses
+  // register as L1" pointed at the touch side, not the rects. RN's
+  // `touches[]` array — unlike the single top-level nativeEvent.locationX/Y
+  // — reports each entry's locationX/Y relative to whatever *native* view
+  // Android's own hit-testing found first under that finger (typically the
+  // button being tapped itself), not the JS responder that ultimately
+  // claims the gesture (this pad's root). That gives small "position
+  // within whichever button was touched" numbers (~0-62) for nearly every
+  // press — and L1's own rect happens to sit right near the origin and is
+  // checked first in hitTest's iteration order, so those small numbers kept
+  // matching it "by coincidence" regardless of which button was actually
+  // pressed. pageX/Y doesn't have this per-child ambiguity (it's the same
+  // window-absolute value for a touch no matter which view intercepts it),
+  // which is why rootOrigin (this view's own on-screen position, via
+  // measureInWindow) is back too — subtracted from pageX/Y so it lines up
+  // with rects that are still relative to this view via measureLayout, not
+  // the window.
   const rootRef = useRef<View | null>(null);
+  const rootOrigin = useRef<Offset>({ x: 0, y: 0 });
 
   // Forces every PadButton/AnalogStick to re-run measureLayout()
   // periodically — see PadButton's remeasureTick doc for why onLayout
@@ -333,7 +346,10 @@ function GamepadPad({
   // forever, if nothing re-measures them afterward.
   const [remeasureTick, setRemeasureTick] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setRemeasureTick((v) => v + 1), 400);
+    const t = setInterval(() => {
+      setRemeasureTick((v) => v + 1);
+      rootRef.current?.measureInWindow((x, y) => { rootOrigin.current = { x, y }; });
+    }, 400);
     return () => clearInterval(t);
   }, []);
 
@@ -407,10 +423,10 @@ function GamepadPad({
     return { x: cx - w / 2, y: cy - h / 2, w, h };
   }, [padOffsets]);
 
-  /** Control under a touch. Both the touch position (locationX/Y, below)
-   *  and every rect (measureLayout(rootRef, ...), see AnalogStick's rootRef
-   *  doc) are relative to the same ancestor — the pad's own root View — so
-   *  no reconciliation between coordinate spaces is needed here beyond
+  /** Control under a touch. `px,py` are expected already converted to
+   *  pad-relative coordinates (pageX/Y minus rootOrigin, done once in
+   *  handleTouches below) — the same space every rect is in via
+   *  measureLayout(rootRef, ...) (see AnalogStick's rootRef doc) plus
    *  correctedRect's own drag/resize correction. */
   const hitTest = useCallback((px: number, py: number): string | null => {
     for (const [id, raw] of Object.entries(rects.current)) {
@@ -423,7 +439,13 @@ function GamepadPad({
   const handleTouches = useCallback((evt: any, ended: boolean = false) => {
     const touches: any[] = evt?.nativeEvent?.touches || [];
     const active = new Map<number, Offset>();
-    for (const t of touches) active.set(t.identifier, { x: t.locationX, y: t.locationY });
+    // pageX/Y, not locationX/Y — see rootOrigin's own comment above for
+    // why: touches[].locationX/Y is per-child-relative on Android, not
+    // relative to this pad. Converted to pad-relative right here by
+    // subtracting rootOrigin, the pad's own on-screen position.
+    for (const t of touches) {
+      active.set(t.identifier, { x: t.pageX - rootOrigin.current.x, y: t.pageY - rootOrigin.current.y });
+    }
     // Android keeps the lifted pointer in `touches` on an up event while iOS
     // drops it. Take it out ourselves so a released button can't stay stuck.
     if (ended) {
@@ -563,6 +585,7 @@ function GamepadPad({
       <View style={styles.screen}>
         <View
           ref={rootRef}
+          onLayout={() => rootRef.current?.measureInWindow((x, y) => { rootOrigin.current = { x, y }; })}
           style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
           // One responder for the whole pad: this is what makes holding a
           // direction while tapping a button possible at all. Edit mode
