@@ -74,7 +74,8 @@
           }
         }
       ],
-      "expo-image"
+      "expo-image",
+      "expo-navigation-bar"
     ],
     "extra": {
       "eas": {

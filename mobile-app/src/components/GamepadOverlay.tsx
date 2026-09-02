@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View, Text, StyleSheet, TouchableOpacity, Platform, BackHandler } from "react-native";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { useKeepAwake } from "expo-keep-awake";
+import { StatusBar } from "expo-status-bar";
+import { NavigationBar } from "expo-navigation-bar";
 import { Ionicons } from "@react-native-vector-icons/ionicons";
 import { C, radius, spacing } from "../theme";
 import { api, PadLayout } from "../api";
@@ -449,7 +451,16 @@ function GamepadPad({
   const groupZIndex = (id: string): number => zOrder[id] || 0;
 
   return (
-    <View style={styles.overlayFull}>
+    <>
+      {/* Removing <Modal> (previous commit) exposed the app's normal
+          status/navigation bars over this screen — Modal's own separate
+          Window used to cover them implicitly. This is meant to be an
+          immersive, landscape, edge-to-edge gamepad, so hide both
+          explicitly while it's mounted; declarative like <StatusBar>
+          itself, so they come back on their own once this unmounts. */}
+      <StatusBar hidden />
+      {Platform.OS === "android" && <NavigationBar hidden />}
+      <View style={styles.overlayFull}>
       <View style={styles.screen}>
         <View
           style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
@@ -589,7 +600,8 @@ function GamepadPad({
           </View>
         )}
       </View>
-    </View>
+      </View>
+    </>
   );
 }
 

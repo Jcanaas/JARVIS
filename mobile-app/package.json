@@ -20,6 +20,7 @@
     "expo-image-picker": "~57.0.10",
     "expo-keep-awake": "~57.0.1",
     "expo-media-control": "1.0.12",
+    "expo-navigation-bar": "~57.0.2",
     "expo-notifications": "~57.0.11",
     "expo-screen-orientation": "~57.0.1",
     "expo-splash-screen": "~57.0.6",
