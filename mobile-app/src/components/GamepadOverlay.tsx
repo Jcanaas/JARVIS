@@ -280,17 +280,35 @@ function GamepadPad({
   });
   const lastAxisSend = useRef<Record<StickSide, number>>({ left: 0, right: 0 });
 
-  // Forces every PadButton/AnalogStick to re-run measureInWindow()
-  // periodically — see PadButton's remeasureTick doc for why onLayout alone
-  // isn't enough here: the 3DS touch-screen mirror sitting to the pad's
-  // left (a sibling with its own async-loaded content) can shift every
-  // control's *absolute* window position after their first layout pass
-  // without ever changing their layout frame *relative to their own
-  // parent*, which is all onLayout actually watches — leaving rects.current
-  // stuck with stale coordinates from before that shift, silently, forever.
+  // The pad's own on-screen position, per measureInWindow() — needed again
+  // (a previous version of this file removed it, reasoning touch.pageX/Y
+  // and a button's own measureInWindow() were already in the same
+  // coordinate space so no adjustment was needed; true while this screen
+  // was still a <Modal>, which got its own separate native Window with
+  // pageX/Y and measureInWindow both relative to it. Now that it's a plain
+  // View in the main window (see styles.overlayFull's comment), pageX/Y
+  // and measureInWindow have drifted apart by exactly this view's own
+  // window position — confirmed with real numbers from a live device:
+  // touch reported (656,201), btn:a measured at (688,233) — a (32,32)
+  // difference matching rootRef's own measureInWindow() almost exactly.
+  const rootRef = useRef<View | null>(null);
+  const rootOrigin = useRef<Offset>({ x: 0, y: 0 });
+
+  // Forces every PadButton/AnalogStick (and the root pad view itself, for
+  // rootOrigin above) to re-run measureInWindow() periodically — see
+  // PadButton's remeasureTick doc for why onLayout alone isn't enough
+  // here: the 3DS touch-screen mirror sitting to the pad's left (a sibling
+  // with its own async-loaded content) can shift every control's
+  // *absolute* window position after their first layout pass without ever
+  // changing their layout frame *relative to their own parent*, which is
+  // all onLayout actually watches — leaving stale coordinates behind,
+  // silently, forever, if nothing re-measures them afterward.
   const [remeasureTick, setRemeasureTick] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setRemeasureTick((v) => v + 1), 400);
+    const t = setInterval(() => {
+      setRemeasureTick((v) => v + 1);
+      rootRef.current?.measureInWindow((x, y) => { rootOrigin.current = { x, y }; });
+    }, 400);
     return () => clearInterval(t);
   }, []);
 
@@ -332,19 +350,30 @@ function GamepadPad({
     rects.current[id] = rect;
   }, []);
 
-  /** Control under a touch. Both the touch coords (pageX/pageY, from
-   *  handleTouches) and the measured rects (measureInWindow, from
-   *  PadButton/AnalogStick's onMeasure) are already window-absolute — no
-   *  origin adjustment needed, they're the same coordinate space. (An
-   *  earlier version subtracted rootOrigin from the rect only, comparing it
-   *  against an unadjusted touch position — silently correct only because
-   *  the pad used to sit flush against the window's left edge, so that
-   *  origin was ~{0,0}; once the 3DS touch-screen mirror pushed the pad's
-   *  own x-origin rightward, every hit test started missing and no button
-   *  or stick ever registered a touch again.) */
+  /** Control under a touch. touch.pageX/pageY and a button's own
+   *  measureInWindow() are NOT reliably the same coordinate space — which
+   *  one turned out to depend on how this screen itself is rendered, not
+   *  just on the layout inside it:
+   *  - As a <Modal> (original version): pageX/Y and measureInWindow were
+   *    both relative to the Modal's own separate native Window, so no
+   *    adjustment was needed — subtracting rootOrigin from the rect only
+   *    was *wrong* there and broke every hit test once the 3DS touch-
+   *    screen mirror pushed the pad off the window's left edge.
+   *  - As a plain View in the main window (current version, since Modal
+   *    couldn't be made to cover the whole screen on Android — see
+   *    styles.overlayFull): pageX/Y and measureInWindow drifted apart
+   *    again, this time by rootOrigin itself — confirmed with real numbers
+   *    from a live device (touch (656,201) vs. btn:a's rect at (688,233),
+   *    a (32,32) gap matching the pad's own measureInWindow position).
+   *  Subtracting rootOrigin from the rect side handles both — it was a
+   *  literal no-op in the Modal case (origin ~{0,0}) and is the correction
+   *  this one actually needs. */
   const hitTest = useCallback((px: number, py: number): string | null => {
+    const { x: ox, y: oy } = rootOrigin.current;
     for (const [id, r] of Object.entries(rects.current)) {
-      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return id;
+      const x = r.x - ox;
+      const y = r.y - oy;
+      if (px >= x && px <= x + r.w && py >= y && py <= y + r.h) return id;
     }
     return null;
   }, []);
@@ -397,9 +426,9 @@ function GamepadPad({
         const side = control.slice(6) as StickSide;
         const r = rects.current[control];
         if (!r) continue;
-        // Same window-absolute space as hitTest above — see its comment.
-        let dx = pos.x - (r.x + r.w / 2);
-        let dy = pos.y - (r.y + r.h / 2);
+        // Same rootOrigin correction as hitTest above — see its comment.
+        let dx = pos.x - (r.x - rootOrigin.current.x + r.w / 2);
+        let dy = pos.y - (r.y - rootOrigin.current.y + r.h / 2);
         const dist = Math.hypot(dx, dy);
         if (dist > travel) { dx *= travel / dist; dy *= travel / dist; }
         nextOffsets[side] = { x: dx, y: dy };
@@ -463,6 +492,8 @@ function GamepadPad({
       <View style={styles.overlayFull}>
       <View style={styles.screen}>
         <View
+          ref={rootRef}
+          onLayout={() => rootRef.current?.measureInWindow((x, y) => { rootOrigin.current = { x, y }; })}
           style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
           // One responder for the whole pad: this is what makes holding a
           // direction while tapping a button possible at all. Edit mode
