@@ -189,6 +189,16 @@ function GamepadPad({
     left: { x: 0, y: 0 }, right: { x: 0, y: 0 },
   });
 
+  // TEMPORARY diagnostic overlay — three fix attempts for "buttons/stick
+  // don't respond" have each turned out wrong or incomplete without a real
+  // device to test on. This turns the next report into hard evidence
+  // instead of a fourth blind guess: grants = is handleTouches even being
+  // invoked at all; rects = are PadButton/AnalogStick's onMeasure calls
+  // actually landing (0 here would mean measureInWindow itself is broken,
+  // not hitTest); lastHit = what hitTest resolved the most recent touch to,
+  // if anything. Safe to remove once the real cause is confirmed.
+  const [debugInfo, setDebugInfo] = useState({ grants: 0, rects: 0, lastHit: "none" });
+
   // Repositionable layout (Fase D3): each control *group* — not each single
   // button, dragging 15 individual buttons on a phone screen would be
   // fiddly — can be dragged to a device-local offset from its default spot.
@@ -306,11 +316,17 @@ function GamepadPad({
       if (!active.has(id)) owners.current.delete(id);
     }
     // New fingers claim whatever control they landed on.
+    let debugLastHit: string | null = null;
     for (const [tid, pos] of active) {
       if (owners.current.has(tid)) continue;
       const control = hitTest(pos.x, pos.y);
-      if (control) owners.current.set(tid, control);
+      if (control) { owners.current.set(tid, control); debugLastHit = control; }
     }
+    setDebugInfo((prev) => ({
+      grants: prev.grants + 1,
+      rects: Object.keys(rects.current).length,
+      lastHit: debugLastHit ?? (owners.current.size ? Array.from(owners.current.values())[0] : "none"),
+    }));
 
     const pressed = new Set<string>();
     const nextOffsets: Record<StickSide, Offset> = {
@@ -426,6 +442,10 @@ function GamepadPad({
             <Ionicons name="close" size={20} color={C.textMed} />
           </TouchableOpacity>
           {!!consoleId && <Text style={styles.padConsole}>{consoleId.toUpperCase()}</Text>}
+          {/* TEMPORARY — see debugInfo's declaration above. */}
+          <Text style={styles.debugLine} pointerEvents="none">
+            grants:{debugInfo.grants} rects:{debugInfo.rects} lastHit:{debugInfo.lastHit}
+          </Text>
           <TouchableOpacity
             style={[styles.editBtn, editMode && styles.editBtnActive]}
             onPress={() => setEditMode((v) => !v)}
@@ -563,7 +583,18 @@ function Draggable({
     onResize(id, Math.min(MAX_SCALE, Math.round((scale + SCALE_STEP) * 100) / 100));
   }, [id, onActivate, onResize, scale]);
 
-  const positioned = [style, { transform: [{ translateX: offset.x }, { translateY: offset.y }, { scale }] }, editMode && { zIndex }];
+  const customized = offset.x !== 0 || offset.y !== 0 || scale !== 1;
+  // Android has known issues where even an *identity* transform (0,0,
+  // scale 1) on an ancestor View can throw off measureInWindow() results
+  // and touch-bubbling for its children — exactly the symptoms reported
+  // here (buttons and the stick not registering touches at all, not even
+  // updating local state, gameplay-only). Skipping the transform style
+  // entirely for the untouched (never dragged/resized) case removes that
+  // risk for the default layout everyone starts with; a group only gets
+  // wrapped in a real transform once the user has actually customized it.
+  const positioned = customized
+    ? [style, { transform: [{ translateX: offset.x }, { translateY: offset.y }, { scale }] }, editMode && { zIndex }]
+    : [style, editMode && { zIndex }];
 
   if (!editMode) {
     return <View style={positioned}>{children}</View>;
@@ -700,6 +731,8 @@ const styles = StyleSheet.create({
   stickButtons: { gap: 10, alignItems: "center" },
   closeBtn: { position: "absolute", top: 14, right: 18, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.06)", alignItems: "center", justifyContent: "center", zIndex: 2 },
   padConsole: { position: "absolute", top: 22, left: 22, color: C.textMed, fontSize: 11, fontWeight: "800", letterSpacing: 1 },
+  // TEMPORARY — see debugInfo's declaration above.
+  debugLine: { position: "absolute", bottom: 6, left: 6, color: "#ff6666", fontSize: 10, fontFamily: "monospace" },
   shoulderRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 18 },
   shoulder: { width: 96, height: 42, borderRadius: 12 },
   mainRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
