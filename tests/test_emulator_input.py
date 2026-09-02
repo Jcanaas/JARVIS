@@ -88,6 +88,57 @@ class InputProfileTests(unittest.TestCase):
             "3",
         )
 
+    def test_resolution_option_reports_choices_and_default(self):
+        with patch("actions.app_settings.get", return_value={}):
+            opt = emulator_runtime.resolution_option("ps2")
+        self.assertEqual(opt["key"], "pcsx2_upscale_multiplier")
+        self.assertIn("2x Native (~720p)", opt["choices"])
+        self.assertEqual(opt["current"], "2x Native (~720p)")  # CORES's own default
+
+    def test_resolution_option_is_none_for_a_console_without_one(self):
+        self.assertIsNone(emulator_runtime.resolution_option("gba"))
+
+    def test_set_resolution_persists_and_is_then_reported_as_current(self):
+        storage = {}
+
+        def fake_get(key, default=None):
+            return storage.get(key, default)
+
+        def fake_set(key, value):
+            storage[key] = value
+
+        with patch("actions.app_settings.get", side_effect=fake_get), \
+                patch("actions.app_settings.set", side_effect=fake_set):
+            emulator_runtime.set_resolution("3ds", "2")
+            self.assertEqual(storage["emulator_resolution"], {"3ds": "2"})
+            opt = emulator_runtime.resolution_option("3ds")
+        self.assertEqual(opt["current"], "2")
+
+    def test_set_resolution_rejects_an_unknown_console(self):
+        with self.assertRaises(ValueError):
+            emulator_runtime.set_resolution("gba", "2")
+
+    def test_set_resolution_rejects_a_value_the_core_never_declared(self):
+        with self.assertRaises(ValueError):
+            emulator_runtime.set_resolution("3ds", "999")
+
+    def test_resolved_options_merges_the_saved_choice_into_cores_options(self):
+        with patch("actions.app_settings.get", return_value={"3ds": "6"}):
+            options = emulator_runtime.resolved_options("3ds")
+        self.assertEqual(options["citra_resolution_factor"], "6")
+        # Everything else from CORES stays untouched.
+        self.assertEqual(options["citra_graphics_api"], "OpenGL")
+
+    def test_resolved_options_falls_back_to_cores_default_with_no_saved_choice(self):
+        with patch("actions.app_settings.get", return_value={}):
+            options = emulator_runtime.resolved_options("3ds")
+        self.assertEqual(options["citra_resolution_factor"], "3")
+
+    def test_resolved_options_ignores_a_saved_choice_for_a_different_console(self):
+        with patch("actions.app_settings.get", return_value={"ps2": "3x Native (~1080p)"}):
+            options = emulator_runtime.resolved_options("3ds")
+        self.assertEqual(options["citra_resolution_factor"], "3")  # CORES's own default, not ps2's
+
     def test_3ds_uses_opengl_not_vulkan(self):
         # Vulkan+RADV crashes immediately on AMD GPUs on Arch Linux — exactly
         # this machine's iGPU (see NOTE_webui_emulators_plan.md's Fase 6).

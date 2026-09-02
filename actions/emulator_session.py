@@ -310,8 +310,10 @@ class EmulatorSession:
         from actions import libretro
 
         try:
-            spec = er.CORES.get(self.console_id)
-            options = dict(spec.options) if spec and spec.options else {}
+            # resolved_options(), not CORES[...].options directly — folds in
+            # the user's saved resolution choice, if any (see
+            # actions/emulator_runtime.py's RESOLUTION_CHOICES/set_resolution).
+            options = er.resolved_options(self.console_id)
             core_path = er.find_core(self.console_id)
             core = libretro.load(core_path, er.system_dir(), er.saves_dir(),
                                  options=options)

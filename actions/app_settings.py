@@ -94,6 +94,12 @@ _DEFAULTS: dict = {
     # always on when booted without --legacy. Separate port from
     # lan_dashboard_port since both can run at once.
     "webui_port": 8877,
+    # {console_id: chosen libretro option value} — user-picked internal
+    # render resolution per console, only for consoles
+    # actions/emulator_runtime.py's RESOLUTION_CHOICES actually has an
+    # option for (PS2, 3DS). Applied at the *next* session start, not live
+    # — see resolved_options()'s docstring for why.
+    "emulator_resolution": {},
 }
 
 

@@ -132,6 +132,13 @@ export const bindEmulatorControl = (consoleId, button, code) =>
 export const resetEmulatorControls = (consoleId) =>
   postJSON('/api/emulator/controls/reset', { console_id: consoleId })
 
+// Resolution (internal render scale) — only PS2/3DS have one; a 404 here
+// means the console just doesn't have this option, not an error to surface.
+export const getEmulatorResolution = (consoleId) =>
+  getJSON(`/api/emulator/resolution?console_id=${encodeURIComponent(consoleId)}`)
+export const setEmulatorResolution = (consoleId, value) =>
+  postJSON('/api/emulator/resolution', { console_id: consoleId, value })
+
 // Catalog / downloader (Fase C) — backend from Fase 4/5, this is the UI for it.
 export const getEmulatorConsoles = () => getJSON('/api/emulator/consoles')
 export const getEmulatorCores = () => getJSON('/api/emulator/cores')

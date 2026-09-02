@@ -1693,6 +1693,27 @@ def _make_app(host_ref):
         ic.reset(console_id)
         return jsonify({"ok": True})
 
+    @app.route("/api/emulator/resolution")
+    def api_emulator_resolution():
+        from actions import emulator_runtime as er
+        console_id = request.args.get("console_id") or ""
+        option = er.resolution_option(console_id)
+        if option is None:
+            return jsonify({"error": "no_resolution_option"}), 404
+        return jsonify(option)
+
+    @app.route("/api/emulator/resolution", methods=["POST"])
+    def api_emulator_resolution_set():
+        from actions import emulator_runtime as er
+        data = request.get_json(silent=True) or {}
+        console_id = str(data.get("console_id") or "")
+        value = str(data.get("value") or "")
+        try:
+            er.set_resolution(console_id, value)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"ok": True})
+
     @app.route("/api/emulator/cores")
     def api_emulator_cores():
         from actions import emulator_runtime as er

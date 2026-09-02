@@ -36,6 +36,12 @@
   // pixels across a bigger area than before, which read as a resolution/
   // bitrate drop that was never really there.
   let hideBottomScreen = $state(false)
+  // Only set for consoles actions/emulator_runtime.py's RESOLUTION_CHOICES
+  // actually has an option for (PS2, 3DS) — null means "this console has no
+  // such setting", not an error. A libretro core only reads its options at
+  // load time, so picking a new value here only takes effect the *next*
+  // time this game starts, never on the session already running.
+  let resolutionOption = $state(null) // {key, choices, current}
   let actionError = $state('')
   let libraryError = $state('') // start() failed before the player mounted (e.g. missing PS2 BIOS)
   let biosBusy = $state(false)
@@ -227,12 +233,33 @@
       streamNonce++
       padLayout = await api.getEmulatorPad(entry.console_id)
       loadKeyMap(entry.console_id)
+      loadResolutionOption(entry.console_id)
       pollStatus()
       emulatorPlaying.set(true)
     } catch (e) {
       // start() fails before the player ever mounts, so this can't reuse
       // actionError (only rendered inside the player view below).
       libraryError = e.message
+    }
+  }
+
+  async function loadResolutionOption(consoleId) {
+    try {
+      resolutionOption = await api.getEmulatorResolution(consoleId)
+    } catch {
+      resolutionOption = null // this console just doesn't have the setting
+    }
+  }
+
+  async function changeResolution(value) {
+    if (!playing || !resolutionOption) return
+    const previous = resolutionOption.current
+    resolutionOption = { ...resolutionOption, current: value }
+    try {
+      await api.setEmulatorResolution(playing.console_id, value)
+    } catch (e) {
+      resolutionOption = { ...resolutionOption, current: previous }
+      actionError = e.message
     }
   }
 
@@ -266,6 +293,7 @@
     playing = null
     status = null
     hideBottomScreen = false
+    resolutionOption = null
   }
 
   async function togglePause() {
@@ -626,6 +654,18 @@
           <button class="ghost" onclick={saveState} title="Guardar estado">💾</button>
           <button class="ghost" onclick={loadState} title="Cargar estado">📂</button>
           <button class="ghost" onclick={openControls} title="Controles">🎮</button>
+          {#if resolutionOption}
+            <select
+              class="res-select"
+              value={resolutionOption.current}
+              onchange={(e) => changeResolution(e.target.value)}
+              title="Resolución interna — se aplica al reiniciar el juego"
+            >
+              {#each resolutionOption.choices as choice (choice)}
+                <option value={choice}>{choice}</option>
+              {/each}
+            </select>
+          {/if}
           {#if playing.console_id === '3ds'}
             <button
               class="ghost"
@@ -731,6 +771,10 @@
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   }
   .ghost.active { background: var(--pri); border-color: var(--pri); }
+  .res-select {
+    background: var(--panel-2); border: 1px solid var(--border-a); border-radius: var(--radius-sm);
+    color: var(--text); font-size: 11px; height: 32px; padding: 0 6px; cursor: pointer; max-width: 130px;
+  }
 
   .empty { color: var(--text-med); font-size: 13px; padding: 24px; text-align: center; }
   .empty.error { color: var(--red); }

@@ -853,6 +853,34 @@ class EmulatorRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         mock_reset.assert_called_once_with("gba")
 
+    def test_resolution_reports_the_current_option(self):
+        with patch("actions.emulator_runtime.resolution_option",
+                   return_value={"key": "citra_resolution_factor", "choices": ["1", "2", "3"], "current": "3"}) as mocked:
+            resp = self.client.get("/api/emulator/resolution?console_id=3ds")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["current"], "3")
+        mocked.assert_called_once_with("3ds")
+
+    def test_resolution_404s_for_a_console_without_the_option(self):
+        with patch("actions.emulator_runtime.resolution_option", return_value=None):
+            resp = self.client.get("/api/emulator/resolution?console_id=gba")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_resolution_set_calls_through(self):
+        with patch("actions.emulator_runtime.set_resolution") as mocked:
+            resp = self.client.post(
+                "/api/emulator/resolution", json={"console_id": "ps2", "value": "2x Native (~720p)"},
+            )
+        self.assertEqual(resp.status_code, 200)
+        mocked.assert_called_once_with("ps2", "2x Native (~720p)")
+
+    def test_resolution_set_rejects_an_invalid_choice(self):
+        with patch("actions.emulator_runtime.set_resolution", side_effect=ValueError("nope")):
+            resp = self.client.post(
+                "/api/emulator/resolution", json={"console_id": "ps2", "value": "bogus"},
+            )
+        self.assertEqual(resp.status_code, 400)
+
     def test_cores_reports_ps2_bios_presence(self):
         with patch("actions.emulator_runtime.CORES", {"gba": object(), "ps2": object()}), \
              patch("actions.emulator_runtime.core_status",

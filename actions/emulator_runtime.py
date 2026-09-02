@@ -218,6 +218,82 @@ CORES: dict[str, CoreSpec] = {
 }
 
 
+# Consoles with a meaningful, user-choosable internal render-resolution
+# option, and the exact strings each core's option accepts — dumped
+# directly from each core via JARVIS_CORE_LOG=1 (actions/libretro.py's
+# _harvest_core_options_v2), not guessed: a libretro core option is a
+# specific string match, and a wrong one is silently ignored rather than
+# erroring, so getting it right matters. Other consoles either have no such
+# option (GBA/SNES/etc. render at their fixed native resolution) or nothing
+# a normal user would want to change (N64's angrylion is a CPU rasterizer
+# with no upscale knob).
+RESOLUTION_CHOICES: dict[str, tuple[str, list[str]]] = {
+    "ps2": ("pcsx2_upscale_multiplier", [
+        "1x Native (PS2)", "2x Native (~720p)", "3x Native (~1080p)",
+        "4x Native (~1440p/2K)", "5x Native (~1800p/3K)", "6x Native (~2160p/4K)",
+        "7x Native (~2520p)", "8x Native (~2880p/5K)", "9x Native (~3240p)",
+        "10x Native (~3600p/6K)",
+    ]),
+    "3ds": ("citra_resolution_factor", ["1", "2", "3", "4", "5", "6"]),
+}
+
+# Persisted in actions/app_settings.py under "emulator_resolution" as
+# {console_id: chosen_value}. A libretro core only reads its options at
+# load time (ENV_GET_VARIABLE_UPDATE always answers False in
+# actions/libretro.py — runtime option changes aren't a thing this stack
+# supports), so a change here only takes effect the *next* time that
+# console's session starts, never on an already-running one.
+
+
+def resolution_option(console_id: str) -> Optional[dict]:
+    """{'key', 'choices', 'current'} for console_id's render-resolution
+    option, or None if it doesn't have one. `current` is the user's saved
+    choice if they've made one, else whatever CORES's own default is."""
+    spec = RESOLUTION_CHOICES.get(console_id)
+    if spec is None:
+        return None
+    option_key, choices = spec
+    from actions import app_settings
+    overrides = app_settings.get("emulator_resolution", {}) or {}
+    core_spec = CORES.get(console_id)
+    default = (core_spec.options or {}).get(option_key) if core_spec else None
+    current = overrides.get(console_id) or default
+    return {"key": option_key, "choices": choices, "current": current}
+
+
+def set_resolution(console_id: str, value: str) -> None:
+    """Saves the user's resolution choice for console_id. Raises ValueError
+    for a console with no such option, or a value that isn't one of its
+    known-valid choices."""
+    spec = RESOLUTION_CHOICES.get(console_id)
+    if spec is None:
+        raise ValueError(f"«{console_id}» no tiene ajuste de resolución")
+    _option_key, choices = spec
+    if value not in choices:
+        raise ValueError(f"Resolución no válida para «{console_id}»")
+    from actions import app_settings
+    overrides = dict(app_settings.get("emulator_resolution", {}) or {})
+    overrides[console_id] = value
+    app_settings.set("emulator_resolution", overrides)
+
+
+def resolved_options(console_id: str) -> dict:
+    """CORES[console_id].options with the user's saved resolution choice
+    (if any) merged in — this, not CORES[...].options directly, is what
+    actions/emulator_session.py must hand to libretro.load()."""
+    core_spec = CORES.get(console_id)
+    options = dict(core_spec.options) if core_spec and core_spec.options else {}
+    spec = RESOLUTION_CHOICES.get(console_id)
+    if spec is not None:
+        option_key, choices = spec
+        from actions import app_settings
+        overrides = app_settings.get("emulator_resolution", {}) or {}
+        value = overrides.get(console_id)
+        if value in choices:
+            options[option_key] = value
+    return options
+
+
 # What each console's pad actually has, so a touch controller can draw the
 # right thing instead of a lowest-common-denominator D-pad. Everything not
 # listed is a purely digital pad; only the exceptions are spelled out.
