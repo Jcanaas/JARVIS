@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Modal, Platform } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Platform, BackHandler } from "react-native";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { useKeepAwake } from "expo-keep-awake";
 import { Ionicons } from "@react-native-vector-icons/ionicons";
@@ -116,6 +116,21 @@ export default function GamepadOverlay() {
 
   useEffect(() => () => { clearNotification(); }, [clearNotification]);
 
+  const promptVisible = prompt && available;
+
+  // Android's hardware back button used to be handled by <Modal>'s own
+  // onRequestClose — replicated manually now that this isn't a Modal (see
+  // the styles.overlayFull comment for why).
+  useEffect(() => {
+    if (!promptVisible) return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      dismissedRef.current = true;
+      setPrompt(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [promptVisible]);
+
   if (open) {
     return (
       <GamepadPad
@@ -127,15 +142,10 @@ export default function GamepadOverlay() {
     );
   }
 
+  if (!promptVisible) return null;
+
   return (
-    <Modal
-      visible={prompt && available}
-      transparent
-      animationType="fade"
-      onRequestClose={() => { dismissedRef.current = true; setPrompt(false); }}
-      statusBarTranslucent
-      navigationBarTranslucent
-    >
+    <View style={styles.overlayFull}>
       <View style={styles.backdrop}>
         <View style={styles.dialog}>
           <View style={styles.iconCircle}>
@@ -165,7 +175,7 @@ export default function GamepadOverlay() {
           </Text>
         </View>
       </View>
-    </Modal>
+    </View>
   );
 }
 
@@ -290,6 +300,17 @@ function GamepadPad({
       api.sendGamepadInput({ clear: true }).catch(() => {});
     };
   }, []);
+
+  // Android's hardware back button used to be handled by <Modal>'s own
+  // onRequestClose — replicated manually now that this isn't a Modal (see
+  // styles.overlayFull's comment for why).
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      onClose();
+      return true;
+    });
+    return () => sub.remove();
+  }, [onClose]);
 
   const send = useCallback((name: string, pressed: boolean) => {
     api.sendGamepadInput({ buttons: [{ name, pressed }] }).catch(() => {});
@@ -423,20 +444,7 @@ function GamepadPad({
   const groupZIndex = (id: string): number => zOrder[id] || 0;
 
   return (
-    <Modal
-      visible
-      transparent={false}
-      animationType="fade"
-      onRequestClose={onClose}
-      supportedOrientations={["landscape"]}
-      // Expo SDK 54+ makes edge-to-edge mandatory on Android (targeting
-      // Android 16) — without these, RN's core Modal doesn't draw behind
-      // the status/navigation bars, leaving a real gap so the pad never
-      // actually covers the whole physical screen. Not needed on iOS
-      // (harmless there either way).
-      statusBarTranslucent
-      navigationBarTranslucent
-    >
+    <View style={styles.overlayFull}>
       <View style={styles.screen}>
         <View
           style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
@@ -575,7 +583,7 @@ function GamepadPad({
           </View>
         )}
       </View>
-    </Modal>
+    </View>
   );
 }
 
@@ -749,6 +757,24 @@ const styles = StyleSheet.create({
   secondaryText: { color: C.textMed, fontSize: 13.5, fontWeight: "600" },
   footnote: { color: C.textMed, fontSize: 10.5, textAlign: "center", opacity: 0.8, lineHeight: 15 },
 
+  // A plain absolutely-positioned View, not React Native's <Modal> — on
+  // Android, Modal renders in its own separate native Window (a Dialog),
+  // and system-bar/edge-to-edge behaviour can only be controlled for the
+  // main Activity's window, never a Modal's — a confirmed, still-open
+  // upstream React Native limitation (statusBarTranslucent/
+  // navigationBarTranslucent, tried first, don't actually fix it — see
+  // github.com/expo/expo/issues/39749, where the Expo team's own
+  // conclusion is "use something other than Modal"). Rendered as a normal
+  // sibling inside the same window as everything else in App.tsx instead
+  // — that's why it needs its own hardware-back-button handling
+  // (BackHandler) that <Modal>'s onRequestClose used to give for free.
+  // No background of its own — the prompt's own .backdrop is translucent
+  // (dims the screen behind it) while the pad's own .screen is opaque;
+  // this wrapper just needs to not get in the way of either. Plain
+  // top/left/right/bottom rather than StyleSheet.absoluteFill: the latter
+  // is itself an already-registered style reference, and nesting it as a
+  // value inside another StyleSheet.create() call is untested territory.
+  overlayFull: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
   // row-reverse rather than row: touchCol is rendered *after* pad in JSX
   // now (see the comment where it's rendered) purely so it paints on top —
   // row-reverse keeps it visually on the left, where it always was, without
