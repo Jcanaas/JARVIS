@@ -77,6 +77,11 @@ _REMOTE_ACTIONS = frozenset({
 # re-announce reaches it even if it had dismissed the prompt.
 _gamepad_announce = 0
 
+# TEMPORARY — throttle for api_gamepad_screen()'s diagnostic timing print.
+# Safe to remove along with that print once the touch-mirror fps bottleneck
+# is confirmed.
+_last_gamepad_screen_log = 0.0
+
 
 # Cover sizes the phone actually needs, in physical pixels (logical size ×3 for
 # a dense screen). YouTube Music serves list artwork at 120², which is mush on
@@ -1632,12 +1637,17 @@ def _make_app(token: str):
         touch."""
         if not _check_token():
             return jsonify({"error": "unauthorized"}), 403
+
+        import time as _time
+        t_start = _time.perf_counter()
+
         _core, console_id = _active_emulator()
         if console_id != "3ds":
             return jsonify({"error": "no_touch_screen"}), 404
         data, w, h, pitch, fmt = _active_emulator_frame()[0]
         if data is None:
             return jsonify({"error": "no_frame"}), 409
+        t_frame = _time.perf_counter()
 
         import cv2
 
@@ -1647,6 +1657,7 @@ def _make_app(token: str):
         if bgr is None:
             return jsonify({"error": "no_frame"}), 409
         cropped = crop_bottom_screen_3ds(bgr)
+        t_crop = _time.perf_counter()
         # The crop's own pixel size scales directly with the emulator's
         # internal render resolution (actions/emulator_runtime.py's
         # citra_resolution_factor, user-choosable — see
@@ -1676,13 +1687,42 @@ def _make_app(token: str):
         target_w, target_h = 320, 240
         if cropped.shape[1] > target_w or cropped.shape[0] > target_h:
             cropped = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        t_resize = _time.perf_counter()
         quality = max(10, min(95, request.args.get("quality", default=55, type=int) or 55))
         ok, buf = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if not ok:
             return jsonify({"error": "encode_failed"}), 500
+        t_encode = _time.perf_counter()
+
+        # TEMPORARY — the client reported ~15fps over real Wi-Fi after two
+        # rounds of shrinking the payload (quality/resolution) barely moved
+        # the needle, which means guessing at the payload size wasn't
+        # actually addressing the bottleneck. This breaks down where the
+        # ~66ms/request is actually going server-side, so the client-
+        # observed round trip (TouchScreen3DS.tsx's own debug overlay) minus
+        # this total tells us how much is genuinely network, vs frame-fetch
+        # (lock contention with the emulation thread's own render loop) vs
+        # crop/resize/encode (CPU work). Throttled to ~1/sec so it doesn't
+        # flood the console at 15-30 req/s. Safe to remove once the real
+        # bottleneck is confirmed.
+        global _last_gamepad_screen_log
+        now = _time.monotonic()
+        if now - _last_gamepad_screen_log > 1.0:
+            _last_gamepad_screen_log = now
+            print(
+                f"[GamepadScreen] frame={1000*(t_frame - t_start):.1f}ms "
+                f"crop={1000*(t_crop - t_frame):.1f}ms "
+                f"resize={1000*(t_resize - t_crop):.1f}ms "
+                f"encode={1000*(t_encode - t_resize):.1f}ms "
+                f"total={1000*(t_encode - t_start):.1f}ms "
+                f"bytes={len(buf)}",
+                flush=True,
+            )
+
         resp = Response(buf.tobytes(), mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
+        resp.headers["X-Server-Ms"] = f"{1000*(t_encode - t_start):.1f}"
         return resp
 
     @app.route("/api/gamepad/touch", methods=["POST"])

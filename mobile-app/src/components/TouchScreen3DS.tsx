@@ -75,9 +75,18 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
   // can't pile up, and the mirror rate quietly adapts to however fast the
   // backend can actually go instead of demanding a fixed rate.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // TEMPORARY — paired with the round-trip time shown in the debug overlay
+  // below and actions/lan_dashboard.py's own server-side timing breakdown
+  // (printed to its console, throttled to ~1/sec): comparing the two tells
+  // us how much of the per-request time is genuinely network vs. backend
+  // work, instead of guessing at payload size again.
+  const requestStartedAt = useRef(0);
   const scheduleNext = useCallback((delay: number) => {
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setUri(gamepadScreenUrl(Date.now())), delay);
+    timerRef.current = setTimeout(() => {
+      requestStartedAt.current = Date.now();
+      setUri(gamepadScreenUrl(Date.now()));
+    }, delay);
   }, []);
 
   useEffect(() => {
@@ -140,13 +149,18 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
         contentFit="contain"
         cachePolicy="none"
         transition={0}
-        onLoad={() => { loadedOnce.current = true; setStatus("ok"); scheduleNext(POLL_MS); }}
-        onError={(e: any) => { setStatus(`error: ${e?.error || "unknown"}`); scheduleNext(POLL_MS); }}
+        onLoad={() => {
+          loadedOnce.current = true;
+          setStatus(`ok ${Date.now() - requestStartedAt.current}ms`);
+          scheduleNext(POLL_MS);
+        }}
+        onError={(e: any) => {
+          setStatus(`error ${Date.now() - requestStartedAt.current}ms: ${e?.error || "unknown"}`);
+          scheduleNext(POLL_MS);
+        }}
       />
       {/* TEMPORARY — see the status state's own comment above. */}
-      {status !== "ok" && (
-        <Text style={styles.debugText}>{status}</Text>
-      )}
+      <Text style={styles.debugText}>{status}</Text>
     </View>
   );
 }
