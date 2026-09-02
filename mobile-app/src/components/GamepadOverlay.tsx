@@ -196,8 +196,16 @@ function GamepadPad({
   // invoked at all; rects = are PadButton/AnalogStick's onMeasure calls
   // actually landing (0 here would mean measureInWindow itself is broken,
   // not hitTest); lastHit = what hitTest resolved the most recent touch to,
-  // if anything. Safe to remove once the real cause is confirmed.
-  const [debugInfo, setDebugInfo] = useState({ grants: 0, rects: 0, lastHit: "none" });
+  // if anything. `everHit` is sticky (never resets to "none" once something
+  // has matched at least once) with a running total, specifically to tell
+  // apart "genuinely never matches" from "nothing happens to be held at
+  // this exact instant" — the previous version showed a live-but-not-sticky
+  // lastHit, which read as "none" the moment nothing was actively pressed
+  // and was ambiguous about whether hitTest had ever actually worked at
+  // all. Safe to remove once the real cause is confirmed.
+  const [debugInfo, setDebugInfo] = useState({
+    grants: 0, rects: 0, currentlyHeld: "none", everHit: "none", totalHits: 0,
+  });
 
   // Repositionable layout (Fase D3): each control *group* — not each single
   // button, dragging 15 individual buttons on a phone screen would be
@@ -325,7 +333,9 @@ function GamepadPad({
     setDebugInfo((prev) => ({
       grants: prev.grants + 1,
       rects: Object.keys(rects.current).length,
-      lastHit: debugLastHit ?? (owners.current.size ? Array.from(owners.current.values())[0] : "none"),
+      currentlyHeld: owners.current.size ? Array.from(owners.current.values()).join(",") : "none",
+      everHit: debugLastHit ?? prev.everHit,
+      totalHits: debugLastHit ? prev.totalHits + 1 : prev.totalHits,
     }));
 
     const pressed = new Set<string>();
@@ -444,7 +454,8 @@ function GamepadPad({
           {!!consoleId && <Text style={styles.padConsole}>{consoleId.toUpperCase()}</Text>}
           {/* TEMPORARY — see debugInfo's declaration above. */}
           <Text style={styles.debugLine} pointerEvents="none">
-            grants:{debugInfo.grants} rects:{debugInfo.rects} lastHit:{debugInfo.lastHit}
+            g:{debugInfo.grants} r:{debugInfo.rects} held:{debugInfo.currentlyHeld}{"\n"}
+            everHit:{debugInfo.everHit} totalHits:{debugInfo.totalHits}
           </Text>
           <TouchableOpacity
             style={[styles.editBtn, editMode && styles.editBtnActive]}
