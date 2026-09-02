@@ -30,12 +30,22 @@
   // actions/lan_dashboard.py's /api/gamepad/screen. Cropped server-side
   // (?crop=top on /api/emulator/stream, actions/webui_server.py) rather
   // than with CSS on the full frame — cropping first means the <img> keeps
-  // its native resolution and the existing max-width/max-height "contain"
-  // fit still works exactly as it always did; forcing the *displayed* box
-  // into the cropped aspect ratio via CSS instead upscaled the same source
-  // pixels across a bigger area than before, which read as a resolution/
-  // bitrate drop that was never really there.
+  // its native resolution and the existing "contain" fit still works
+  // exactly as it always did; forcing the *displayed* box into the cropped
+  // aspect ratio via CSS instead upscaled the same source pixels across a
+  // bigger area than before, which read as a resolution/bitrate drop that
+  // was never really there.
   let hideBottomScreen = $state(false)
+  // The <img> element itself, and .video-wrap's aspect-ratio kept in sync
+  // with its *actual* decoded frame size (see the polling effect below) —
+  // needed because toggling crop=top or changing the emulator's internal
+  // render resolution (both land in the *same* long-lived <img>, an MJPEG
+  // multipart stream, not a fresh element) doesn't reliably make the
+  // browser re-run object-fit's sizing math on its own; naturalWidth/
+  // naturalHeight update correctly on every part, CSS layout sometimes
+  // doesn't follow without an explicit nudge like this.
+  let streamImg = $state()
+  let streamAspect = $state('')
   // Only set for consoles actions/emulator_runtime.py's RESOLUTION_CHOICES
   // actually has an option for (PS2, 3DS) — null means "this console has no
   // such setting", not an error. Whether picking a new value takes effect
@@ -304,6 +314,7 @@
     status = null
     hideBottomScreen = false
     resolutionOption = null
+    streamAspect = '' // next game's frame shape may be entirely different
   }
 
   async function togglePause() {
@@ -482,6 +493,23 @@
 
   $effect(() => {
     return () => stopWatchingStatus()
+  })
+
+  // Keeps .video-wrap's aspect-ratio matched to the stream's actual decoded
+  // size — see streamAspect's own declaration for why this can't just be
+  // left to CSS object-fit alone. Runs only while a game is on screen;
+  // Svelte's effect cleanup clears the interval when playing goes back to
+  // null or the component unmounts.
+  $effect(() => {
+    if (!playing) return
+    const t = setInterval(() => {
+      const w = streamImg?.naturalWidth
+      const h = streamImg?.naturalHeight
+      if (!w || !h) return
+      const ratio = `${w} / ${h}`
+      if (ratio !== streamAspect) streamAspect = ratio
+    }, 400)
+    return () => clearInterval(t)
   })
 </script>
 
@@ -707,9 +735,10 @@
         />
       {/if}
 
-      <div class="video-wrap" bind:this={videoWrap}>
+      <div class="video-wrap" style={streamAspect ? `aspect-ratio: ${streamAspect}` : ''} bind:this={videoWrap}>
         {#key streamNonce}
           <img
+            bind:this={streamImg}
             src={`/api/emulator/stream?_=${streamNonce}${hideBottomScreen ? '&crop=top' : ''}`}
             alt={playing.title}
             class="stream"
