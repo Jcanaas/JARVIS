@@ -854,7 +854,7 @@ class LanDashboardTests(unittest.TestCase):
         from ui.widgets import retro
 
         # 800x960 combined frame -> crop is 640x480 (still 4:3), bigger than
-        # the 480x360 downscale target in both dimensions.
+        # the 320x240 downscale target in both dimensions.
         width, height = 800, 960
         pixel = (0x1F << 11).to_bytes(2, "little")  # solid red
         frame = pixel * (width * height)
@@ -871,7 +871,7 @@ class LanDashboardTests(unittest.TestCase):
 
         self.assertEqual(r.status_code, 200)
         decoded = cv2.imdecode(np.frombuffer(r.data, dtype=np.uint8), cv2.IMREAD_COLOR)
-        self.assertEqual(decoded.shape[:2], (360, 480))  # (height, width)
+        self.assertEqual(decoded.shape[:2], (240, 320))  # (height, width)
 
     def test_gamepad_touch_translates_coordinates_and_forwards_to_the_core(self):
         import types as _types

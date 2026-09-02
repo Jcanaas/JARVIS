@@ -1663,10 +1663,20 @@ def _make_app(token: str):
         # do with. touch_to_pointer() only ever deals in 0..1 fractions of
         # whatever image the phone is showing, so this doesn't touch the
         # touch-coordinate math at all.
-        target_w, target_h = 480, 360
+        # Dropped from 480x360 (~55% more pixels than this) after a real
+        # device reported the mirror running at ~15fps over LAN Wi-Fi despite
+        # the backend itself round-tripping in ~5ms against an idle core —
+        # confirming the bottleneck wasn't a single slow step but the total
+        # per-request cost (network RTT + encode) adding up across ~30
+        # 33ms-spaced requests/sec. Smaller pixels means less to resize,
+        # less to JPEG-encode, and fewer bytes to ship over Wi-Fi — all three
+        # add up directly against the per-request budget a self-paced poll
+        # (mobile-app/src/components/TouchScreen3DS.tsx) needs to stay under
+        # to hit a given fps, whichever of them turns out to dominate.
+        target_w, target_h = 320, 240
         if cropped.shape[1] > target_w or cropped.shape[0] > target_h:
             cropped = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        quality = max(10, min(95, request.args.get("quality", default=70, type=int) or 70))
+        quality = max(10, min(95, request.args.get("quality", default=55, type=int) or 55))
         ok, buf = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if not ok:
             return jsonify({"error": "encode_failed"}), 500
