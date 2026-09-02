@@ -238,6 +238,16 @@ function GamepadPad({
   const [debugInfo, setDebugInfo] = useState({
     grants: 0, rects: 0, currentlyHeld: "none", everHit: "none", totalHits: 0,
     lastTouch: "none", aRect: "none",
+    // TEMPORARY — added after correctedRect() (the drag/resize hit-test
+    // fix) still activated a button at "a third, different location" per
+    // user report, meaning the correction math itself is off somehow
+    // rather than simply missing. rawARect is btn:a's measureLayout()
+    // rect before correction, aOffset/aScale is group:face's current
+    // padOffsets entry (btn:a's group), and correctedARect is what
+    // correctedRect() computes from those two — printing all three next
+    // to each other turns the next report into a concrete arithmetic
+    // check instead of a fourth blind theory.
+    rawARect: "none", aOffset: "none", aScale: "none", correctedARect: "none",
   });
 
   // Repositionable layout (Fase D3): each control *group* — not each single
@@ -432,6 +442,9 @@ function GamepadPad({
     }
     const firstTouch = Array.from(active.values())[0];
     const aRect = rects.current["btn:a"];
+    const aGroup = padOffsets["group:face"];
+    const aCorrected = aRect ? correctedRect("btn:a", aRect) : null;
+    const fmtRect = (r: Rect) => `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.w)}x${Math.round(r.h)}`;
     setDebugInfo((prev) => ({
       grants: prev.grants + 1,
       rects: Object.keys(rects.current).length,
@@ -439,7 +452,11 @@ function GamepadPad({
       everHit: debugLastHit ?? prev.everHit,
       totalHits: debugLastHit ? prev.totalHits + 1 : prev.totalHits,
       lastTouch: firstTouch ? `${Math.round(firstTouch.x)},${Math.round(firstTouch.y)}` : prev.lastTouch,
-      aRect: aRect ? `${Math.round(aRect.x)},${Math.round(aRect.y)} ${Math.round(aRect.w)}x${Math.round(aRect.h)}` : prev.aRect,
+      aRect: aRect ? fmtRect(aRect) : prev.aRect,
+      rawARect: aRect ? fmtRect(aRect) : prev.rawARect,
+      aOffset: aGroup ? `${Math.round(aGroup.x)},${Math.round(aGroup.y)}` : "0,0",
+      aScale: aGroup ? `${aGroup.scale ?? 1}` : "1",
+      correctedARect: aCorrected ? fmtRect(aCorrected) : prev.correctedARect,
     }));
 
     const pressed = new Set<string>();
@@ -500,7 +517,7 @@ function GamepadPad({
       );
     }
     setOffsets(nextOffsets);
-  }, [hitTest, correctedRect, layout.sticks, send, sendAxes]);
+  }, [hitTest, correctedRect, padOffsets, layout.sticks, send, sendAxes]);
 
   const face = FACE_LABELS[layout.face] || FACE_LABELS.nintendo;
   const groupOffset = (id: string): Offset => {
@@ -554,7 +571,10 @@ function GamepadPad({
           <Text style={styles.debugLine} pointerEvents="none">
             g:{debugInfo.grants} r:{debugInfo.rects} held:{debugInfo.currentlyHeld}{"\n"}
             everHit:{debugInfo.everHit} totalHits:{debugInfo.totalHits}{"\n"}
-            touch:{debugInfo.lastTouch} aRect:{debugInfo.aRect}
+            touch:{debugInfo.lastTouch}{"\n"}
+            raw:{debugInfo.rawARect}{"\n"}
+            off:{debugInfo.aOffset} scale:{debugInfo.aScale}{"\n"}
+            corrected:{debugInfo.correctedARect}
           </Text>
           <TouchableOpacity
             style={[styles.editBtn, editMode && styles.editBtnActive]}
