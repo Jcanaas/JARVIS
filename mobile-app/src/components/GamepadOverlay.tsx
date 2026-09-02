@@ -24,6 +24,21 @@ const DIGITAL_LAYOUT: PadLayout = {
 
 const CHANNEL_ID = "jarvis-gamepad";
 
+/** Which Draggable group each control belongs to — needed to correct its
+ * measured rect for that group's current drag/resize offset (see
+ * correctedRect's own comment for why). Kept in sync by hand with the
+ * <Draggable id="group:..."> wrappers below; there's no single source of
+ * truth linking a control id to its group otherwise. */
+const CONTROL_GROUP: Record<string, string> = {
+  "btn:l2": "group:shoulder-l", "btn:l": "group:shoulder-l",
+  "btn:r": "group:shoulder-r", "btn:r2": "group:shoulder-r",
+  "btn:up": "group:dpad", "btn:left": "group:dpad", "btn:right": "group:dpad", "btn:down": "group:dpad",
+  "btn:select": "group:center", "btn:start": "group:center",
+  "btn:x": "group:face", "btn:y": "group:face", "btn:a": "group:face", "btn:b": "group:face",
+  "stick:left": "group:sticks", "stick:right": "group:sticks",
+  "btn:l3": "group:sticks", "btn:r3": "group:sticks",
+};
+
 /**
  * Turns the phone into a controller for the game running on the PC.
  *
@@ -349,16 +364,50 @@ function GamepadPad({
     rects.current[id] = rect;
   }, []);
 
+  /** A control's measured rect, corrected for its group's current drag/
+   *  resize offset. measureLayout() (what PadButton/AnalogStick use to
+   *  report their rect — see AnalogStick's rootRef doc) is RN's own
+   *  layout-engine position, and Draggable's move/resize in edit mode is
+   *  applied as a `transform` — a paint-time effect the layout engine
+   *  never sees, so the raw measured rect stays at the control's
+   *  *original* position no matter how far it's been dragged. Without this
+   *  correction, moving or resizing a group in edit mode only ever looked
+   *  like it worked (the control visibly moves) while the real touch
+   *  target silently stayed put — exactly the "solo veo cambios
+   *  estéticos" a user reported after the touch-hit-testing rework a few
+   *  commits back switched from measureInWindow() (which DOES resolve
+   *  transforms, being an on-screen-position query) to measureLayout()
+   *  (which doesn't, being a pure layout query) to fix a *different*,
+   *  unrelated coordinate-space bug. Reapplying the same offset/scale the
+   *  Draggable wrapper itself applies (translate around the box, then
+   *  scale around its new center — see Draggable's own `customized`
+   *  transform) keeps the hit target in sync with wherever the box is
+   *  actually painted. */
+  const correctedRect = useCallback((id: string, r: Rect): Rect => {
+    const groupId = CONTROL_GROUP[id];
+    const g = groupId ? padOffsets[groupId] : undefined;
+    if (!g) return r;
+    const scale = g.scale ?? 1;
+    if (g.x === 0 && g.y === 0 && scale === 1) return r;
+    const cx = r.x + r.w / 2 + g.x;
+    const cy = r.y + r.h / 2 + g.y;
+    const w = r.w * scale;
+    const h = r.h * scale;
+    return { x: cx - w / 2, y: cy - h / 2, w, h };
+  }, [padOffsets]);
+
   /** Control under a touch. Both the touch position (locationX/Y, below)
    *  and every rect (measureLayout(rootRef, ...), see AnalogStick's rootRef
    *  doc) are relative to the same ancestor — the pad's own root View — so
-   *  no reconciliation between coordinate spaces is needed here. */
+   *  no reconciliation between coordinate spaces is needed here beyond
+   *  correctedRect's own drag/resize correction. */
   const hitTest = useCallback((px: number, py: number): string | null => {
-    for (const [id, r] of Object.entries(rects.current)) {
+    for (const [id, raw] of Object.entries(rects.current)) {
+      const r = correctedRect(id, raw);
       if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return id;
     }
     return null;
-  }, []);
+  }, [correctedRect]);
 
   const handleTouches = useCallback((evt: any, ended: boolean = false) => {
     const touches: any[] = evt?.nativeEvent?.touches || [];
@@ -406,8 +455,9 @@ function GamepadPad({
         pressed.add(control.slice(4));
       } else if (control.startsWith("stick:")) {
         const side = control.slice(6) as StickSide;
-        const r = rects.current[control];
-        if (!r) continue;
+        const raw = rects.current[control];
+        if (!raw) continue;
+        const r = correctedRect(control, raw);
         let dx = pos.x - (r.x + r.w / 2);
         let dy = pos.y - (r.y + r.h / 2);
         const dist = Math.hypot(dx, dy);
@@ -450,7 +500,7 @@ function GamepadPad({
       );
     }
     setOffsets(nextOffsets);
-  }, [hitTest, layout.sticks, send, sendAxes]);
+  }, [hitTest, correctedRect, layout.sticks, send, sendAxes]);
 
   const face = FACE_LABELS[layout.face] || FACE_LABELS.nintendo;
   const groupOffset = (id: string): Offset => {
