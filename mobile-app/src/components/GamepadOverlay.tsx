@@ -39,6 +39,17 @@ const CONTROL_GROUP: Record<string, string> = {
   "btn:l3": "group:sticks", "btn:r3": "group:sticks",
 };
 
+/** Extra margin added around every control's rect before hit-testing. A
+ * user's own reported touches after shrinking a group to scale 0.8 (a
+ * 62x62 button becomes 50x50) landed close to but not inside the
+ * correctly-computed rect — the average of 4 attempts was within ~10px of
+ * the computed center, well inside normal fingertip imprecision for a
+ * target that small. Games routinely pad touch targets below ~44-48dp (the
+ * commonly cited minimum comfortable size) for exactly this reason; this
+ * isn't specific to scaled-down groups, just more noticeable there since
+ * they can end up smaller than that already. */
+const HIT_SLOP = 14;
+
 /**
  * Turns the phone into a controller for the game running on the PC.
  *
@@ -431,7 +442,10 @@ function GamepadPad({
   const hitTest = useCallback((px: number, py: number): string | null => {
     for (const [id, raw] of Object.entries(rects.current)) {
       const r = correctedRect(id, raw);
-      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return id;
+      if (
+        px >= r.x - HIT_SLOP && px <= r.x + r.w + HIT_SLOP &&
+        py >= r.y - HIT_SLOP && py <= r.y + r.h + HIT_SLOP
+      ) return id;
     }
     return null;
   }, [correctedRect]);
