@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { Image } from "expo-image";
 import { C, radius } from "../theme";
-import { api, gamepadScreenUrl } from "../api";
+import { api, gamepadScreenWsUrl } from "../api";
 
 /** Matches actions/emulator_frame.py's crop_bottom_screen_3ds() — the crop
  * is 320x240 out of a 400x480 combined frame, always 4:3. Setting the same
@@ -15,85 +15,91 @@ const SCREEN_ASPECT = 4 / 3;
  * Mirrors the 3DS bottom (touch) screen on the phone and forwards taps/
  * drags on it as real touch input to the emulator core.
  *
- * Polls actions/lan_dashboard.py's /api/gamepad/screen for a fresh JPEG
- * snapshot instead of opening one long MJPEG connection — nothing here
- * reliably decodes multipart/x-mixed-replace the way a browser <img> does,
- * and polling a still image is a well-worn, reliable substitute at the
- * ~30fps this needs. Verified server-side separately: 40 consecutive
- * requests all returned valid, consistent frames in ~5ms each — the
- * flicker seen on-device was never a backend problem, and there's plenty
- * of headroom in that response time for a much higher poll rate than the
- * original conservative 10fps.
+ * Reads actions/lan_dashboard.py's persistent WebSocket stream
+ * (_gamepad_screen_ws_serve) instead of polling /api/gamepad/screen over
+ * HTTP. The polling version was tried first and worked, but real device
+ * timing data showed the backend itself responds in ~2-3ms even during
+ * real gameplay — a fresh HTTP request per frame (headers, a new response
+ * object, a new Werkzeug request thread) was still the actual bottleneck,
+ * something no amount of shrinking the JPEG payload could fix. A single
+ * long-lived connection pays that per-request overhead once instead of
+ * once per frame.
  *
- * Uses expo-image, not React Native's core Image. Three things were tried
- * on core Image first, all still flickered on-device: a plain setInterval
- * overwriting a hidden layer's source.uri; Image.prefetch() before
- * swapping a single Image's uri; fetching the bytes into a data: URI
- * ourselves (which additionally needed dropping Blob/FileReader — RN's
- * Blob support isn't uniformly there — in favour of a hand-rolled base64
- * encoder over arrayBuffer()). None of it mattered: React Native's core
- * Image on Android is documented to reset its native view on any
- * `source` change regardless of whether the new bytes are already
- * in memory or cached — the flicker was never about the network or the
- * swap mechanism, it was that component. expo-image is built specifically
- * to not do that (it keeps the previous frame on screen until the next one
- * is actually ready), so this goes back to the simplest version — poll a
- * plain network URL — now that the component underneath is the right one.
+ * Frames arrive as base64 *text* messages, not binary — handed straight to
+ * expo-image as a `data:image/jpeg;base64,...` URI. Deliberately not
+ * ArrayBuffer/Blob: this exact codebase already hit a real on-device
+ * runtime error going that route for this same component (see the
+ * now-removed "fetching the bytes into a data: URI ourselves" attempt in
+ * this file's git history) — a text message needs none of that.
+ *
+ * Uses expo-image, not React Native's core Image, for the same reason as
+ * before: core Image on Android resets its native view on any `source`
+ * change (documented behaviour), which caused a visible flicker on every
+ * single frame; expo-image keeps the previous frame on screen until the
+ * next one is actually ready.
  */
-export default function TouchScreen3DS({ active = true }: { active?: boolean }) {
-  const [uri, setUri] = useState(() => gamepadScreenUrl(Date.now()));
+export default function TouchScreen3DS({
+  active = true,
+  wsPort,
+}: {
+  active?: boolean;
+  /** From api.getGamepadStatus()'s ws_port — null until the first status
+   * poll lands, or if the WebSocket server somehow never started. */
+  wsPort: number | null;
+}) {
+  const [uri, setUri] = useState<string | null>(null);
   const rectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
   const rootRef = useRef<View | null>(null);
   const touching = useRef(false);
-  // TEMPORARY — the user reports an empty black box where the mirror should
-  // be (space reserved, image never shows). expo-image fails silently on a
-  // bad response, so there was no way to tell a 404/403/network error apart
-  // from "still loading" from on-device. Safe to remove once the real cause
-  // is confirmed. See GamepadOverlay.tsx's own (also temporary) debug
-  // overlay for the same pattern used earlier to diagnose the touch-offset
-  // issue.
-  const [status, setStatus] = useState("loading…");
-  const loadedOnce = useRef(false);
-
-  // Self-paced, not a fixed setInterval: firing a *new* request every fixed
-  // N ms regardless of whether the last one finished let a slow response
-  // pile up requests faster than they drain — a growing backlog that (per
-  // an earlier report) never resolves, image or error, because nothing is
-  // individually stuck, there's just an ever-growing queue in front of
-  // every request. Only ever having one in flight — the next one fires
-  // right after the *previous one finishes*, from onLoad/onError below —
-  // can't pile up.
-  //
-  // No artificial delay between them either: real timing measurements
-  // (actions/lan_dashboard.py's api_gamepad_screen() prints its own
-  // frame/crop/resize/encode breakdown, compared against this component's
-  // own round-trip readout in the debug overlay) confirmed the backend
-  // itself responds in ~2-3ms even during real gameplay — the ~85-100ms
-  // per-cycle a real device measured was mostly network/transport time
-  // *plus* a flat 33ms of dead time this component used to insert after
-  // every load, a leftover from when this used a fixed setInterval and no
-  // longer serves any purpose now that only one request is ever in flight.
-  // Firing immediately lets the mirror run at whatever rate the network can
-  // actually sustain instead of adding a self-imposed ceiling on top of it.
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // TEMPORARY — paired with the round-trip time shown in the debug overlay
-  // below and actions/lan_dashboard.py's own server-side timing breakdown
-  // (printed to its console, throttled to ~1/sec): comparing the two tells
-  // us how much of the per-request time is genuinely network vs. backend
-  // work, instead of guessing at payload size again.
-  const requestStartedAt = useRef(0);
-  const scheduleNext = useCallback((delay: number) => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      requestStartedAt.current = Date.now();
-      setUri(gamepadScreenUrl(Date.now()));
-    }, delay);
-  }, []);
+  // TEMPORARY — kept from the polling version's diagnostics while this
+  // streaming approach gets its first real-device verification. Shows
+  // connection state and, once frames are arriving, the inter-frame
+  // interval (how long since the previous frame — the streaming
+  // equivalent of the old per-request round trip). Safe to remove once
+  // confirmed working.
+  const [status, setStatus] = useState("connecting…");
+  const lastFrameAt = useRef(0);
 
   useEffect(() => {
-    scheduleNext(0);
-    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [scheduleNext]);
+    if (wsPort == null) {
+      setStatus("no ws_port yet");
+      return;
+    }
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let ws: WebSocket | null = null;
+
+    const connect = () => {
+      if (cancelled) return;
+      setStatus("connecting…");
+      ws = new WebSocket(gamepadScreenWsUrl(wsPort));
+      ws.onopen = () => setStatus("connected");
+      ws.onmessage = (e) => {
+        const now = Date.now();
+        const dt = lastFrameAt.current ? now - lastFrameAt.current : 0;
+        lastFrameAt.current = now;
+        setUri(`data:image/jpeg;base64,${e.data}`);
+        setStatus(dt ? `ok ${dt}ms` : "ok");
+      };
+      ws.onerror = () => setStatus("ws error");
+      // Fires on both a clean close and a failed connection attempt —
+      // either way, the mirror should keep trying rather than going dark
+      // for the rest of the session over one dropped connection (Wi-Fi
+      // hiccup, the desktop briefly unreachable, ...).
+      ws.onclose = () => {
+        if (cancelled) return;
+        setStatus("disconnected, retrying…");
+        retryTimer = setTimeout(connect, 1000);
+      };
+    };
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      ws?.close();
+    };
+  }, [wsPort]);
 
   const measure = useCallback(() => {
     rootRef.current?.measureInWindow((x, y, w, h) => { rectRef.current = { x, y, w, h }; });
@@ -144,22 +150,16 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
       onResponderRelease={onRelease}
       onResponderTerminate={onRelease}
     >
-      <Image
-        source={{ uri }}
-        style={styles.image}
-        contentFit="contain"
-        cachePolicy="none"
-        transition={0}
-        onLoad={() => {
-          loadedOnce.current = true;
-          setStatus(`ok ${Date.now() - requestStartedAt.current}ms`);
-          scheduleNext(0);
-        }}
-        onError={(e: any) => {
-          setStatus(`error ${Date.now() - requestStartedAt.current}ms: ${e?.error || "unknown"}`);
-          scheduleNext(0);
-        }}
-      />
+      {!!uri && (
+        <Image
+          source={{ uri }}
+          style={styles.image}
+          contentFit="contain"
+          cachePolicy="none"
+          transition={0}
+          onError={(e: any) => setStatus(`decode error: ${e?.error || "unknown"}`)}
+        />
+      )}
       {/* TEMPORARY — see the status state's own comment above. */}
       <Text style={styles.debugText}>{status}</Text>
     </View>

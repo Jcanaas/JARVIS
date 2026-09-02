@@ -43,6 +43,7 @@ syncedlyrics
 mutagen
 flask
 pywebview
+websockets
 
 # --- Desarrollo (tests: python -m pytest tests/) ---
 pytest

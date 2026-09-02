@@ -873,6 +873,75 @@ class LanDashboardTests(unittest.TestCase):
         decoded = cv2.imdecode(np.frombuffer(r.data, dtype=np.uint8), cv2.IMREAD_COLOR)
         self.assertEqual(decoded.shape[:2], (240, 320))  # (height, width)
 
+    def test_gamepad_screen_ws_streams_an_authorized_client_a_base64_frame(self):
+        """The touch-mirror WebSocket server (_start_gamepad_screen_ws) pushes
+        frames instead of the phone polling — added after real device timing
+        showed the backend itself was never the bottleneck (~2-3ms per
+        request) but a fresh HTTP request per frame was still expensive.
+        This exercises the real server/client handshake end to end, not just
+        the crop/encode helper in isolation."""
+        import asyncio
+        import base64
+        import types as _types
+
+        import cv2
+        import numpy as np
+        import websockets
+        from websockets.asyncio.server import serve
+
+        from actions import lan_dashboard
+        from actions.libretro import PIXEL_RGB565
+        from ui.widgets import retro
+
+        width, height = 400, 480
+        pixel = (0x1F << 11).to_bytes(2, "little")  # solid red
+        frame = pixel * (width * height)
+        core = MagicMock()
+        core.latest_frame.return_value = (frame, width, height, width * 2, PIXEL_RGB565)
+        screen = _types.SimpleNamespace(core=core, _console_id="3ds")
+        token = "ws-test-token"
+
+        async def run():
+            async def handler(ws):
+                await lan_dashboard._gamepad_screen_ws_handler(ws, token)
+
+            async with serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                async with websockets.connect(
+                    f"ws://127.0.0.1:{port}/gamepad-screen?token={token}"
+                ) as client:
+                    return await asyncio.wait_for(client.recv(), timeout=5)
+
+        with patch.object(retro, "active_screen", return_value=screen):
+            msg = asyncio.run(run())
+
+        raw = base64.b64decode(msg)
+        decoded = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(decoded.shape[:2], (240, 320))  # (height, width)
+
+    def test_gamepad_screen_ws_rejects_a_bad_token(self):
+        import asyncio
+
+        import websockets
+        from websockets.asyncio.server import serve
+        from websockets.exceptions import ConnectionClosedError
+
+        from actions import lan_dashboard
+
+        async def run():
+            async def handler(ws):
+                await lan_dashboard._gamepad_screen_ws_handler(ws, "the-real-token")
+
+            async with serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                async with websockets.connect(
+                    f"ws://127.0.0.1:{port}/gamepad-screen?token=wrong"
+                ) as client:
+                    with self.assertRaises(ConnectionClosedError):
+                        await client.recv()
+
+        asyncio.run(run())
+
     def test_gamepad_touch_translates_coordinates_and_forwards_to_the_core(self):
         import types as _types
         from actions import lan_dashboard

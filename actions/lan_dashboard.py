@@ -16,6 +16,8 @@ the LAN-only URL, so anyone who has it can reach the API from the internet.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import collections
 import secrets
 import socket
@@ -81,6 +83,12 @@ _gamepad_announce = 0
 # Safe to remove along with that print once the touch-mirror fps bottleneck
 # is confirmed.
 _last_gamepad_screen_log = 0.0
+
+# Port of the WebSocket server started by _start_gamepad_screen_ws(), or
+# None before start_dashboard() has run. Exposed to the phone via
+# api_gamepad_status()'s ws_port field rather than having it guess an
+# offset from the HTTP port itself.
+_ws_port: int | None = None
 
 
 # Cover sizes the phone actually needs, in physical pixels (logical size ×3 for
@@ -1188,6 +1196,178 @@ def _live_playback() -> dict:
     return info
 
 
+def _retro_screen():
+    """The live emulator screen, or None. Imported lazily: ui.widgets.retro
+    pulls in PyQt, which must not be a hard dependency of the API layer."""
+    try:
+        from ui.widgets import retro
+        return retro.active_screen()
+    except Exception:
+        return None
+
+
+def _active_emulator():
+    """(input target, console_id) for whichever emulator is actually
+    live right now — the legacy Qt widget, or the headless web session
+    from actions/emulator_session.py — or (None, "") if neither is
+    running. Both expose set_button()/set_axis()/clear_input() directly
+    (a LibretroCore does, and so does EmulatorSession, as a passthrough),
+    so /api/gamepad/input doesn't need to know which one it got. Only one
+    can ever be live at a time — actions/libretro.py's load() is a
+    process-global singleton — so checking the Qt screen first and
+    falling back to the web session can't pick the wrong one.
+
+    Module-level (not nested in _make_app like the routes that use it):
+    the WebSocket touch-mirror server (_gamepad_screen_ws_serve) needs it
+    too, and that server is started once from start_dashboard(), entirely
+    outside any Flask app instance."""
+    screen = _retro_screen()
+    if screen is not None and getattr(screen, "core", None) is not None:
+        return screen.core, str(getattr(screen, "_console_id", "") or "")
+
+    try:
+        from actions.emulator_session import get_session
+        session = get_session()
+    except Exception:
+        return None, ""
+    if session.is_running():
+        return session, session.console_id
+    return None, ""
+
+
+def _active_emulator_frame():
+    """(data, width, height, pitch, pixel_format) for whichever emulator
+    _active_emulator() picked, or all-None if there's no frame yet.
+    LibretroCore and EmulatorSession expose the same 5-tuple under
+    different names (current_frame() vs latest_frame()) — see
+    actions/emulator_session.py's latest_frame() docstring."""
+    core, console_id = _active_emulator()
+    if core is None:
+        return (None, 0, 0, 0, 0), console_id
+    getter = getattr(core, "latest_frame", None) or getattr(core, "current_frame", None)
+    if getter is None:
+        return (None, 0, 0, 0, 0), console_id
+    return getter(), console_id
+
+
+def _gamepad_screen_crop_jpeg(quality: int = 55):
+    """The 3DS bottom-screen crop as JPEG bytes, or None if there's nothing
+    to show right now (wrong console, no frame yet, bad frame). Shared by
+    api_gamepad_screen() (HTTP polling, still used as a fallback / by
+    anything hitting that URL directly) and _gamepad_screen_ws_handler()
+    (the persistent WebSocket stream) so the actual crop/resize/encode
+    logic — and its performance characteristics — only exist in one place."""
+    _core, console_id = _active_emulator()
+    if console_id != "3ds":
+        return None
+    data, w, h, pitch, fmt = _active_emulator_frame()[0]
+    if data is None:
+        return None
+
+    import cv2
+
+    from actions.emulator_frame import crop_bottom_screen_3ds, frame_to_bgr
+
+    bgr = frame_to_bgr(data, w, h, pitch, fmt)
+    if bgr is None:
+        return None
+    cropped = crop_bottom_screen_3ds(bgr)
+    # See api_gamepad_screen()'s own comment for why 320x240: a real device
+    # measured ~15fps over LAN Wi-Fi even after downscaling, and later
+    # timing data showed the backend itself responds in ~2-3ms — the
+    # payload size was never the actual bottleneck, but there's no reason
+    # to re-inflate it either now that the WebSocket stream (this function)
+    # exists specifically to cut down the *other* cost, per-request HTTP
+    # overhead.
+    target_w, target_h = 320, 240
+    if cropped.shape[1] > target_w or cropped.shape[0] > target_h:
+        cropped = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        return None
+    return buf.tobytes()
+
+
+async def _gamepad_screen_ws_handler(websocket, token: str) -> None:
+    """Pushes base64-encoded JPEG frames of the 3DS bottom screen to one
+    connected phone as fast as the backend can produce them, instead of the
+    phone opening a brand-new HTTP request per frame (TouchScreen3DS.tsx's
+    original design). Real timing data from a live device showed the
+    backend itself responds in ~2-3ms even during real gameplay — the
+    ~85-100ms per cycle measured on the phone was overwhelmingly network/
+    transport overhead, and a fresh HTTP request pays a large chunk of that
+    overhead (headers, a new response object, a new thread from Werkzeug's
+    per-request model) every single frame. One long-lived connection pays
+    it once.
+
+    Sends base64 text frames, not binary — React Native's Blob/ArrayBuffer
+    handling has a documented history of on-device failures in this exact
+    codebase (see TouchScreen3DS.tsx's own docstring: dropped a
+    Blob/FileReader approach after it threw a runtime error on-device). A
+    text message the client can hand straight to expo-image as a
+    `data:image/jpeg;base64,...` URI needs none of that — same proven
+    "expo-image with a URI source" path already used for HTTP polling.
+
+    Not authenticated via a header (no custom headers on RN's WebSocket
+    client) — the token travels in the connection path's query string,
+    same place TouchScreen3DS.tsx already puts it for the HTTP endpoint."""
+    import urllib.parse
+
+    from websockets.exceptions import ConnectionClosed
+
+    request = websocket.request
+    qs = urllib.parse.urlsplit(request.path).query
+    if urllib.parse.parse_qs(qs).get("token", [None])[0] != token:
+        await websocket.close(code=4001, reason="unauthorized")
+        return
+
+    try:
+        while True:
+            jpg = _gamepad_screen_crop_jpeg()
+            if jpg is None:
+                await asyncio.sleep(0.1)
+                continue
+            await websocket.send(base64.b64encode(jpg).decode("ascii"))
+            # No frame_id()-based skip-ahead here (unlike webui_server.py's
+            # desktop MJPEG generator) — the Qt legacy screen's LibretroCore
+            # doesn't expose one, only actions/emulator_session.py's
+            # EmulatorSession does, and _active_emulator() deliberately
+            # supports both. A short fixed sleep between sends is a simple,
+            # correct cap on how often this re-encodes instead.
+            await asyncio.sleep(1 / 45)
+    except ConnectionClosed:
+        pass
+
+
+async def _gamepad_screen_ws_serve(port: int, token: str) -> None:
+    from websockets.asyncio.server import serve
+
+    async def handler(websocket):
+        await _gamepad_screen_ws_handler(websocket, token)
+
+    async with serve(handler, "0.0.0.0", port):
+        await asyncio.Future()  # run forever; the thread running this is a daemon
+
+
+def _start_gamepad_screen_ws(port: int, token: str) -> None:
+    """Starts the touch-mirror WebSocket server in its own daemon thread
+    with its own asyncio event loop — separate from the Flask dashboard's
+    own thread (started right alongside it in start_dashboard()), since
+    Flask's dev server here is sync/threaded and asyncio needs its own
+    loop. A different port than the HTTP dashboard: Flask's WSGI dev
+    server doesn't speak the WebSocket upgrade handshake itself."""
+    global _ws_port
+    _ws_port = port
+
+    def _run():
+        try:
+            asyncio.run(_gamepad_screen_ws_serve(port, token))
+        except Exception as e:
+            print(f"[LanDashboard] gamepad screen WebSocket server failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _make_app(token: str):
     from flask import Flask, jsonify, request, Response, send_file
 
@@ -1487,38 +1667,6 @@ def _make_app(token: str):
             print(f"[LanDashboard] send_whatsapp failed: {e}")
             return jsonify({"error": str(e)}), 500
 
-    def _retro_screen():
-        """The live emulator screen, or None. Imported lazily: ui.widgets.retro
-        pulls in PyQt, which must not be a hard dependency of the API layer."""
-        try:
-            from ui.widgets import retro
-            return retro.active_screen()
-        except Exception:
-            return None
-
-    def _active_emulator():
-        """(input target, console_id) for whichever emulator is actually
-        live right now — the legacy Qt widget, or the headless web session
-        from actions/emulator_session.py — or (None, "") if neither is
-        running. Both expose set_button()/set_axis()/clear_input() directly
-        (a LibretroCore does, and so does EmulatorSession, as a passthrough),
-        so /api/gamepad/input doesn't need to know which one it got. Only one
-        can ever be live at a time — actions/libretro.py's load() is a
-        process-global singleton — so checking the Qt screen first and
-        falling back to the web session can't pick the wrong one."""
-        screen = _retro_screen()
-        if screen is not None and getattr(screen, "core", None) is not None:
-            return screen.core, str(getattr(screen, "_console_id", "") or "")
-
-        try:
-            from actions.emulator_session import get_session
-            session = get_session()
-        except Exception:
-            return None, ""
-        if session.is_running():
-            return session, session.console_id
-        return None, ""
-
     @app.route("/api/debug/emulator_frame")
     def api_debug_emulator_frame():
         """Diagnostic-only: the emulator's current frame as a PNG.
@@ -1570,6 +1718,13 @@ def _make_app(token: str):
             # the touch overlay — only the 3DS has a second, touch-driven
             # screen to mirror.
             "has_touch_screen": console_id == "3ds",
+            # Port of the persistent WebSocket touch-mirror stream (see
+            # _start_gamepad_screen_ws) — None before start_dashboard() has
+            # run it, which shouldn't happen in practice since this route
+            # only exists once _make_app() is already serving requests from
+            # inside that same call. The phone builds ws://<host>:<ws_port>
+            # from this instead of assuming an offset from its own port.
+            "ws_port": _ws_port,
             # Bumped by /api/gamepad/announce. The phone re-opens its prompt
             # when this changes, so the desktop can call the pad back after
             # the user dismissed it.
@@ -1609,20 +1764,6 @@ def _make_app(token: str):
             print(f"[LanDashboard] gamepad input failed: {e}")
             return jsonify({"error": str(e)}), 500
         return jsonify({"ok": True})
-
-    def _active_emulator_frame():
-        """(data, width, height, pitch, pixel_format) for whichever emulator
-        _active_emulator() picked, or all-None if there's no frame yet.
-        LibretroCore and EmulatorSession expose the same 5-tuple under
-        different names (current_frame() vs latest_frame()) — see
-        actions/emulator_session.py's latest_frame() docstring."""
-        core, console_id = _active_emulator()
-        if core is None:
-            return (None, 0, 0, 0, 0), console_id
-        getter = getattr(core, "latest_frame", None) or getattr(core, "current_frame", None)
-        if getter is None:
-            return (None, 0, 0, 0, 0), console_id
-        return getter(), console_id
 
     @app.route("/api/gamepad/screen")
     def api_gamepad_screen():
@@ -2330,6 +2471,13 @@ def start_dashboard(port: int | None = None) -> str:
             ),
             daemon=True,
         ).start()
+        # Flask's dev server here is plain WSGI and doesn't speak the
+        # WebSocket upgrade handshake, so the touch-mirror stream
+        # (_gamepad_screen_ws_serve) runs its own tiny asyncio server on the
+        # next port up instead of trying to bolt WebSocket support onto this
+        # one. Phone learns the port from api_gamepad_status()'s ws_port
+        # field rather than hardcoding the +1 offset itself.
+        _start_gamepad_screen_ws(port + 1, token)
         _started = True
 
     ip = get_lan_ip()

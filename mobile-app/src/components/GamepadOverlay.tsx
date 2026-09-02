@@ -39,6 +39,7 @@ export default function GamepadOverlay() {
   const [consoleId, setConsoleId] = useState("");
   const [layout, setLayout] = useState<PadLayout>(DIGITAL_LAYOUT);
   const [hasTouchScreen, setHasTouchScreen] = useState(false);
+  const [wsPort, setWsPort] = useState<number | null>(null);
   const dismissedRef = useRef(false);
   const announceRef = useRef<number | null>(null);
   const notifIdRef = useRef<string | null>(null);
@@ -78,11 +79,12 @@ export default function GamepadOverlay() {
 
   const poll = useCallback(async () => {
     try {
-      const { active, console: cid, announce, layout: padLayout, has_touch_screen } = await api.getGamepadStatus();
+      const { active, console: cid, announce, layout: padLayout, has_touch_screen, ws_port } = await api.getGamepadStatus();
       setAvailable(active);
       setConsoleId(cid || "");
       setLayout(padLayout ? { ...DIGITAL_LAYOUT, ...padLayout } : DIGITAL_LAYOUT);
       setHasTouchScreen(!!has_touch_screen);
+      setWsPort(typeof ws_port === "number" ? ws_port : null);
 
       // The desktop asked for the prompt again: honour it even if the user
       // dismissed the last one.
@@ -139,6 +141,7 @@ export default function GamepadOverlay() {
         consoleId={consoleId}
         layout={layout}
         hasTouchScreen={hasTouchScreen}
+        wsPort={wsPort}
         onClose={() => setOpen(false)}
       />
     );
@@ -192,8 +195,8 @@ const FACE_LABELS: Record<string, { up: string; left: string; right: string; dow
 const AXIS_SEND_MS = 50;
 
 function GamepadPad({
-  consoleId, layout, hasTouchScreen, onClose,
-}: { consoleId: string; layout: PadLayout; hasTouchScreen: boolean; onClose: () => void }) {
+  consoleId, layout, hasTouchScreen, wsPort, onClose,
+}: { consoleId: string; layout: PadLayout; hasTouchScreen: boolean; wsPort: number | null; onClose: () => void }) {
   useKeepAwake(); // a controller that lets the screen sleep is useless
 
   // Visual state only. What is actually sent lives in the refs below, so a
@@ -605,7 +608,7 @@ function GamepadPad({
               onResize={resizeGroup}
               onActivate={bringToFront}
             >
-              <TouchScreen3DS active={!editMode} />
+              <TouchScreen3DS active={!editMode} wsPort={wsPort} />
             </Draggable>
           </View>
         )}

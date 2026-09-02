@@ -190,13 +190,29 @@ export function avatarProxyUrl(chatId: string): string {
 }
 
 /** Authenticated URL for one JPEG snapshot of the 3DS bottom (touch)
- * screen. `cacheBust` should change on every call (e.g. Date.now()) — the
- * caller polls this on a timer rather than opening one long streaming
- * connection, since React Native's <Image> doesn't reliably decode
- * multipart/x-mixed-replace the way a browser <img> does. */
+ * screen. `cacheBust` should change on every call (e.g. Date.now()). Kept
+ * as a fallback path (currently unused by TouchScreen3DS.tsx, which uses
+ * gamepadScreenWsUrl() instead) — real device timing showed a fresh HTTP
+ * request per frame was the actual bottleneck, not backend processing. */
 export function gamepadScreenUrl(cacheBust: number): string {
   const c = requireConn();
   return `${c.baseUrl}/api/gamepad/screen?token=${encodeURIComponent(c.token)}&t=${cacheBust}`;
+}
+
+/** Authenticated WebSocket URL for the persistent 3DS touch-mirror stream
+ * (actions/lan_dashboard.py's _gamepad_screen_ws_serve) — one connection,
+ * server pushes a fresh base64 JPEG frame as soon as one's ready, instead
+ * of the phone paying full HTTP request overhead (headers, a new response,
+ * a new Werkzeug request thread) every single frame. `wsPort` comes from
+ * api.getGamepadStatus()'s ws_port field — a different port than the main
+ * dashboard's, since its plain Flask/WSGI dev server doesn't speak the
+ * WebSocket upgrade handshake itself. baseUrl is always http:// (this
+ * backend never serves HTTPS — see lan_dashboard.py's own module
+ * docstring), so ws:// is the correct, matching scheme, not wss://. */
+export function gamepadScreenWsUrl(wsPort: number): string {
+  const c = requireConn();
+  const host = new URL(c.baseUrl).hostname;
+  return `ws://${host}:${wsPort}/gamepad-screen?token=${encodeURIComponent(c.token)}`;
 }
 
 function requireConn(): Connection {
@@ -345,6 +361,7 @@ export const api = {
       announce?: number;
       layout?: PadLayout;
       has_touch_screen?: boolean;
+      ws_port?: number | null;
     }>("/api/gamepad/status"),
   /** Asks the phone-side prompt to reappear (mirrors the desktop's button). */
   announceGamepad: () => postJson<{ ok: boolean; announce: number }>("/api/gamepad/announce", {}),
