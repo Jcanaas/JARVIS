@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { C } from "../theme";
 
@@ -33,6 +33,7 @@ export default function AnalogStick({
   offset,
   pressed,
   onMeasure,
+  remeasureTick,
 }: {
   /** Control id the pad uses to address this stick, e.g. "stick:left". */
   id: string;
@@ -42,6 +43,14 @@ export default function AnalogStick({
   /** L3/R3 highlight — the pad decides, this only renders it. */
   pressed?: boolean;
   onMeasure: (id: string, rect: Rect) => void;
+  /** Bumped periodically by the parent to force a fresh measureInWindow()
+   * even when onLayout hasn't refired — see its own comment in
+   * GamepadOverlay.tsx for why that matters (a sibling appearing/resizing
+   * shifts this control's *absolute* window position without changing its
+   * layout frame *relative to its own parent*, which is the only thing
+   * onLayout watches; a stale absolute measurement from before that shift
+   * would otherwise never get corrected). */
+  remeasureTick?: number;
 }) {
   const radius = size / 2;
   const knob = size * 0.42;
@@ -50,6 +59,8 @@ export default function AnalogStick({
   const measure = useCallback(() => {
     baseRef.current?.measureInWindow((x, y, w, h) => onMeasure(id, { x, y, w, h }));
   }, [id, onMeasure]);
+
+  useEffect(() => { measure(); }, [remeasureTick, measure]);
 
   return (
     <View style={{ alignItems: "center", gap: 4 }}>

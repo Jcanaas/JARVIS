@@ -265,6 +265,20 @@ function GamepadPad({
   });
   const lastAxisSend = useRef<Record<StickSide, number>>({ left: 0, right: 0 });
 
+  // Forces every PadButton/AnalogStick to re-run measureInWindow()
+  // periodically — see PadButton's remeasureTick doc for why onLayout alone
+  // isn't enough here: the 3DS touch-screen mirror sitting to the pad's
+  // left (a sibling with its own async-loaded content) can shift every
+  // control's *absolute* window position after their first layout pass
+  // without ever changing their layout frame *relative to their own
+  // parent*, which is all onLayout actually watches — leaving rects.current
+  // stuck with stale coordinates from before that shift, silently, forever.
+  const [remeasureTick, setRemeasureTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setRemeasureTick((v) => v + 1), 400);
+    return () => clearInterval(t);
+  }, []);
+
   useEffect(() => {
     ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
     return () => {
@@ -476,34 +490,34 @@ function GamepadPad({
           {(layout.shoulders || layout.triggers) && (
             <View style={styles.shoulderRow}>
               <Draggable id="group:shoulder-l" editMode={editMode} offset={groupOffset("group:shoulder-l")} scale={groupScale("group:shoulder-l")} zIndex={groupZIndex("group:shoulder-l")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.shoulderGroup}>
-                {layout.triggers && <PadButton id="btn:l2" label="L2" down={!!down.l2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
-                {layout.shoulders && <PadButton id="btn:l" label="L1" down={!!down.l} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
+                {layout.triggers && <PadButton id="btn:l2" label="L2" down={!!down.l2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} />}
+                {layout.shoulders && <PadButton id="btn:l" label="L1" down={!!down.l} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} />}
               </Draggable>
               <Draggable id="group:shoulder-r" editMode={editMode} offset={groupOffset("group:shoulder-r")} scale={groupScale("group:shoulder-r")} zIndex={groupZIndex("group:shoulder-r")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.shoulderGroup}>
-                {layout.shoulders && <PadButton id="btn:r" label="R1" down={!!down.r} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
-                {layout.triggers && <PadButton id="btn:r2" label="R2" down={!!down.r2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} />}
+                {layout.shoulders && <PadButton id="btn:r" label="R1" down={!!down.r} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} />}
+                {layout.triggers && <PadButton id="btn:r2" label="R2" down={!!down.r2} onMeasure={onMeasure} style={styles.shoulder} disabled={editMode} remeasureTick={remeasureTick} />}
               </Draggable>
             </View>
           )}
 
           <View style={styles.mainRow}>
             <Draggable id="group:dpad" editMode={editMode} offset={groupOffset("group:dpad")} scale={groupScale("group:dpad")} zIndex={groupZIndex("group:dpad")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.dpad}>
-              <PadButton id="btn:up" label="▲" down={!!down.up} onMeasure={onMeasure} style={[styles.dBtn, styles.dUp]} disabled={editMode} />
-              <PadButton id="btn:left" label="◀" down={!!down.left} onMeasure={onMeasure} style={[styles.dBtn, styles.dLeft]} disabled={editMode} />
-              <PadButton id="btn:right" label="▶" down={!!down.right} onMeasure={onMeasure} style={[styles.dBtn, styles.dRight]} disabled={editMode} />
-              <PadButton id="btn:down" label="▼" down={!!down.down} onMeasure={onMeasure} style={[styles.dBtn, styles.dDown]} disabled={editMode} />
+              <PadButton id="btn:up" label="▲" down={!!down.up} onMeasure={onMeasure} style={[styles.dBtn, styles.dUp]} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:left" label="◀" down={!!down.left} onMeasure={onMeasure} style={[styles.dBtn, styles.dLeft]} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:right" label="▶" down={!!down.right} onMeasure={onMeasure} style={[styles.dBtn, styles.dRight]} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:down" label="▼" down={!!down.down} onMeasure={onMeasure} style={[styles.dBtn, styles.dDown]} disabled={editMode} remeasureTick={remeasureTick} />
             </Draggable>
 
             <Draggable id="group:center" editMode={editMode} offset={groupOffset("group:center")} scale={groupScale("group:center")} zIndex={groupZIndex("group:center")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.centerCol}>
-              <PadButton id="btn:select" label="SELECT" down={!!down.select} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
-              <PadButton id="btn:start" label="START" down={!!down.start} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
+              <PadButton id="btn:select" label="SELECT" down={!!down.select} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:start" label="START" down={!!down.start} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} />
             </Draggable>
 
             <Draggable id="group:face" editMode={editMode} offset={groupOffset("group:face")} scale={groupScale("group:face")} zIndex={groupZIndex("group:face")} onDrag={dragGroup} onResize={resizeGroup} onActivate={bringToFront} style={styles.face}>
-              <PadButton id="btn:x" label={face.up} down={!!down.x} onMeasure={onMeasure} style={[styles.fBtn, styles.fUp]} disabled={editMode} />
-              <PadButton id="btn:y" label={face.left} down={!!down.y} onMeasure={onMeasure} style={[styles.fBtn, styles.fLeft]} disabled={editMode} />
-              <PadButton id="btn:a" label={face.right} down={!!down.a} onMeasure={onMeasure} style={[styles.fBtn, styles.fRight]} disabled={editMode} />
-              <PadButton id="btn:b" label={face.down} down={!!down.b} onMeasure={onMeasure} style={[styles.fBtn, styles.fDown]} disabled={editMode} />
+              <PadButton id="btn:x" label={face.up} down={!!down.x} onMeasure={onMeasure} style={[styles.fBtn, styles.fUp]} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:y" label={face.left} down={!!down.y} onMeasure={onMeasure} style={[styles.fBtn, styles.fLeft]} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:a" label={face.right} down={!!down.a} onMeasure={onMeasure} style={[styles.fBtn, styles.fRight]} disabled={editMode} remeasureTick={remeasureTick} />
+              <PadButton id="btn:b" label={face.down} down={!!down.b} onMeasure={onMeasure} style={[styles.fBtn, styles.fDown]} disabled={editMode} remeasureTick={remeasureTick} />
             </Draggable>
           </View>
 
@@ -514,6 +528,7 @@ function GamepadPad({
                 label={layout.sticks > 1 ? "IZQ" : "STICK"}
                 offset={offsets.left}
                 onMeasure={onMeasure}
+                remeasureTick={remeasureTick}
               />
               {layout.sticks > 1 && (
                 <AnalogStick
@@ -521,12 +536,13 @@ function GamepadPad({
                   label="DCH"
                   offset={offsets.right}
                   onMeasure={onMeasure}
+                  remeasureTick={remeasureTick}
                 />
               )}
               {layout.stick_buttons && (
                 <View style={styles.stickButtons}>
-                  <PadButton id="btn:l3" label="L3" down={!!down.l3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
-                  <PadButton id="btn:r3" label="R3" down={!!down.r3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} />
+                  <PadButton id="btn:l3" label="L3" down={!!down.l3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} />
+                  <PadButton id="btn:r3" label="R3" down={!!down.r3} onMeasure={onMeasure} style={styles.small} textStyle={styles.smallText} disabled={editMode} remeasureTick={remeasureTick} />
                 </View>
               )}
             </Draggable>
@@ -650,7 +666,7 @@ function Draggable({
  * decide which of them the live touches are sitting on.
  */
 function PadButton({
-  id, label, down, style, textStyle, onMeasure, disabled,
+  id, label, down, style, textStyle, onMeasure, disabled, remeasureTick,
 }: {
   id: string;
   label: string;
@@ -662,11 +678,19 @@ function PadButton({
    *  (see GamepadPad), so this button won't receive input either way; this
    *  just dims it to make that visually obvious. */
   disabled?: boolean;
+  /** Bumped periodically by the parent to force a fresh measureInWindow()
+   * even when onLayout hasn't refired — see AnalogStick's copy of this
+   * same prop for the full explanation (a sibling appearing/resizing shifts
+   * a control's *absolute* window position without changing its layout
+   * frame *relative to its own parent*, the only thing onLayout watches). */
+  remeasureTick?: number;
 }) {
   const ref = useRef<View | null>(null);
   const measure = useCallback(() => {
     ref.current?.measureInWindow((x, y, w, h) => onMeasure(id, { x, y, w, h }));
   }, [id, onMeasure]);
+
+  useEffect(() => { measure(); }, [remeasureTick, measure]);
 
   return (
     <View ref={ref} onLayout={measure} style={[styles.btn, style, down && styles.btnDown, disabled && styles.btnDisabled]}>
