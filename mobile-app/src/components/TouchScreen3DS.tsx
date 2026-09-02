@@ -62,10 +62,28 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
   const [status, setStatus] = useState("loading…");
   const loadedOnce = useRef(false);
 
-  useEffect(() => {
-    const t = setInterval(() => setUri(gamepadScreenUrl(Date.now())), POLL_MS);
-    return () => clearInterval(t);
+  // Self-paced, not a fixed setInterval: a plain interval fires a *new*
+  // request every POLL_MS regardless of whether the previous one has
+  // finished. That's fine at the ~5ms round-trips measured against an idle
+  // core, but during real gameplay the core's own render thread holds the
+  // GIL/frame lock far more, and a slower response time than the 33ms
+  // interval means requests pile up faster than they drain — a growing
+  // backlog that (per user report) never resolves, image or error, because
+  // nothing is actually stuck, there's just an ever-growing queue in front
+  // of every request. Only ever having one in flight — the next one fires
+  // POLL_MS after the *previous one finishes*, from onLoad/onError below —
+  // can't pile up, and the mirror rate quietly adapts to however fast the
+  // backend can actually go instead of demanding a fixed rate.
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleNext = useCallback((delay: number) => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setUri(gamepadScreenUrl(Date.now())), delay);
   }, []);
+
+  useEffect(() => {
+    scheduleNext(0);
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  }, [scheduleNext]);
 
   const measure = useCallback(() => {
     rootRef.current?.measureInWindow((x, y, w, h) => { rectRef.current = { x, y, w, h }; });
@@ -122,8 +140,8 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
         contentFit="contain"
         cachePolicy="none"
         transition={0}
-        onLoad={() => { loadedOnce.current = true; setStatus("ok"); }}
-        onError={(e: any) => setStatus(`error: ${e?.error || "unknown"}`)}
+        onLoad={() => { loadedOnce.current = true; setStatus("ok"); scheduleNext(POLL_MS); }}
+        onError={(e: any) => { setStatus(`error: ${e?.error || "unknown"}`); scheduleNext(POLL_MS); }}
       />
       {/* TEMPORARY — see the status state's own comment above. */}
       {status !== "ok" && (
