@@ -217,6 +217,7 @@ function GamepadPad({
   // all. Safe to remove once the real cause is confirmed.
   const [debugInfo, setDebugInfo] = useState({
     grants: 0, rects: 0, currentlyHeld: "none", everHit: "none", totalHits: 0,
+    lastTouch: "none", aRect: "none",
   });
 
   // Repositionable layout (Fase D3): each control *group* — not each single
@@ -367,12 +368,16 @@ function GamepadPad({
       const control = hitTest(pos.x, pos.y);
       if (control) { owners.current.set(tid, control); debugLastHit = control; }
     }
+    const firstTouch = Array.from(active.values())[0];
+    const aRect = rects.current["btn:a"];
     setDebugInfo((prev) => ({
       grants: prev.grants + 1,
       rects: Object.keys(rects.current).length,
       currentlyHeld: owners.current.size ? Array.from(owners.current.values()).join(",") : "none",
       everHit: debugLastHit ?? prev.everHit,
       totalHits: debugLastHit ? prev.totalHits + 1 : prev.totalHits,
+      lastTouch: firstTouch ? `${Math.round(firstTouch.x)},${Math.round(firstTouch.y)}` : prev.lastTouch,
+      aRect: aRect ? `${Math.round(aRect.x)},${Math.round(aRect.y)} ${Math.round(aRect.w)}x${Math.round(aRect.h)}` : prev.aRect,
     }));
 
     const pressed = new Set<string>();
@@ -476,7 +481,8 @@ function GamepadPad({
           {/* TEMPORARY — see debugInfo's declaration above. */}
           <Text style={styles.debugLine} pointerEvents="none">
             g:{debugInfo.grants} r:{debugInfo.rects} held:{debugInfo.currentlyHeld}{"\n"}
-            everHit:{debugInfo.everHit} totalHits:{debugInfo.totalHits}
+            everHit:{debugInfo.everHit} totalHits:{debugInfo.totalHits}{"\n"}
+            touch:{debugInfo.lastTouch} aRect:{debugInfo.aRect}
           </Text>
           <TouchableOpacity
             style={[styles.editBtn, editMode && styles.editBtnActive]}
