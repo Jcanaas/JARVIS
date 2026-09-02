@@ -499,9 +499,22 @@ function GamepadPad({
       allRects,
     }));
     // Same data, but to the Metro/dev console — `npx expo start`'s
-    // terminal on the PC mirrors device console.log calls, and the full
-    // rect dump is too long to read comfortably in the on-screen overlay.
-    if (__DEV__) console.log("[GamepadPad] rects:", allRects);
+    // terminal on the PC mirrors device console.log calls, and both the
+    // full rect dump and the raw/offset/corrected numbers are too long (or
+    // too fiddly to read off a phone screen accurately) for the on-screen
+    // overlay alone. Logged together, once, so a single copy-pasted line
+    // has everything instead of needing two separate reports.
+    if (__DEV__ && (debugLastHit || firstTouch)) {
+      console.log(
+        "[GamepadPad] hit:", debugLastHit,
+        "touch:", firstTouch ? `${Math.round(firstTouch.x)},${Math.round(firstTouch.y)}` : "none",
+        "rawA:", aRect ? fmtRect(aRect) : "none",
+        "aOffset:", aGroup ? `${Math.round(aGroup.x)},${Math.round(aGroup.y)}` : "0,0",
+        "aScale:", aGroup?.scale ?? 1,
+        "correctedA:", aCorrected ? fmtRect(aCorrected) : "none",
+        "rects:", allRects,
+      );
+    }
 
     const pressed = new Set<string>();
     const nextOffsets: Record<StickSide, Offset> = {
