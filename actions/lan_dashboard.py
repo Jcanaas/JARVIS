@@ -1647,6 +1647,25 @@ def _make_app(token: str):
         if bgr is None:
             return jsonify({"error": "no_frame"}), 409
         cropped = crop_bottom_screen_3ds(bgr)
+        # The crop's own pixel size scales directly with the emulator's
+        # internal render resolution (actions/emulator_runtime.py's
+        # citra_resolution_factor, user-choosable — see
+        # webui/src/panels/Emulators.svelte's resolution field) — at a high
+        # factor the crop can be several times larger than a phone screen
+        # needs for a touch reference image, and JPEG-encoding it at that
+        # size every ~33ms (TouchScreen3DS.tsx's poll rate) got slow enough
+        # to make the mirror update only every few seconds. The crop's
+        # aspect ratio is always exactly 4:3 regardless of resolution
+        # factor (both the combined frame's dimensions and the crop
+        # proportions scale uniformly), so downscaling to a fixed 4:3
+        # target never distorts it — just keeps encoding cost constant
+        # instead of scaling with a setting this endpoint has nothing to
+        # do with. touch_to_pointer() only ever deals in 0..1 fractions of
+        # whatever image the phone is showing, so this doesn't touch the
+        # touch-coordinate math at all.
+        target_w, target_h = 480, 360
+        if cropped.shape[1] > target_w or cropped.shape[0] > target_h:
+            cropped = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_AREA)
         quality = max(10, min(95, request.args.get("quality", default=70, type=int) or 70))
         ok, buf = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if not ok:

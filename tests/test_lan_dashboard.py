@@ -840,6 +840,39 @@ class LanDashboardTests(unittest.TestCase):
         self.assertGreater(len(r.data), 0)
         self.assertTrue(r.data.startswith(b"\xff\xd8"))  # JPEG magic bytes
 
+    def test_gamepad_screen_downscales_a_crop_bigger_than_the_phone_needs(self):
+        """A high citra_resolution_factor (webui/src/panels/Emulators.svelte's
+        resolution field) scales the combined frame — and so the crop —
+        proportionally. Left unresized, JPEG-encoding a several-times-larger
+        image every ~33ms (TouchScreen3DS.tsx's poll rate) was slow enough
+        that the phone's mirror updated only every few seconds."""
+        import types as _types
+        import cv2
+        import numpy as np
+        from actions import lan_dashboard
+        from actions.libretro import PIXEL_RGB565
+        from ui.widgets import retro
+
+        # 800x960 combined frame -> crop is 640x480 (still 4:3), bigger than
+        # the 480x360 downscale target in both dimensions.
+        width, height = 800, 960
+        pixel = (0x1F << 11).to_bytes(2, "little")  # solid red
+        frame = pixel * (width * height)
+        core = MagicMock()
+        core.latest_frame.return_value = (frame, width, height, width * 2, PIXEL_RGB565)
+        screen = _types.SimpleNamespace(core=core, _console_id="3ds")
+
+        token = lan_dashboard._get_or_create_token()
+        app = lan_dashboard._make_app(token)
+        client = app.test_client()
+
+        with patch.object(retro, "active_screen", return_value=screen):
+            r = client.get(f"/api/gamepad/screen?token={token}")
+
+        self.assertEqual(r.status_code, 200)
+        decoded = cv2.imdecode(np.frombuffer(r.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(decoded.shape[:2], (360, 480))  # (height, width)
+
     def test_gamepad_touch_translates_coordinates_and_forwards_to_the_core(self):
         import types as _types
         from actions import lan_dashboard
