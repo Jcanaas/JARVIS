@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { View, StyleSheet } from "react-native";
+import { View, Text, StyleSheet } from "react-native";
 import { Image } from "expo-image";
 import { C, radius } from "../theme";
 import { api, gamepadScreenUrl } from "../api";
@@ -52,6 +52,15 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
   const rectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
   const rootRef = useRef<View | null>(null);
   const touching = useRef(false);
+  // TEMPORARY — the user reports an empty black box where the mirror should
+  // be (space reserved, image never shows). expo-image fails silently on a
+  // bad response, so there was no way to tell a 404/403/network error apart
+  // from "still loading" from on-device. Safe to remove once the real cause
+  // is confirmed. See GamepadOverlay.tsx's own (also temporary) debug
+  // overlay for the same pattern used earlier to diagnose the touch-offset
+  // issue.
+  const [status, setStatus] = useState("loading…");
+  const loadedOnce = useRef(false);
 
   useEffect(() => {
     const t = setInterval(() => setUri(gamepadScreenUrl(Date.now())), POLL_MS);
@@ -113,7 +122,13 @@ export default function TouchScreen3DS({ active = true }: { active?: boolean }) 
         contentFit="contain"
         cachePolicy="none"
         transition={0}
+        onLoad={() => { loadedOnce.current = true; setStatus("ok"); }}
+        onError={(e: any) => setStatus(`error: ${e?.error || "unknown"}`)}
       />
+      {/* TEMPORARY — see the status state's own comment above. */}
+      {status !== "ok" && (
+        <Text style={styles.debugText}>{status}</Text>
+      )}
     </View>
   );
 }
@@ -133,4 +148,8 @@ const styles = StyleSheet.create({
   },
   image: { width: "100%", height: "100%" },
   frameInactive: { opacity: 0.55 },
+  debugText: {
+    position: "absolute", top: 4, left: 4, right: 4,
+    color: "#ff5c5c", fontSize: 9, fontFamily: "monospace",
+  },
 });
