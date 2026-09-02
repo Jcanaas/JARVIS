@@ -423,22 +423,6 @@ function GamepadPad({
   return (
     <Modal visible transparent={false} animationType="fade" onRequestClose={onClose} supportedOrientations={["landscape"]}>
       <View style={styles.screen}>
-        {hasTouchScreen && (
-          <View style={[styles.touchCol, styles.touchColElevated]}>
-            <Draggable
-              id="group:touchscreen"
-              editMode={editMode}
-              offset={groupOffset("group:touchscreen")}
-              scale={groupScale("group:touchscreen")}
-              zIndex={groupZIndex("group:touchscreen")}
-              onDrag={dragGroup}
-              onResize={resizeGroup}
-              onActivate={bringToFront}
-            >
-              <TouchScreen3DS active={!editMode} />
-            </Draggable>
-          </View>
-        )}
         <View
           style={[styles.pad, hasTouchScreen && styles.padWithTouchScreen]}
           // One responder for the whole pad: this is what makes holding a
@@ -548,6 +532,33 @@ function GamepadPad({
             </Draggable>
           )}
         </View>
+
+        {/* Rendered *after* pad, not before — styles.screen is row-reverse,
+            so this still ends up visually on the left where it always was,
+            but now it's the later sibling and paints (and hit-tests) on
+            top of pad naturally, with no zIndex/elevation trick needed.
+            That trick (elevation especially) is the prime remaining
+            suspect for the pad's whole left side — d-pad, stick — never
+            receiving a touch in *either* mode, gameplay or edit: elevation
+            was the one thing applied unconditionally in both, and nothing
+            scoped to gameplay-only (handleTouches/hitTest fixes) or
+            edit-only ever had a chance to touch it. */}
+        {hasTouchScreen && (
+          <View style={styles.touchCol}>
+            <Draggable
+              id="group:touchscreen"
+              editMode={editMode}
+              offset={groupOffset("group:touchscreen")}
+              scale={groupScale("group:touchscreen")}
+              zIndex={groupZIndex("group:touchscreen")}
+              onDrag={dragGroup}
+              onResize={resizeGroup}
+              onActivate={bringToFront}
+            >
+              <TouchScreen3DS active={!editMode} />
+            </Draggable>
+          </View>
+        )}
       </View>
     </Modal>
   );
@@ -723,19 +734,13 @@ const styles = StyleSheet.create({
   secondaryText: { color: C.textMed, fontSize: 13.5, fontWeight: "600" },
   footnote: { color: C.textMed, fontSize: 10.5, textAlign: "center", opacity: 0.8, lineHeight: 15 },
 
-  screen: { flex: 1, flexDirection: "row", backgroundColor: C.bg },
+  // row-reverse rather than row: touchCol is rendered *after* pad in JSX
+  // now (see the comment where it's rendered) purely so it paints on top —
+  // row-reverse keeps it visually on the left, where it always was, without
+  // needing pad to render first and something else to still show up left
+  // of it.
+  screen: { flex: 1, flexDirection: "row-reverse", backgroundColor: C.bg },
   touchCol: { alignItems: "center", justifyContent: "center", paddingLeft: 20, paddingVertical: 12 },
-  // zIndex (+ elevation for Android, which otherwise ignores zIndex between
-  // sibling Views) above the pad: dragging this column's content past its
-  // own slot in edit mode, into where the pad sits, must keep it on top
-  // instead of vanishing behind the pad's own opaque background, which
-  // paints after this sibling in the tree by default. Tried scoping this to
-  // edit-mode-only, suspecting it was why gamepad buttons stopped
-  // registering during normal 3DS play — confirmed wrong (buttons stayed
-  // broken with it removed, and removing it also brought the covering bug
-  // straight back), so back to unconditional. The real cause of the button
-  // issue is still open.
-  touchColElevated: { zIndex: 10, elevation: 10 },
   pad: { flex: 1, backgroundColor: C.bg, justifyContent: "center", paddingHorizontal: 24, paddingVertical: 12 },
   // Narrower when sharing the screen with the 3DS touch mirror, so the pad
   // doesn't crowd it off a phone-sized landscape width.
