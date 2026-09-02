@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from actions import input_config
 from actions import emulator_runtime
@@ -113,6 +113,28 @@ class InputProfileTests(unittest.TestCase):
             self.assertEqual(storage["emulator_resolution"], {"3ds": "2"})
             opt = emulator_runtime.resolution_option("3ds")
         self.assertEqual(opt["current"], "2")
+
+    def test_set_resolution_pushes_it_live_to_a_matching_running_session(self):
+        session = MagicMock()
+        session.is_running.return_value = True
+        session.console_id = "3ds"
+        with patch("actions.app_settings.get", return_value={}), \
+                patch("actions.app_settings.set"), \
+                patch("actions.emulator_session.get_session", return_value=session):
+            emulator_runtime.set_resolution("3ds", "2")
+        session.set_option.assert_called_once_with("citra_resolution_factor", "2")
+
+    def test_set_resolution_does_not_push_live_to_a_different_running_console(self):
+        # Changing 3ds's saved resolution while a ps2 game happens to be
+        # running must not poke the wrong core with the wrong option.
+        session = MagicMock()
+        session.is_running.return_value = True
+        session.console_id = "ps2"
+        with patch("actions.app_settings.get", return_value={}), \
+                patch("actions.app_settings.set"), \
+                patch("actions.emulator_session.get_session", return_value=session):
+            emulator_runtime.set_resolution("3ds", "2")
+        session.set_option.assert_not_called()
 
     def test_set_resolution_rejects_an_unknown_console(self):
         with self.assertRaises(ValueError):

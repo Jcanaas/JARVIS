@@ -38,9 +38,11 @@
   let hideBottomScreen = $state(false)
   // Only set for consoles actions/emulator_runtime.py's RESOLUTION_CHOICES
   // actually has an option for (PS2, 3DS) — null means "this console has no
-  // such setting", not an error. A libretro core only reads its options at
-  // load time, so picking a new value here only takes effect the *next*
-  // time this game starts, never on the session already running.
+  // such setting", not an error. Whether picking a new value takes effect
+  // immediately or only on the next start is per-core, measured directly
+  // (not assumed) in actions/libretro.py's LibretroCore.set_option()
+  // docstring: azahar_libretro (3DS) applies it live, pcsx2_libretro (PS2)
+  // doesn't poll for the change and needs a restart either way.
   let resolutionOption = $state(null) // {key, choices, current}
   let actionError = $state('')
   let libraryError = $state('') // start() failed before the player mounted (e.g. missing PS2 BIOS)
@@ -663,7 +665,12 @@
           <button class="ghost" onclick={loadState} title="Cargar estado">📂</button>
           <button class="ghost" onclick={openControls} title="Controles">🎮</button>
           {#if resolutionOption}
-            <label class="res-field" title="Resolución interna del emulador — se aplica al reiniciar el juego, no ahora mismo">
+            <label
+              class="res-field"
+              title={playing.console_id === '3ds'
+                ? 'Resolución interna del emulador — se aplica al momento'
+                : 'Resolución interna del emulador — se aplica al reiniciar el juego, no ahora mismo'}
+            >
               <span class="res-label">🖼️ Res</span>
               <select
                 class="res-select"

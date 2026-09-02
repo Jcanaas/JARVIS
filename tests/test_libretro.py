@@ -140,6 +140,34 @@ class LibretroEnvironmentTests(unittest.TestCase):
         self.assertEqual(core._options[b"pcsx2_bios"], b"SCPH-70012.bin")
         self.assertEqual(core._options[b"pcsx2_renderer"], b"Software (SW)")
 
+    def test_set_option_flags_a_pending_update_reported_once(self):
+        from actions.libretro import ENV_GET_VARIABLE_UPDATE
+
+        core = LibretroCore.__new__(LibretroCore)
+        core._options = {}
+        core._options_dirty = False
+
+        core.set_option("citra_resolution_factor", "1")
+        self.assertEqual(core._options[b"citra_resolution_factor"], b"1")
+
+        flag = ct.c_bool(False)
+        self.assertTrue(core._on_environment(ENV_GET_VARIABLE_UPDATE, ct.byref(flag)))
+        self.assertTrue(flag.value)  # the core is told "yes, something changed"
+
+        # Answered once — the next poll with nothing new says so.
+        flag2 = ct.c_bool(True)
+        self.assertTrue(core._on_environment(ENV_GET_VARIABLE_UPDATE, ct.byref(flag2)))
+        self.assertFalse(flag2.value)
+
+    def test_get_variable_update_defaults_to_false_with_no_pending_change(self):
+        from actions.libretro import ENV_GET_VARIABLE_UPDATE
+
+        core = LibretroCore.__new__(LibretroCore)
+        core._options_dirty = False
+        flag = ct.c_bool(True)
+        self.assertTrue(core._on_environment(ENV_GET_VARIABLE_UPDATE, ct.byref(flag)))
+        self.assertFalse(flag.value)
+
 
 class LibretroHardwareLifecycleTests(unittest.TestCase):
     def test_hardware_readback_reuses_the_same_frame_buffers(self):

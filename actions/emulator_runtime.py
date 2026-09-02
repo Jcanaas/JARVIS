@@ -262,19 +262,28 @@ def resolution_option(console_id: str) -> Optional[dict]:
 
 
 def set_resolution(console_id: str, value: str) -> None:
-    """Saves the user's resolution choice for console_id. Raises ValueError
-    for a console with no such option, or a value that isn't one of its
-    known-valid choices."""
+    """Saves the user's resolution choice for console_id, and — best effort
+    — pushes it to a session of that console already running, so it can
+    take effect immediately rather than only on the next start (see
+    actions/libretro.py's LibretroCore.set_option() docstring for which
+    cores actually pick this up live vs. silently ignore it until then).
+    Raises ValueError for a console with no such option, or a value that
+    isn't one of its known-valid choices."""
     spec = RESOLUTION_CHOICES.get(console_id)
     if spec is None:
         raise ValueError(f"«{console_id}» no tiene ajuste de resolución")
-    _option_key, choices = spec
+    option_key, choices = spec
     if value not in choices:
         raise ValueError(f"Resolución no válida para «{console_id}»")
     from actions import app_settings
     overrides = dict(app_settings.get("emulator_resolution", {}) or {})
     overrides[console_id] = value
     app_settings.set("emulator_resolution", overrides)
+
+    from actions.emulator_session import get_session
+    session = get_session()
+    if session.is_running() and session.console_id == console_id:
+        session.set_option(option_key, value)
 
 
 def resolved_options(console_id: str) -> dict:

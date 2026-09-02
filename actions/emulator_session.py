@@ -200,6 +200,18 @@ class EmulatorSession:
         if core is not None:
             core.clear_input()
 
+    def set_option(self, key: str, value: str) -> None:
+        """Best-effort live option change on the running core — see
+        actions/libretro.py's LibretroCore.set_option() for what that
+        actually means (some cores pick it up, some don't). A no-op if
+        nothing is loaded; the caller (actions/emulator_runtime.py's
+        set_resolution) still persists the choice either way, so it takes
+        effect on the next start regardless of whether this did anything
+        right now."""
+        core = self._core
+        if core is not None:
+            core.set_option(key, value)
+
     # ------------------------------------------------------------------
     # Save states + battery saves — same file layout as
     # ui/panels/emulators.py:_save_paths, so save data is shared with the

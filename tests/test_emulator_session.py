@@ -20,6 +20,7 @@ class _FakeCore:
         self.unloaded = False
         self.sram = b""
         self.pressed = []
+        self.options_set = []
         self.reset_called = False
         self._loaded_lock = threading.Lock()
         self.threads_called_from: set = set()
@@ -50,6 +51,9 @@ class _FakeCore:
 
     def clear_input(self):
         self.pressed.clear()
+
+    def set_option(self, key, value):
+        self.options_set.append((key, value))
 
     def read_sram(self):
         return self.sram
@@ -198,6 +202,20 @@ class EmulatorSessionTests(unittest.TestCase):
             self.assertEqual(self.fake_core.pressed, [])
         finally:
             session.stop()
+
+    def test_set_option_passthrough(self):
+        session = self._session()
+        session.start("gba", self.rom)
+        try:
+            self._wait_for(lambda: self.fake_core.run_frame_calls > 0)
+            session.set_option("citra_resolution_factor", "1")
+            self.assertIn(("citra_resolution_factor", "1"), self.fake_core.options_set)
+        finally:
+            session.stop()
+
+    def test_set_option_without_a_loaded_core_is_a_noop(self):
+        session = self._session()
+        session.set_option("citra_resolution_factor", "1")  # must not raise
 
     def test_save_and_load_state_round_trip(self):
         session = self._session()

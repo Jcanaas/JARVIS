@@ -427,6 +427,13 @@ class LibretroCore:
             str(k).encode(): str(v).encode()
             for k, v in (options or {}).items()
         }
+        # Set by set_option() when a value changes after load — answered
+        # once via ENV_GET_VARIABLE_UPDATE below, then cleared. This is the
+        # standard libretro mechanism for "an option changed, re-read it",
+        # but whether anything actually happens depends on the core polling
+        # it — not guaranteed for every core. See set_option()'s own
+        # docstring for which ones this was actually verified against.
+        self._options_dirty = False
 
         self._system_dir = str(Path(system_dir).absolute()).encode()
         self._save_dir = str(Path(save_dir).absolute()).encode()
@@ -593,7 +600,8 @@ class LibretroCore:
             self._rotation = int(ct.cast(data, POINTER(c_uint))[0]) % 4
             return True
         if cmd == ENV_GET_VARIABLE_UPDATE:
-            ct.cast(data, POINTER(c_bool))[0] = False
+            ct.cast(data, POINTER(c_bool))[0] = self._options_dirty
+            self._options_dirty = False
             return True
         if cmd == ENV_GET_CORE_OPTIONS_VERSION:
             # A core asks this BEFORE publishing its option table, to pick
@@ -1305,6 +1313,32 @@ class LibretroCore:
         self._pointer_x = 0
         self._pointer_y = 0
         self._pointer_pressed = False
+
+    def set_option(self, key: str, value: str) -> None:
+        """Changes a core option after load and flags it for the core to
+        re-read via RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE (see that branch
+        of _on_environment). Whether the core actually acts on it is a
+        per-core question, not a given from the option existing — measured
+        directly against real running sessions, not assumed:
+
+        - azahar_libretro (3DS): WORKS. citra_resolution_factor changed
+          from a running session's own frame dimensions within 2 polls
+          (~66ms) — the standalone Azahar app's live resolution-scale
+          change is backed by the same underlying poll here.
+        - pcsx2_libretro (PS2): does NOT pick this up. Called
+          pcsx2_upscale_multiplier with a different value against a real
+          running session; the frame stayed at its original dimensions —
+          this core doesn't poll GET_VARIABLE_UPDATE, at least not for that
+          option, so it needs a restart to apply a change like every other
+          core did before this method existed.
+
+        A core that ignores GET_VARIABLE_UPDATE just silently keeps using
+        the old value until the next full restart — this is best-effort,
+        not a guarantee, and callers (actions/emulator_runtime.py's
+        set_resolution) must keep persisting the choice for that restart
+        regardless of whether this had any live effect."""
+        self._options[key.encode()] = str(value).encode()
+        self._options_dirty = True
 
     # ------------------------------------------------------------------
     # Save states + battery saves
