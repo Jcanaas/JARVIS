@@ -243,6 +243,14 @@
     }
   }
 
+  // 3DS's resolution choices are bare integers ("1".."6") — labelling them
+  // "1x".."6x" instead reads as a scale factor rather than a mystery
+  // number. PS2's own choices are already self-explanatory strings
+  // ("2x Native (~720p)"), left untouched.
+  function resolutionChoiceLabel(choice) {
+    return /^\d+$/.test(choice) ? `${choice}x` : choice
+  }
+
   async function loadResolutionOption(consoleId) {
     try {
       resolutionOption = await api.getEmulatorResolution(consoleId)
@@ -655,16 +663,18 @@
           <button class="ghost" onclick={loadState} title="Cargar estado">📂</button>
           <button class="ghost" onclick={openControls} title="Controles">🎮</button>
           {#if resolutionOption}
-            <select
-              class="res-select"
-              value={resolutionOption.current}
-              onchange={(e) => changeResolution(e.target.value)}
-              title="Resolución interna — se aplica al reiniciar el juego"
-            >
-              {#each resolutionOption.choices as choice (choice)}
-                <option value={choice}>{choice}</option>
-              {/each}
-            </select>
+            <label class="res-field" title="Resolución interna del emulador — se aplica al reiniciar el juego, no ahora mismo">
+              <span class="res-label">🖼️ Res</span>
+              <select
+                class="res-select"
+                value={resolutionOption.current}
+                onchange={(e) => changeResolution(e.target.value)}
+              >
+                {#each resolutionOption.choices as choice (choice)}
+                  <option value={choice}>{resolutionChoiceLabel(choice)}</option>
+                {/each}
+              </select>
+            </label>
           {/if}
           {#if playing.console_id === '3ds'}
             <button
@@ -771,9 +781,15 @@
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   }
   .ghost.active { background: var(--pri); border-color: var(--pri); }
-  .res-select {
+  .res-field {
+    display: flex; align-items: center; gap: 5px; height: 32px;
     background: var(--panel-2); border: 1px solid var(--border-a); border-radius: var(--radius-sm);
-    color: var(--text); font-size: 11px; height: 32px; padding: 0 6px; cursor: pointer; max-width: 130px;
+    padding: 0 8px 0 10px; flex-shrink: 0;
+  }
+  .res-label { color: var(--text-med); font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .res-select {
+    background: transparent; border: none; color: var(--text); font-size: 11px;
+    padding: 0; cursor: pointer; max-width: 90px;
   }
 
   .empty { color: var(--text-med); font-size: 13px; padding: 24px; text-align: center; }
