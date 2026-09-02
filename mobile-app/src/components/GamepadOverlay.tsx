@@ -248,6 +248,7 @@ function GamepadPad({
     // to each other turns the next report into a concrete arithmetic
     // check instead of a fourth blind theory.
     rawARect: "none", aOffset: "none", aScale: "none", correctedARect: "none",
+    lRect: "none", allRects: "none",
   });
 
   // Repositionable layout (Fase D3): each control *group* — not each single
@@ -442,9 +443,24 @@ function GamepadPad({
     }
     const firstTouch = Array.from(active.values())[0];
     const aRect = rects.current["btn:a"];
+    const lRect = rects.current["btn:l"];
     const aGroup = padOffsets["group:face"];
     const aCorrected = aRect ? correctedRect("btn:a", aRect) : null;
     const fmtRect = (r: Rect) => `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.w)}x${Math.round(r.h)}`;
+    // TEMPORARY — added after a user report that, with padOffsets fully
+    // reset (no drag/resize applied anywhere, so correctedRect() is a
+    // guaranteed no-op), most button presses still resolve to L1 — a bug
+    // in the base measureLayout()-derived rects themselves, unrelated to
+    // the drag/resize correction this overlay was originally extended
+    // for. Dumps every currently-known raw rect so we can see directly
+    // whether L1's rect is anomalously large (covering other buttons) or
+    // something else entirely — Android's measureLayout() has a
+    // documented history of unreliable results when the reference node
+    // isn't a *direct* parent, which is exactly this pad's structure
+    // (button -> Draggable wrapper -> row -> pad root).
+    const allRects = Object.entries(rects.current)
+      .map(([id, r]) => `${id}:${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.w)}x${Math.round(r.h)}`)
+      .join(" | ");
     setDebugInfo((prev) => ({
       grants: prev.grants + 1,
       rects: Object.keys(rects.current).length,
@@ -457,7 +473,13 @@ function GamepadPad({
       aOffset: aGroup ? `${Math.round(aGroup.x)},${Math.round(aGroup.y)}` : "0,0",
       aScale: aGroup ? `${aGroup.scale ?? 1}` : "1",
       correctedARect: aCorrected ? fmtRect(aCorrected) : prev.correctedARect,
+      lRect: lRect ? fmtRect(lRect) : prev.lRect,
+      allRects,
     }));
+    // Same data, but to the Metro/dev console — `npx expo start`'s
+    // terminal on the PC mirrors device console.log calls, and the full
+    // rect dump is too long to read comfortably in the on-screen overlay.
+    if (__DEV__) console.log("[GamepadPad] rects:", allRects);
 
     const pressed = new Set<string>();
     const nextOffsets: Record<StickSide, Offset> = {
@@ -572,9 +594,10 @@ function GamepadPad({
             g:{debugInfo.grants} r:{debugInfo.rects} held:{debugInfo.currentlyHeld}{"\n"}
             everHit:{debugInfo.everHit} totalHits:{debugInfo.totalHits}{"\n"}
             touch:{debugInfo.lastTouch}{"\n"}
-            raw:{debugInfo.rawARect}{"\n"}
+            rawA:{debugInfo.rawARect}{"\n"}
             off:{debugInfo.aOffset} scale:{debugInfo.aScale}{"\n"}
-            corrected:{debugInfo.correctedARect}
+            corrected:{debugInfo.correctedARect}{"\n"}
+            rawL:{debugInfo.lRect}
           </Text>
           <TouchableOpacity
             style={[styles.editBtn, editMode && styles.editBtnActive]}
