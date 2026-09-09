@@ -3,6 +3,20 @@
 Genera un instalador `.exe` autocontenido (sin que el usuario instale Python ni
 Node) para Windows x64.
 
+## Descargar desde GitHub (también desde Linux)
+
+Cada push a `main` ejecuta **Windows installer** en GitHub Actions. También se
+puede ejecutar manualmente desde Actions → Windows installer → Run workflow.
+Si compila y pasa la prueba de instalación, primer arranque y desinstalación,
+publica una versión preliminar con `Jarvis-Setup-1.0.0.exe` en
+[Releases](https://github.com/Jcanaas/JARVIS/releases).
+
+El runner usa Windows, Python 3.12 y Node 22, instala las dependencias Node de
+WhatsApp y torrents, y añade MPV, FFmpeg, yt-dlp y VLC al paquete. La prueba
+automatizada comprueba la instalación y la pantalla de configuración inicial;
+no certifica micrófonos, GPU ni servicios externos. El usuario introduce su
+propia clave de Gemini en el primer arranque.
+
 ## Requisitos en la máquina de build
 
 - **Python** con el entorno del proyecto (`requirements.txt` instalado).
@@ -32,9 +46,8 @@ Pasos que ejecuta:
 Flags útiles: `-SkipNode`, `-SkipVlc`, `-SkipInstaller`, `-NodeVersion 20.18.1`,
 `-VlcVersion 3.0.21`.
 
-> ⚠️ El spec empaqueta `config/api_keys.json` (Gemini, TMDB, MAL…) para que la
-> app funcione nada más instalarse. No distribuyas el instalador públicamente
-> con claves reales dentro; se pueden editar luego en Ajustes → APIs.
+El spec no empaqueta `config/api_keys.json`: las claves personales se guardan
+desde la configuración inicial y Ajustes → APIs.
 
 ## Artefactos
 

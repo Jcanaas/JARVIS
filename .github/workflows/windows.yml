@@ -1,0 +1,95 @@
+name: Windows installer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+      JARVIS_RELEASE_BUILD: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            webui/package-lock.json
+            whatsapp_bridge/package-lock.json
+      - name: Install Python dependencies
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+      - name: Download media runtimes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./build/download-media.ps1
+      - name: Build installer
+        run: |
+          $nodeVersion = node -p process.versions.node
+          ./build/build.ps1 -NodeVersion $nodeVersion
+      - name: Test clean installation and first launch
+        run: ./build/smoke-windows.ps1
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-Windows-x64
+          path: dist/installer/Jarvis-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-build-diagnostics
+          path: |
+            build/work/Jarvis/warn-*.txt
+            build/work/jarvis/warn-*.txt
+            build/smoke-*.log
+          if-no-files-found: ignore
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Jarvis-Windows-x64
+          path: installer
+      - name: Publish downloadable Windows build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          gh release create "windows-build-${BUILD_NUMBER}" installer/*.exe \
+            --target "$COMMIT_SHA" \
+            --title "Jarvis para Windows — build ${BUILD_NUMBER}" \
+            --prerelease \
+            --notes 'Descarga Jarvis-Setup-1.0.0.exe e instálalo. Incluye Python, Node y los reproductores multimedia. El primer arranque solicita tu clave de Gemini; las conexiones a Google y WhatsApp se configuran en la aplicación. Compilación preliminar con prueba automatizada de instalación y arranque en Windows; las integraciones y el hardware requieren validación adicional.'

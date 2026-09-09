@@ -380,16 +380,13 @@ class WebUIHost:
 
     # -- startup gate ---------------------------------------------------------
     def wait_for_api_key(self):
-        """Legacy blocks here until the setup overlay saves a key. The web
-        UI has no equivalent onboarding flow yet (MVP scope), so: return
-        immediately if a key is already configured, otherwise warn instead
-        of blocking the agent loop forever."""
-        if self._has_api_key():
-            return
-        self.write_log(
-            "No hay API key de Gemini configurada. Arranca con --legacy para "
-            "completar la configuración inicial, o crea config/api_keys.json."
-        )
+        """Keep the agent worker idle until the first-run screen saves a key.
+
+        The webview and HTTP server run independently on the main thread.
+        Starting Gemini earlier crashes the worker on a clean installation.
+        """
+        while not self._has_api_key():
+            time.sleep(0.25)
 
     def _has_api_key(self) -> bool:
         if not API_FILE.exists():

@@ -15,7 +15,7 @@
         pwsh -ExecutionPolicy Bypass -File build/build.ps1
 #>
 param(
-    [string]$NodeVersion = "20.18.1",
+    [string]$NodeVersion = "22.22.0",
     [string]$VlcVersion = "3.0.21",
     [switch]$SkipNode,
     [switch]$SkipVlc,
@@ -24,14 +24,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# PowerShell otherwise continues after failed npm/python/ISCC commands.
+$PSNativeCommandUseErrorActionPreference = $true
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 Write-Host "==> Project root: $Root" -ForegroundColor Cyan
 
 # --- 1. PyInstaller -----------------------------------------------------------
 Write-Host "==> Checking PyInstaller..." -ForegroundColor Cyan
-python -c "import PyInstaller" 2>$null
-if ($LASTEXITCODE -ne 0) {
+if (-not (python -c "import importlib.util; print(bool(importlib.util.find_spec('PyInstaller')))" | Select-String '^True$')) {
     Write-Host "    Installing PyInstaller..." -ForegroundColor Yellow
     python -m pip install --upgrade pyinstaller
 }
@@ -41,6 +42,14 @@ $Bridge = Join-Path $Root "whatsapp_bridge"
 if (-not (Test-Path (Join-Path $Bridge "node_modules"))) {
     Write-Host "==> Installing WhatsApp bridge dependencies (npm)..." -ForegroundColor Cyan
     Push-Location $Bridge
+    # postinstall applies the whatsapp-web.js patch using patch-package.
+    npm ci --include=dev
+    npm prune --omit=dev --ignore-scripts
+    Pop-Location
+}
+
+foreach ($vendor in @("actions/vendor/webtorrent-stream", "actions/vendor/torlink")) {
+    Push-Location (Join-Path $Root $vendor)
     npm install --omit=dev
     Pop-Location
 }
@@ -104,7 +113,7 @@ $WebUi = Join-Path $Root "webui"
 Write-Host "==> Building web UI frontend (webui/)..." -ForegroundColor Cyan
 if (-not (Test-Path (Join-Path $WebUi "node_modules"))) {
     Push-Location $WebUi
-    npm install
+    npm ci
     Pop-Location
 }
 Push-Location $WebUi
@@ -152,10 +161,13 @@ if (-not $SkipInstaller) {
     if ($iscc) {
         Write-Host "==> Compiling installer with Inno Setup..." -ForegroundColor Cyan
         & $iscc "installer\jarvis.iss"
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed: $LASTEXITCODE" }
+        if (-not (Get-ChildItem "dist/installer/Jarvis-Setup-*.exe" -ErrorAction SilentlyContinue)) {
+            throw "Inno Setup did not produce an installer."
+        }
         Write-Host "==> Installer written to dist\installer\" -ForegroundColor Green
     } else {
-        Write-Host "==> Inno Setup (ISCC) not found. Install it from https://jrsoftware.org/isdl.php" -ForegroundColor Yellow
-        Write-Host "    Then run: ISCC.exe installer\jarvis.iss" -ForegroundColor Yellow
+        throw "Inno Setup (ISCC) not found. Install Inno Setup 6 or use -SkipInstaller."
     }
 }
 

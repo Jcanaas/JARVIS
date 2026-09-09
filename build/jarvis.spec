@@ -37,19 +37,19 @@ _creds = ROOT / "config" / "google_credentials.json"
 if _creds.is_file():
     datas.append((str(_creds), "config"))
 
-# Personal production build: ship api_keys.json (Gemini/TMDB/MAL/...) so the
-# app works out of the box. Seeded to %LOCALAPPDATA%\Jarvis\config on first
-# run and editable afterwards in Ajustes -> APIs. Do NOT distribute this
-# installer publicly with real keys inside.
-_keys = ROOT / "config" / "api_keys.json"
-if _keys.is_file():
-    datas.append((str(_keys), "config"))
+# API keys and user tokens are never distributed. The first-run screen saves
+# the user's own key in LocalAppData.
 
 binaries = []
-for name in ("mpv.exe", "mpv.com", "d3dcompiler_43.dll", "yt-dlp.exe", "ffmpeg.exe"):
+for name in ("mpv.exe", "mpv.com", "d3dcompiler_43.dll", "yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe"):
     p = ROOT / name
     if p.is_file():
         binaries.append((str(p), "."))
+
+if os.environ.get("JARVIS_RELEASE_BUILD") == "1":
+    for name in ("mpv.exe", "yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe"):
+        if not (ROOT / name).is_file():
+            raise RuntimeError(f"Required release runtime missing: {name}")
 
 if (ROOT / "7z" / "7zr.exe").is_file():
     datas.append((str(ROOT / "7z" / "7zr.exe"), "7z"))

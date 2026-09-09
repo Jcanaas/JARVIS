@@ -1,10 +1,7 @@
 <script>
   import { completeSetup } from '../api.js'
 
-  // Mirrors ui/panels/music.py's SetupOverlay: first-run gate blocking
-  // everything else until a Gemini API key is on disk (WebUIHost's
-  // wait_for_api_key() no longer blocks the agent loop in web mode, so
-  // this screen is what actually replaces that onboarding step here).
+  // The agent worker waits until this screen saves the first Gemini key.
 
   let { onDone } = $props()
 
