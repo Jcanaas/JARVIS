@@ -54,4 +54,17 @@ pycaw; sys_platform == "win32"
 win10toast; sys_platform == "win32"
 pywinauto; sys_platform == "win32"
 pywin32; sys_platform == "win32"
-python-vlc; sys_platform == "win32"
+
+# XML de fuentes públicas (RSS de Nyaa): parser endurecido, el de la stdlib
+# es vulnerable a expansión de entidades con entrada no confiable.
+defusedxml
+
+# --- Reproducción de vídeo (todas las plataformas) ---
+# python-vlc es un binding ctypes puro (no compila nada) sobre la libvlc del
+# sistema, así que vale igual en Linux y macOS. Estuvo pineado a win32, y el
+# efecto en Linux era que actions/anime/playback.py caía siempre al <video>
+# del navegador — que no decodifica HEVC 10-bit, Opus ni subtítulos ASS, los
+# formatos habituales de los BD-rip de anime. Con VLC disponible se reproducen
+# de forma nativa. Si no hay libvlc en el sistema el import falla solo y la
+# app cae al navegador exactamente como antes.
+python-vlc

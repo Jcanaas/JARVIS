@@ -78,6 +78,17 @@ export const getLyrics = (title, artists = '') =>
   getJSON(`/api/music/lyrics?title=${encodeURIComponent(title)}&artists=${encodeURIComponent(artists)}`)
 export const musicQueue = () => getJSON('/api/music/queue')
 export const musicAction = (action, params) => postJSON(`/api/music/${action}`, params)
+export const getSongDetails = (videoId, title, artists = '', albumId = '', artistId = '') =>
+  getJSON(`/api/music/song_details?video_id=${encodeURIComponent(videoId || '')}` +
+          `&title=${encodeURIComponent(title || '')}&artists=${encodeURIComponent(artists)}` +
+          `&album_id=${encodeURIComponent(albumId)}&artist_id=${encodeURIComponent(artistId)}`)
+export const getArtistDetails = (query = '', browseId = '') =>
+  getJSON(`/api/music/artist?q=${encodeURIComponent(query)}&browse_id=${encodeURIComponent(browseId)}`)
+export const getAlbumDetails = (query = '', browseId = '') =>
+  getJSON(`/api/music/album?q=${encodeURIComponent(query)}&browse_id=${encodeURIComponent(browseId)}`)
+export const getAudioAnalysis = (videoId, title = '', artists = '', durationS = 0) =>
+  getJSON(`/api/music/audio_analysis?video_id=${encodeURIComponent(videoId)}` +
+          `&title=${encodeURIComponent(title)}&artists=${encodeURIComponent(artists)}&duration_s=${durationS}`)
 
 // Movies / TV
 export const searchMovies = (q, kind = 'multi') =>
@@ -86,17 +97,59 @@ export const getMoviesTrending = (kind = 'movie') => getJSON(`/api/movies/trendi
 export const getMovieDetails = (tmdbId, kind = 'movie') => getJSON(`/api/movies/details/${tmdbId}?kind=${kind}`)
 export const getMovieTorrents = (tmdbId, kind = 'movie', season = 0, episode = 0) =>
   getJSON(`/api/movies/torrents?tmdb_id=${tmdbId}&kind=${kind}&season=${season}&episode=${episode}`)
-export const playMovieTorrent = (magnet, fileIdx = -1) =>
-  postJSON('/api/movies/play', { magnet, file_idx: fileIdx })
+// `episode` lets the daemon pick the right file inside a season batch by
+// matching filenames, for sources that give no file index.
+export const playMovieTorrent = (magnet, fileIdx = -1, episode = 0, requestId = '') =>
+  postJSON('/api/movies/play', { magnet, file_idx: fileIdx, episode, request_id: requestId })
 export const stopMoviePlayback = () => postJSON('/api/movies/stop', {})
 export const getMoviesStatus = () => getJSON('/api/movies/status')
 
 // Anime — same vlc_player playback pipeline as Movies/TV (playMovieTorrent/
 // stopMoviePlayback above), different metadata + torrent lookup.
 export const searchAnime = (q) => getJSON(`/api/anime/search?q=${encodeURIComponent(q)}`)
+export const getAnimeMeta = (kitsuId) =>
+  getJSON(`/api/anime/meta?kitsu_id=${encodeURIComponent(kitsuId)}`)
 export const getAnimeTrending = (airing = false) => getJSON(`/api/anime/trending?airing=${airing ? 1 : 0}`)
-export const getAnimeTorrents = (tmdbId, season = 0, episode = 0) =>
-  getJSON(`/api/anime/torrents?tmdb_id=${tmdbId}&season=${season}&episode=${episode}`)
+export const getAnimeGenres = () => getJSON('/api/anime/genres')
+export const getAnimeByGenre = (genre) =>
+  getJSON(`/api/anime/genre?genre=${encodeURIComponent(genre)}`)
+export const getAnimeEpisodes = (kitsuId) =>
+  getJSON(`/api/anime/episodes?kitsu_id=${encodeURIComponent(kitsuId)}`)
+export const getAnimeSkipWindows = (kitsuId, episode, episodeLengthS = 0) =>
+  getJSON(`/api/anime/skip?kitsu_id=${encodeURIComponent(kitsuId)}` +
+          `&episode=${episode}&episode_length_s=${episodeLengthS}`)
+// WebVTT URL for the browser <video>'s <track> element — not fetched via
+// getJSON, the <track src> loads it directly.
+export const animeSubtitlesUrl = (kitsuId, episode, language = 'es') =>
+  `/api/anime/subtitles?kitsu_id=${encodeURIComponent(kitsuId)}&episode=${episode}&language=${language}`
+// Torrentio indexes anime by Kitsu id with absolute episode numbering, so the
+// episode number goes in raw — no season, no title matching.
+export const getAnimeTorrents = (kitsuId, episode = 0, totalEpisodes = 0) =>
+  getJSON(`/api/anime/torrents?kitsu_id=${encodeURIComponent(kitsuId)}` +
+          `&episode=${episode}&total_episodes=${totalEpisodes}`)
+
+// Local watch history — continue-watching rail, per-episode seen/partial
+// state, auto-complete. See actions/anime/progress.py.
+export const getAnimeProgress = (kitsuId) =>
+  getJSON(`/api/anime/progress?kitsu_id=${encodeURIComponent(kitsuId)}`)
+export const saveAnimeProgress = (kitsuId, episode, positionS, durationS, title, posterUrl) =>
+  postJSON('/api/anime/progress', {
+    kitsu_id: kitsuId, episode, position_s: positionS, duration_s: durationS,
+    title, poster_url: posterUrl,
+  })
+export const completeAnimeEpisode = (kitsuId, episode, title, posterUrl) =>
+  postJSON('/api/anime/progress/complete', {
+    kitsu_id: kitsuId, episode, title, poster_url: posterUrl,
+  })
+export const getAnimeContinueWatching = (limit = 20) =>
+  getJSON(`/api/anime/continue?limit=${limit}`)
+export const removeAnimeProgress = (kitsuId) =>
+  postJSON('/api/anime/progress/remove', { kitsu_id: kitsuId })
+export const getAnimeAutoplay = () => getJSON('/api/settings/anime_autoplay')
+export const setAnimeAutoplay = (autoplay) => postJSON('/api/settings/anime_autoplay', { autoplay })
+export const getAnimeAutocomplete = () => getJSON('/api/settings/anime_autocomplete')
+export const setAnimeAutocomplete = (autocomplete) =>
+  postJSON('/api/settings/anime_autocomplete', { autocomplete })
 
 // YouTube — search/recommendations only; playback is the official iframe
 // embed (see actions/webui_server.py's comment for why: modern YouTube

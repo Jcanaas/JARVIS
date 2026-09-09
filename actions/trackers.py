@@ -15,6 +15,20 @@ ipv4.tracker.harry.lu resolved to 127.0.0.1, clearly broken; both HTTPS
 entries — tamersunion.org, tracker.gbitt.info — were NXDOMAIN too, so no HTTPS
 fallback is currently known-good). Re-run that probe periodically; public
 tracker uptime rots over time.
+
+Re-probed 2026-09-05: 9 of the 13 still answer a BEP15 connect. Dead now are
+open.tracker.cl (resolves to 127.0.0.1 — the same DNS-hijack shape as the old
+ipv4.tracker.harry.lu entry), opentracker.io, p4p.arenabg.com and
+tracker.dump.cl. They are left in place rather than pruned: announces go out
+in parallel, so a dead entry costs nothing but the socket, and trackers do
+come back.
+
+Also measured that day, because it looked like the obvious culprit for "no
+seeds are found" and turned out not to be: adding the anime-specific
+trackers (nyaa.tracker.wf and friends) found the *same* peers this list
+already found — 0 to 8 extra unique peers across three test torrents. The
+real cause was that our sources advertise seeder counts inflated ~10x, so we
+ranked dead torrents first; see actions/anime/health.py.
 """
 from __future__ import annotations
 

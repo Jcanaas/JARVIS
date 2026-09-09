@@ -2,6 +2,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
@@ -476,6 +477,53 @@ class SynchronousThread:
         self._target(*self._args, **self._kwargs)
 
 
+class SyncMalProgressTests(unittest.TestCase):
+    """_sync_mal_progress runs in a background thread; run it inline by
+    patching threading.Thread to call its target synchronously."""
+
+    def _run_sync(self, kitsu_id="46474", episode=3):
+        from actions import webui_server
+        with patch("actions.webui_server.threading.Thread") as mocked_thread:
+            def _fake_thread(target, daemon=True):
+                target()
+                return MagicMock()
+            mocked_thread.side_effect = _fake_thread
+            webui_server._sync_mal_progress(kitsu_id, episode)
+
+    def test_skips_when_autocomplete_disabled(self):
+        with patch("actions.anime.prefs.get_autocomplete", return_value=False), \
+             patch("actions.mal_auth.is_logged_in") as mocked_logged_in:
+            self._run_sync()
+        mocked_logged_in.assert_not_called()
+
+    def test_skips_when_not_logged_in(self):
+        with patch("actions.anime.prefs.get_autocomplete", return_value=True), \
+             patch("actions.mal_auth.is_logged_in", return_value=False), \
+             patch("actions.mal_api.update_status") as mocked_update:
+            self._run_sync()
+        mocked_update.assert_not_called()
+
+    def test_skips_when_no_mal_id(self):
+        with patch("actions.anime.prefs.get_autocomplete", return_value=True), \
+             patch("actions.mal_auth.is_logged_in", return_value=True), \
+             patch("actions.anime.mappings.resolve_mal_id", return_value=0), \
+             patch("actions.mal_api.update_status") as mocked_update:
+            self._run_sync()
+        mocked_update.assert_not_called()
+
+    def test_pushes_status_when_all_conditions_met(self):
+        with patch("actions.anime.prefs.get_autocomplete", return_value=True), \
+             patch("actions.mal_auth.is_logged_in", return_value=True), \
+             patch("actions.anime.mappings.resolve_mal_id", return_value=52991), \
+             patch("actions.mal_api.update_status") as mocked_update:
+            self._run_sync(kitsu_id="46474", episode=3)
+        mocked_update.assert_called_once_with(52991, num_watched=3)
+
+    def test_never_raises_on_unexpected_error(self):
+        with patch("actions.anime.prefs.get_autocomplete", side_effect=RuntimeError("boom")):
+            self._run_sync()  # must not propagate
+
+
 class MoviesRouteTests(unittest.TestCase):
     def setUp(self):
         from actions.webui_host import WebUIHost
@@ -569,41 +617,243 @@ class MoviesRouteTests(unittest.TestCase):
         resp = self.client.get("/api/anime/search")
         self.assertEqual(resp.status_code, 400)
 
-    def test_anime_search_success(self):
+    def test_anime_search_uses_kitsu_catalog(self):
         from actions.movie_search import Movie
-        with patch("actions.movie_search.search_anime") as mocked:
-            mocked.return_value = [Movie(tmdb_id=5, title="Frieren", media_type="tv")]
+        with patch("actions.anime.catalog.search_anime") as mocked:
+            mocked.return_value = [Movie(tmdb_id=0, title="Frieren",
+                                         media_type="tv", kitsu_id="46474")]
             resp = self.client.get("/api/anime/search?q=frieren")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.get_json()[0]["title"], "Frieren")
+        body = resp.get_json()
+        self.assertEqual(body[0]["title"], "Frieren")
+        self.assertEqual(body[0]["kitsu_id"], "46474")
 
     def test_anime_trending_uses_airing_when_requested(self):
         from actions.movie_search import Movie
-        with patch("actions.movie_search.get_airing_anime") as mocked_airing, \
-             patch("actions.movie_search.get_trending_anime") as mocked_trending:
-            mocked_airing.return_value = [Movie(tmdb_id=6, title="One Piece", media_type="tv")]
+        with patch("actions.anime.catalog.get_airing_anime") as mocked_airing, \
+             patch("actions.anime.catalog.get_trending_anime") as mocked_trending:
+            mocked_airing.return_value = [Movie(tmdb_id=0, title="One Piece",
+                                                media_type="tv", kitsu_id="12")]
             resp = self.client.get("/api/anime/trending?airing=1")
         self.assertEqual(resp.status_code, 200)
         mocked_airing.assert_called_once()
         mocked_trending.assert_not_called()
 
-    def test_anime_torrents_uses_search_anime_not_generic(self):
-        from actions.torrentio import Stream
-        with patch("actions.movie_search.get_imdb_id", return_value="tt1234567") as mocked_imdb, \
-             patch("actions.torrentio.search_anime") as mocked_search, \
-             patch("actions.torrentio.search") as mocked_generic_search:
-            mocked_search.return_value = [Stream(title="Frieren S01E01", magnet="magnet:?xt=1", seeders=20)]
-            resp = self.client.get("/api/anime/torrents?tmdb_id=5&season=1&episode=1")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.get_json()[0]["seeders"], 20)
-        mocked_imdb.assert_called_once_with(5, kind="tv")
-        mocked_search.assert_called_once_with("tt1234567", kind="tv", season=1, episode=1)
-        mocked_generic_search.assert_not_called()
+    def test_anime_subtitles_missing_kitsu_id(self):
+        resp = self.client.get("/api/anime/subtitles?episode=1")
+        self.assertEqual(resp.status_code, 400)
 
-    def test_anime_torrents_no_imdb_id_returns_404(self):
-        with patch("actions.movie_search.get_imdb_id", return_value=""):
-            resp = self.client.get("/api/anime/torrents?tmdb_id=5")
+    def test_anime_subtitles_returns_vtt(self):
+        with patch("actions.anime.subtitles.get_vtt_by_kitsu") as mocked:
+            mocked.return_value = "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\nHola\n"
+            resp = self.client.get(
+                "/api/anime/subtitles?kitsu_id=12&episode=1&language=es")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.mimetype, "text/vtt")
+        self.assertTrue(resp.get_data(as_text=True).startswith("WEBVTT"))
+        mocked.assert_called_once_with("12", episode=1, language="es")
+
+    def test_anime_subtitles_defaults_language_to_spanish(self):
+        with patch("actions.anime.subtitles.get_vtt_by_kitsu") as mocked:
+            mocked.return_value = "WEBVTT\n\n"
+            self.client.get("/api/anime/subtitles?kitsu_id=12&episode=1")
+        mocked.assert_called_once_with("12", episode=1, language="es")
+
+    def test_anime_subtitles_missing_returns_404_not_500(self):
+        from actions.stremio_subs import StremioSubsError
+        with patch("actions.anime.subtitles.get_vtt_by_kitsu",
+                   side_effect=StremioSubsError("no subs found")):
+            resp = self.client.get("/api/anime/subtitles?kitsu_id=999999&episode=1")
         self.assertEqual(resp.status_code, 404)
+
+    def test_anime_meta_requires_kitsu_id(self):
+        resp = self.client.get("/api/anime/meta")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anime_meta_returns_movie_dict(self):
+        from actions.movie_search import Movie
+        with patch("actions.anime.catalog.get_meta") as mocked:
+            mocked.return_value = Movie(tmdb_id=0, title="Frieren",
+                                        media_type="tv", kitsu_id="46474")
+            resp = self.client.get("/api/anime/meta?kitsu_id=46474")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["title"], "Frieren")
+
+    def test_anime_episodes_requires_kitsu_id(self):
+        resp = self.client.get("/api/anime/episodes")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anime_episodes_returns_list(self):
+        with patch("actions.anime.catalog.get_episodes") as mocked:
+            mocked.return_value = [{"number": 1, "title": "Ep 1",
+                                    "stream_id": "kitsu:46474:1"}]
+            resp = self.client.get("/api/anime/episodes?kitsu_id=46474")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()[0]["stream_id"], "kitsu:46474:1")
+        mocked.assert_called_once_with("46474")
+
+    def test_anime_skip_missing_kitsu_id(self):
+        resp = self.client.get("/api/anime/skip?episode=1")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anime_skip_missing_episode(self):
+        resp = self.client.get("/api/anime/skip?kitsu_id=46474")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anime_skip_returns_empty_without_mal_id(self):
+        with patch("actions.anime.mappings.resolve_mal_id", return_value=0), \
+             patch("actions.anime.skip.get_skip_windows") as mocked_skip:
+            resp = self.client.get("/api/anime/skip?kitsu_id=999&episode=1")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json(), [])
+        mocked_skip.assert_not_called()
+
+    def test_anime_skip_resolves_mal_id_and_returns_windows(self):
+        from actions.anime.skip import SkipWindow
+        with patch("actions.anime.mappings.resolve_mal_id", return_value=52991) as mocked_resolve, \
+             patch("actions.anime.skip.get_skip_windows") as mocked_skip:
+            mocked_skip.return_value = [SkipWindow("op", 3.2, 93.2)]
+            resp = self.client.get(
+                "/api/anime/skip?kitsu_id=46474&episode=1&episode_length_s=1560")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body, [{"kind": "op", "start_s": 3.2, "end_s": 93.2}])
+        mocked_resolve.assert_called_once_with("46474")
+        mocked_skip.assert_called_once_with(52991, 1, 1560.0)
+
+    def test_anime_torrents_delegates_to_the_sources_layer(self):
+        """Source selection and ranking live in actions.anime.sources; the
+        endpoint just passes the request through and serialises the result."""
+        from actions.anime.sources import TorrentResult
+        with patch("actions.anime.sources.find_episode") as mocked:
+            mocked.return_value = [
+                TorrentResult(title="[MTBB] Frieren - 12.mkv",
+                              magnet="magnet:?xt=1", seeders=20,
+                              provider="AnimeTosho", single_file=True)]
+            resp = self.client.get(
+                "/api/anime/torrents?kitsu_id=46474&episode=12&total_episodes=28")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body[0]["seeders"], 20)
+        self.assertEqual(body[0]["provider"], "AnimeTosho")
+        self.assertTrue(body[0]["single_file"])
+        mocked.assert_called_once_with("46474", episode=12,
+                                       total_episodes=28, limit=25,
+                                       prefer_playable=True)
+
+    def test_anime_torrents_prefers_playable_for_the_browser_engine(self):
+        """A browser <video> cannot decode HEVC/10-bit/Opus, so the ranking
+        has to know which player will actually open the file."""
+        with patch("actions.anime.sources.find_episode", return_value=[]) as mocked:
+            self.client.get("/api/anime/torrents?kitsu_id=46474&episode=1&engine=browser")
+        self.assertTrue(mocked.call_args.kwargs["prefer_playable"])
+
+    def test_anime_torrents_always_ranks_for_the_browser(self):
+        """Playback is always the <video> tag now, so an `engine` hint from an
+        old client must not be able to turn codec ranking off."""
+        with patch("actions.anime.sources.find_episode", return_value=[]) as mocked:
+            self.client.get("/api/anime/torrents?kitsu_id=46474&episode=1&engine=vlc")
+        self.assertTrue(mocked.call_args.kwargs["prefer_playable"])
+
+    def test_anime_torrents_assumes_browser_for_a_lan_client(self):
+        """A LAN client has no local VLC to drive, so it gets the browser's
+        constraints even without saying so."""
+        with patch("actions.anime.sources.find_episode", return_value=[]) as mocked:
+            self.client.get("/api/anime/torrents?kitsu_id=46474&episode=1",
+                            environ_overrides={"REMOTE_ADDR": "192.168.1.50"})
+        self.assertTrue(mocked.call_args.kwargs["prefer_playable"])
+
+    def test_anime_torrents_passes_zero_episode_for_films(self):
+        with patch("actions.anime.sources.find_episode") as mocked:
+            mocked.return_value = []
+            self.client.get("/api/anime/torrents?kitsu_id=999")
+        mocked.assert_called_once_with("999", episode=0, total_episodes=0,
+                                       limit=25, prefer_playable=True)
+
+    def test_anime_torrents_missing_kitsu_id_returns_400(self):
+        resp = self.client.get("/api/anime/torrents")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anime_progress_get_missing_kitsu_id(self):
+        resp = self.client.get("/api/anime/progress")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anime_progress_get_returns_states_and_latest(self):
+        from actions.anime.progress import WatchEntry
+        with patch("actions.anime.progress.episode_states") as mocked_states, \
+             patch("actions.anime.progress.latest_episode") as mocked_latest:
+            mocked_states.return_value = {1: "seen", 2: "partial"}
+            mocked_latest.return_value = WatchEntry("kitsu:46474", 2, 400, 1560,
+                                                     False, 123.0, "Frieren", "")
+            resp = self.client.get("/api/anime/progress?kitsu_id=46474")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["episodes"], {"1": "seen", "2": "partial"})
+        self.assertEqual(body["latest"]["episode"], 2)
+        mocked_states.assert_called_once_with("kitsu:46474")
+
+    def test_anime_progress_save_missing_fields(self):
+        resp = self.client.post("/api/anime/progress", json={"kitsu_id": "46474"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anime_progress_save_writes_with_kitsu_key(self):
+        from actions.anime.progress import WatchEntry
+        with patch("actions.anime.progress.save") as mocked_save, \
+             patch("actions.webui_server._sync_mal_progress") as mocked_sync:
+            mocked_save.return_value = WatchEntry("kitsu:46474", 1, 300, 1560,
+                                                   False, 1.0, "Frieren", "")
+            resp = self.client.post("/api/anime/progress", json={
+                "kitsu_id": "46474", "episode": 1,
+                "position_s": 300, "duration_s": 1560, "title": "Frieren",
+            })
+        self.assertEqual(resp.status_code, 200)
+        mocked_save.assert_called_once_with(
+            "kitsu:46474", 1, position_s=300.0, duration_s=1560.0,
+            title="Frieren", poster_url="")
+        mocked_sync.assert_not_called()  # not completed yet
+
+    def test_anime_progress_save_syncs_mal_when_completed(self):
+        from actions.anime.progress import WatchEntry
+        with patch("actions.anime.progress.save") as mocked_save, \
+             patch("actions.webui_server._sync_mal_progress") as mocked_sync:
+            mocked_save.return_value = WatchEntry("kitsu:46474", 1, 1500, 1560,
+                                                   True, 1.0, "Frieren", "")
+            self.client.post("/api/anime/progress", json={
+                "kitsu_id": "46474", "episode": 1,
+                "position_s": 1500, "duration_s": 1560,
+            })
+        mocked_sync.assert_called_once_with("46474", 1)
+
+    def test_anime_progress_complete_marks_and_syncs(self):
+        with patch("actions.anime.progress.mark_completed") as mocked_mark, \
+             patch("actions.webui_server._sync_mal_progress") as mocked_sync:
+            resp = self.client.post("/api/anime/progress/complete", json={
+                "kitsu_id": "46474", "episode": 3, "title": "Frieren",
+            })
+        self.assertEqual(resp.status_code, 200)
+        mocked_mark.assert_called_once_with("kitsu:46474", 3, title="Frieren",
+                                            poster_url="")
+        mocked_sync.assert_called_once_with("46474", 3)
+
+    def test_anime_continue_returns_list(self):
+        from actions.anime.progress import WatchEntry
+        with patch("actions.anime.progress.continue_watching") as mocked:
+            mocked.return_value = [
+                WatchEntry("kitsu:46474", 3, 100, 1560, False, 1.0, "Frieren", "")]
+            resp = self.client.get("/api/anime/continue")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()[0]["media_key"], "kitsu:46474")
+
+    def test_anime_progress_remove_missing_kitsu_id(self):
+        resp = self.client.post("/api/anime/progress/remove", json={})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anime_progress_remove_deletes_series(self):
+        with patch("actions.anime.progress.delete_series") as mocked:
+            resp = self.client.post("/api/anime/progress/remove",
+                                    json={"kitsu_id": "46474"})
+        self.assertEqual(resp.status_code, 200)
+        mocked.assert_called_once_with("kitsu:46474")
 
     def test_youtube_search_missing_query(self):
         resp = self.client.get("/api/youtube/search")

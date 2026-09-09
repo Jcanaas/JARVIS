@@ -339,8 +339,8 @@
 <div class="panel">
   {#if !bridgeStatus?.ready && bridgeStatus?.state !== 'ready'}
     <div class="link-screen">
-      {#if bridgeStatus?.state === 'qr' && bridgeStatus?.qr}
-        <img class="qr-img" src={bridgeStatus.qr} alt="Código QR de WhatsApp" />
+      {#if bridgeStatus?.state === 'qr' && bridgeStatus?.qr_png}
+        <img class="qr-img" src={bridgeStatus.qr_png} alt="Código QR de WhatsApp" />
         <p>Escanea este código con WhatsApp en tu teléfono para vincular.</p>
       {:else}
         <div class="spinner"></div>

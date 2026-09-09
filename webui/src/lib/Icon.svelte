@@ -131,6 +131,28 @@
   </svg>
 {:else if name === 'stop'}
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+{:else if name === 'fullscreen'}
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 9V4h5" />
+    <path d="M20 9V4h-5" />
+    <path d="M4 15v5h5" />
+    <path d="M20 15v5h-5" />
+  </svg>
+{:else if name === 'fullscreen-exit'}
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 4v5H4" />
+    <path d="M15 4v5h5" />
+    <path d="M9 20v-5H4" />
+    <path d="M15 20v-5h5" />
+  </svg>
+{:else if name === 'subtitles'}
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="5" width="18" height="14" rx="2.5" />
+    <path d="M7 14h4" />
+    <path d="M13 14h4" />
+    <path d="M7 10.5h2" />
+    <path d="M11 10.5h6" />
+  </svg>
 {:else if name === 'attach'}
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
     <g transform="rotate(45 12 12)">

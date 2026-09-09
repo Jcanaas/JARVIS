@@ -18,6 +18,7 @@ import collections
 import json
 import queue
 import threading
+import uuid
 from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 
@@ -52,6 +53,22 @@ _subscribers: "set[queue.Queue]" = set()
 _log_buffer_lock = threading.Lock()
 _log_buffer: "collections.deque[dict]" = collections.deque(maxlen=500)
 _next_log_id = 0
+
+
+def _safe_upload_name(filename: str) -> str:
+    """Return a basename suitable for saving a browser-uploaded file."""
+    raw = str(filename or "")
+    # Browsers send a basename, never a path. Reject separators rather than
+    # attempting to "clean" a traversal into an ambiguous different file.
+    if "/" in raw or "\\" in raw:
+        raise ValueError("invalid_filename")
+    name = "".join(
+        char if (char.isalnum() or char in " ._-") else "_"
+        for char in raw
+    ).strip(" .")
+    if not name or name in {".", ".."}:
+        raise ValueError("invalid_filename")
+    return name
 
 
 def _append_log_entry(entry_type: str, message: str) -> None:
@@ -115,6 +132,33 @@ def _google_error(exc: Exception):
     ) or isinstance(exc, FileNotFoundError)
     print(f"[WebUIServer] Google API call failed: {text}")
     return jsonify({"error": text, "needs_auth": auth_ish}), (503 if auth_ish else 500)
+
+
+def _sync_mal_progress(kitsu_id: str, episode: int) -> None:
+    """Best-effort push to MyAnimeList — never blocks or fails the request.
+
+    Runs in the background: MAL calls are slow enough (OAuth-signed HTTP) that
+    doing this inline would make every progress tick from the player (roughly
+    every 10s) wait on it. A failure here (no MAL session, no mal_id, MAL
+    down) is silent — local progress already saved regardless.
+    """
+    def _work():
+        try:
+            from actions.anime import prefs
+            if not prefs.get_autocomplete():
+                return
+            from actions.mal_auth import is_logged_in
+            if not is_logged_in():
+                return
+            from actions.anime import mappings
+            mal_id = mappings.resolve_mal_id(kitsu_id)
+            if not mal_id:
+                return
+            from actions.mal_api import update_status
+            update_status(mal_id, num_watched=episode)
+        except Exception:
+            pass
+    threading.Thread(target=_work, daemon=True).start()
 
 
 def _make_app(host_ref):
@@ -326,7 +370,18 @@ def _make_app(host_ref):
         # Drives the QR-linking screen (actions/whatsapp_ui.py:1256-1338):
         # while state != "ready" the panel shows the QR instead of chats.
         from actions import whatsapp
-        return jsonify(whatsapp._bridge_qr_status())
+        data = whatsapp._bridge_qr_status()
+        qr_raw = data.get("qr")
+        if qr_raw:
+            try:
+                import io, base64, qrcode
+                img = qrcode.make(qr_raw)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                data["qr_png"] = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+            except Exception:
+                pass
+        return jsonify(data)
 
     @app.route("/api/whatsapp/reconnect", methods=["POST"])
     def api_whatsapp_reconnect():
@@ -342,9 +397,8 @@ def _make_app(host_ref):
             return jsonify({"error": "missing_fields"}), 400
         try:
             import tempfile
-            from pathlib import Path as _Path
             with tempfile.TemporaryDirectory() as tmp:
-                dest = _Path(tmp) / f.filename
+                dest = Path(tmp) / _safe_upload_name(f.filename)
                 f.save(dest)
                 from actions import whatsapp
                 result = whatsapp.send_whatsapp_media(to, str(dest), caption)
@@ -458,7 +512,7 @@ def _make_app(host_ref):
         from actions.paths import DATA_DIR
         upload_dir = DATA_DIR / "uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
-        dest = upload_dir / f.filename
+        dest = upload_dir / _safe_upload_name(f.filename)
         if dest.exists():
             import time as _time
             dest = upload_dir / f"{dest.stem}_{int(_time.time())}{dest.suffix}"
@@ -697,29 +751,23 @@ def _make_app(host_ref):
         body = request.form.get("body") or ""
         if not to:
             return jsonify({"error": "missing_to"}), 400
-        tmp_paths = []
         try:
             import tempfile
             from pathlib import Path
-            upload_dir = Path(tempfile.mkdtemp(prefix="jarvis_gmail_"))
-            for f in request.files.getlist("attachments"):
-                if not f.filename:
-                    continue
-                dest = upload_dir / f.filename
-                f.save(dest)
-                tmp_paths.append(str(dest))
-            from actions import gmail
-            result = gmail.send_email(to, subject, body, attachments=tmp_paths or None)
-            return jsonify({"ok": True, "result": result})
+            with tempfile.TemporaryDirectory(prefix="jarvis_gmail_") as tmp:
+                tmp_paths = []
+                upload_dir = Path(tmp)
+                for f in request.files.getlist("attachments"):
+                    if not f.filename:
+                        continue
+                    dest = upload_dir / _safe_upload_name(f.filename)
+                    f.save(dest)
+                    tmp_paths.append(str(dest))
+                from actions import gmail
+                result = gmail.send_email(to, subject, body, attachments=tmp_paths or None)
+                return jsonify({"ok": True, "result": result})
         except Exception as e:
             return _google_error(e)
-        finally:
-            for p in tmp_paths:
-                try:
-                    import os
-                    os.remove(p)
-                except OSError:
-                    pass
 
     # -- Drive -------------------------------------------------------------
     # Mirrors ui/panels/drive.py: folder browse, search, preview, upload,
@@ -818,7 +866,7 @@ def _make_app(host_ref):
             import tempfile
             from pathlib import Path as _Path
             with tempfile.TemporaryDirectory() as tmp:
-                dest = _Path(tmp) / f.filename
+                dest = _Path(tmp) / _safe_upload_name(f.filename)
                 f.save(dest)
                 from actions import gdrive
                 result = gdrive.upload_file(str(dest), folder_id=folder_id)
@@ -959,6 +1007,83 @@ def _make_app(host_ref):
         except Exception as e:
             print(f"[WebUIServer] search failed: {e}")
             return jsonify({"songs": [], "playlists": [], "artists": []})
+
+    @app.route("/api/music/song_details")
+    def api_music_song_details():
+        # Feeds the "now playing" info panel (title/album/year/duration plus
+        # artist bio+photo) — mirrors ui/panels/music.py's
+        # _fetch_now_playing_details, which calls the same ytmusic.get_song_details.
+        video_id = (request.args.get("video_id") or "").strip()
+        title = (request.args.get("title") or "").strip()
+        artists = (request.args.get("artists") or "").strip()
+        album_id = (request.args.get("album_id") or "").strip()
+        artist_id = (request.args.get("artist_id") or "").strip()
+        if not video_id and not title:
+            return jsonify({"error": "missing_track"}), 400
+        try:
+            from actions import ytmusic
+            return jsonify(ytmusic.get_song_details(
+                video_id=video_id, title=title, artists=artists,
+                album_id=album_id, artist_id=artist_id,
+            ) or {})
+        except Exception as e:
+            print(f"[WebUIServer] get_song_details failed: {e}")
+            return jsonify({})
+
+    @app.route("/api/music/artist")
+    def api_music_artist():
+        # Backs the artist detail page (bio, top songs, albums, related
+        # artists) — same actions.ytmusic.get_artist_details the Qt panel's
+        # _open_artist_page calls (ui/panels/music.py:2719).
+        q = (request.args.get("q") or "").strip()
+        browse_id = (request.args.get("browse_id") or "").strip()
+        if not q and not browse_id:
+            return jsonify({"error": "missing_artist"}), 400
+        try:
+            from actions import ytmusic
+            return jsonify(ytmusic.get_artist_details(query=q, browse_id=browse_id) or {})
+        except Exception as e:
+            print(f"[WebUIServer] get_artist_details failed: {e}")
+            return jsonify({})
+
+    @app.route("/api/music/album")
+    def api_music_album():
+        # Backs the album detail page (tracklist) — same
+        # actions.ytmusic.get_album_details the Qt panel's _open_album_page
+        # calls (ui/panels/music.py:2697).
+        q = (request.args.get("q") or "").strip()
+        browse_id = (request.args.get("browse_id") or "").strip()
+        if not q and not browse_id:
+            return jsonify({"error": "missing_album"}), 400
+        try:
+            from actions import ytmusic
+            return jsonify(ytmusic.get_album_details(query=q, browse_id=browse_id) or {})
+        except Exception as e:
+            print(f"[WebUIServer] get_album_details failed: {e}")
+            return jsonify({})
+
+    @app.route("/api/music/audio_analysis")
+    def api_music_audio_analysis():
+        # BPM + musical key metadata for the "now playing" panel. Synchronous
+        # like /api/music/lyrics; the frontend shows a loading state while it
+        # runs and the disk cache avoids repeated catalog lookups.
+        video_id = (request.args.get("video_id") or "").strip()
+        title = (request.args.get("title") or "").strip()
+        artists = (request.args.get("artists") or "").strip()
+        try:
+            duration_s = float(request.args.get("duration_s") or 0)
+        except ValueError:
+            duration_s = 0
+        if not video_id:
+            return jsonify({"error": "missing_video_id"}), 400
+        try:
+            from actions import audio_analysis
+            return jsonify(audio_analysis.analyze_track(
+                video_id, title=title, artists=artists, duration_s=duration_s,
+            ))
+        except Exception as e:
+            print(f"[WebUIServer] analyze_track failed: {e}")
+            return jsonify({"error": str(e)})
 
     @app.route("/api/music/queue")
     def api_music_queue():
@@ -1183,25 +1308,33 @@ def _make_app(host_ref):
         data = request.get_json(silent=True) or {}
         magnet = str(data.get("magnet") or "").strip()
         file_idx = data.get("file_idx", -1)
+        # Lets the daemon pick the right file out of a season batch by name
+        # when no index is known — AnimeTosho supplies no index at all.
+        episode = data.get("episode", 0)
+        request_id = str(data.get("request_id") or "").strip()[:128] or uuid.uuid4().hex
         if not magnet:
             return jsonify({"error": "missing_magnet"}), 400
 
         def _run():
             from actions import vlc_player
             def _progress(peers, elapsed):
-                publish("stream_progress", {"peers": peers, "elapsed": elapsed})
+                publish("stream_progress", {
+                    "peers": peers, "elapsed": elapsed, "request_id": request_id,
+                })
             try:
-                url = vlc_player.start_streaming(magnet, file_index=file_idx, progress_hook=_progress)
-                publish("stream_ready", {"url": url})
+                url = vlc_player.start_streaming(magnet, file_index=file_idx,
+                                                 progress_hook=_progress,
+                                                 episode=episode)
+                publish("stream_ready", {"url": url, "request_id": request_id})
             except Exception as e:
-                publish("stream_error", {"error": str(e)})
+                publish("stream_error", {"error": str(e), "request_id": request_id})
 
         # start_streaming blocks 1-65s waiting for swarm metadata (real
         # trackers, not a bug) — same reason the Qt panel shows a live
         # "buscando fuente… N peers, Ys" instead of a plain spinner. The SSE
         # events above are that same feedback for the web.
         threading.Thread(target=_run, daemon=True).start()
-        return jsonify({"ok": True}), 202
+        return jsonify({"ok": True, "request_id": request_id}), 202
 
     @app.route("/api/movies/stop", methods=["POST"])
     def api_movies_stop():
@@ -1219,10 +1352,15 @@ def _make_app(host_ref):
         return jsonify({"ready": status is not None, "status": status})
 
     # -- Anime -----------------------------------------------------------------
-    # ui/panels/movies.py's AnimeModePanel subclasses MoviesModePanel and plays
-    # through the exact same vlc_player pipeline — only the metadata source and
-    # the torrent lookup (NyaaSi via torrentio.search_anime, no providers
-    # filter) differ, so playback reuses /api/movies/play|stop|status as-is.
+    # Same route as ui/panels/movies.py's AnimeModePanel: the Kitsu addon for
+    # metadata, then Torrentio keyed by "kitsu:<id>:<episode>". This used to be
+    # its own TMDB -> IMDb -> Torrentio path, which silently broke for any
+    # anime with more than one season because it fed TMDB season/episode
+    # numbers to an index that uses Kitsu's absolute numbering. Playback still
+    # reuses /api/movies/play|stop|status as-is.
+
+    def _anime_error(exc: Exception):
+        return jsonify({"error": str(exc)}), 500
 
     @app.route("/api/anime/search")
     def api_anime_search():
@@ -1230,39 +1368,212 @@ def _make_app(host_ref):
         if not q:
             return jsonify({"error": "missing_query"}), 400
         try:
-            from actions import movie_search
-            results = movie_search.search_anime(q, limit=20)
-            return jsonify([m.to_dict() for m in results])
+            from actions.anime import catalog
+            return jsonify([m.to_dict() for m in catalog.search_anime(q, limit=20)])
         except Exception as e:
-            return _movie_error(e)
+            return _anime_error(e)
 
     @app.route("/api/anime/trending")
     def api_anime_trending():
         airing = request.args.get("airing") == "1"
         try:
-            from actions import movie_search
-            fn = movie_search.get_airing_anime if airing else movie_search.get_trending_anime
-            results = fn(limit=20)
-            return jsonify([m.to_dict() for m in results])
+            from actions.anime import catalog
+            fn = catalog.get_airing_anime if airing else catalog.get_trending_anime
+            return jsonify([m.to_dict() for m in fn(limit=20)])
         except Exception as e:
-            return _movie_error(e)
+            return _anime_error(e)
+
+    @app.route("/api/anime/genre")
+    def api_anime_genre():
+        genre = (request.args.get("genre") or "").strip()
+        if not genre:
+            return jsonify({"error": "missing_genre"}), 400
+        try:
+            from actions.anime import catalog
+            return jsonify([m.to_dict()
+                            for m in catalog.get_anime_by_genre(genre, limit=20)])
+        except Exception as e:
+            return _anime_error(e)
+
+    @app.route("/api/anime/genres")
+    def api_anime_genres():
+        from actions.anime import catalog
+        return jsonify(list(catalog.GENRES.keys()))
+
+    @app.route("/api/anime/meta")
+    def api_anime_meta():
+        """Full metadata for one anime — used to rebuild the detail view when
+        jumping in from Continue Watching, where all that's stored locally is
+        the kitsu_id, title and poster."""
+        kitsu_id = (request.args.get("kitsu_id") or "").strip()
+        if not kitsu_id:
+            return jsonify({"error": "missing_kitsu_id"}), 400
+        try:
+            from actions.anime import catalog
+            return jsonify(catalog.get_meta(kitsu_id).to_dict())
+        except Exception as e:
+            return _anime_error(e)
+
+    @app.route("/api/anime/episodes")
+    def api_anime_episodes():
+        kitsu_id = (request.args.get("kitsu_id") or "").strip()
+        if not kitsu_id:
+            return jsonify({"error": "missing_kitsu_id"}), 400
+        try:
+            from actions.anime import catalog
+            return jsonify(catalog.get_episodes(kitsu_id))
+        except Exception as e:
+            return _anime_error(e)
+
+    @app.route("/api/anime/skip")
+    def api_anime_skip():
+        """Opening/ending/recap windows for one episode (AniSkip).
+
+        AniSkip is keyed by MAL id, which Kitsu doesn't carry — resolved here
+        via actions.anime.mappings (api.ani.zip) so callers only ever need
+        the kitsu_id they already have.
+        """
+        kitsu_id = (request.args.get("kitsu_id") or "").strip()
+        episode = request.args.get("episode", type=int) or 0
+        episode_length_s = request.args.get("episode_length_s", type=float) or 0
+        if not kitsu_id or not episode:
+            return jsonify({"error": "missing_kitsu_id_or_episode"}), 400
+        try:
+            from actions.anime import mappings, skip
+            mal_id = mappings.resolve_mal_id(kitsu_id)
+            if not mal_id:
+                return jsonify([])
+            windows = skip.get_skip_windows(mal_id, episode, episode_length_s)
+            return jsonify([w.to_dict() for w in windows])
+        except Exception as e:
+            return _anime_error(e)
+
+    @app.route("/api/anime/subtitles")
+    def api_anime_subtitles():
+        """External subtitle for the <video> tag, as WebVTT.
+
+        Converts the addon-sourced .srt into the only format <track> accepts.
+        A miss (no subtitle for this episode/language) is a normal 404, not a
+        500: the video plays fine without one, and the front-end uses the 404
+        to grey that language out in the subtitle menu.
+        """
+        kitsu_id = (request.args.get("kitsu_id") or "").strip()
+        episode = request.args.get("episode", type=int) or 0
+        language = (request.args.get("language") or "es").strip()
+        if not kitsu_id:
+            return jsonify({"error": "missing_kitsu_id"}), 400
+        try:
+            from actions.anime import subtitles
+            vtt = subtitles.get_vtt_by_kitsu(kitsu_id, episode=episode,
+                                             language=language)
+            return Response(vtt, mimetype="text/vtt")
+        except Exception:
+            return "", 404
 
     @app.route("/api/anime/torrents")
     def api_anime_torrents():
-        tmdb_id = request.args.get("tmdb_id", type=int)
-        season = request.args.get("season", type=int) or 0
+        """Releases for one episode via actions.anime.sources.
+
+        AnimeTosho (keyed by AniDB episode id, so a single-file release is
+        provably the right episode) with Torrentio as the fallback — see that
+        module's docstring for the measurements behind the ordering.
+        """
+        kitsu_id = (request.args.get("kitsu_id") or "").strip()
         episode = request.args.get("episode", type=int) or 0
-        if not tmdb_id:
-            return jsonify({"error": "missing_tmdb_id"}), 400
+        total_episodes = request.args.get("total_episodes", type=int) or 0
+        if not kitsu_id:
+            return jsonify({"error": "missing_kitsu_id"}), 400
+        # Playback is always the browser <video>, so releases it cannot decode
+        # (HEVC, 10-bit, AC3...) are ranked down unconditionally — there is no
+        # longer a second engine that could have played them.
         try:
-            from actions import movie_search, torrentio
-            imdb_id = movie_search.get_imdb_id(tmdb_id, kind="tv")
-            if not imdb_id:
-                return jsonify({"error": "No se encontró un identificador IMDb para este título."}), 404
-            streams = torrentio.search_anime(imdb_id, kind="tv", season=season, episode=episode)
-            return jsonify([s.to_dict() for s in streams])
+            from actions.anime import sources
+            results = sources.find_episode(kitsu_id, episode=episode,
+                                           total_episodes=total_episodes,
+                                           limit=25, prefer_playable=True)
+            return jsonify([r.to_dict() for r in results])
         except Exception as e:
-            return jsonify({"error": str(e)}), 500
+            return _anime_error(e)
+
+    # -- Anime progress ---------------------------------------------------
+    # Local watch history: continue-watching rail, per-episode seen/partial
+    # state, and auto-complete. Nothing wrote any of this before — the panel
+    # forgot where you were the moment you closed it. See
+    # NOTE_anime_shiru_plan.md phase 1. media_key is "kitsu:<id>", built by
+    # actions.anime.progress.kitsu_key so Movies/TV can reuse this store later.
+
+    @app.route("/api/anime/progress")
+    def api_anime_progress_get():
+        kitsu_id = (request.args.get("kitsu_id") or "").strip()
+        if not kitsu_id:
+            return jsonify({"error": "missing_kitsu_id"}), 400
+        from actions.anime import prefs, progress
+        key = progress.kitsu_key(kitsu_id)
+        states = {str(ep): state for ep, state in progress.episode_states(key).items()}
+        latest = progress.latest_episode(key)
+        return jsonify({
+            "episodes": states,
+            "latest": latest.to_dict() if latest else None,
+        })
+
+    @app.route("/api/anime/progress", methods=["POST"])
+    def api_anime_progress_save():
+        data = request.get_json(silent=True) or {}
+        kitsu_id = str(data.get("kitsu_id") or "").strip()
+        episode = data.get("episode")
+        if not kitsu_id or not episode:
+            return jsonify({"error": "missing_kitsu_id_or_episode"}), 400
+        from actions.anime import progress
+        media_key = progress.kitsu_key(kitsu_id)
+        existing = progress.get(media_key, int(episode))
+        entry = progress.save(
+            media_key, int(episode),
+            position_s=float(data.get("position_s") or 0),
+            duration_s=float(data.get("duration_s") or 0),
+            title=str(data.get("title") or ""),
+            poster_url=str(data.get("poster_url") or ""),
+            autocomplete=prefs.get_autocomplete(),
+        )
+        if entry.completed and not (existing and existing.completed):
+            _sync_mal_progress(kitsu_id, int(episode))
+        return jsonify(entry.to_dict())
+
+    @app.route("/api/anime/progress/complete", methods=["POST"])
+    def api_anime_progress_complete():
+        """Manual "mark as seen" — no position/duration required."""
+        data = request.get_json(silent=True) or {}
+        kitsu_id = str(data.get("kitsu_id") or "").strip()
+        episode = data.get("episode")
+        if not kitsu_id or not episode:
+            return jsonify({"error": "missing_kitsu_id_or_episode"}), 400
+        from actions.anime import progress
+        media_key = progress.kitsu_key(kitsu_id)
+        existing = progress.get(media_key, int(episode))
+        progress.mark_completed(
+            media_key, int(episode),
+            title=str(data.get("title") or ""),
+            poster_url=str(data.get("poster_url") or ""),
+        )
+        if not (existing and existing.completed):
+            _sync_mal_progress(kitsu_id, int(episode))
+        return jsonify({"ok": True})
+
+    @app.route("/api/anime/continue")
+    def api_anime_continue():
+        from actions.anime import progress
+        limit = request.args.get("limit", type=int) or 20
+        return jsonify([e.to_dict() for e in progress.continue_watching(limit)])
+
+    @app.route("/api/anime/progress/remove", methods=["POST"])
+    def api_anime_progress_remove():
+        """Drop a series from Continue Watching / local history entirely."""
+        data = request.get_json(silent=True) or {}
+        kitsu_id = str(data.get("kitsu_id") or "").strip()
+        if not kitsu_id:
+            return jsonify({"error": "missing_kitsu_id"}), 400
+        from actions.anime import progress
+        progress.delete_series(progress.kitsu_key(kitsu_id))
+        return jsonify({"ok": True})
 
     # -- YouTube -----------------------------------------------------------
     # ui/panels/youtube.py's EmbeddedVideoPlayer hands the watch URL straight
@@ -1418,14 +1729,38 @@ def _make_app(host_ref):
 
     @app.route("/api/settings/anime_sfw")
     def api_settings_anime_sfw_get():
-        from actions import anime_search
-        return jsonify({"sfw": anime_search.get_sfw()})
+        from actions.anime import prefs
+        return jsonify({"sfw": prefs.get_sfw()})
 
     @app.route("/api/settings/anime_sfw", methods=["POST"])
     def api_settings_anime_sfw_set():
-        from actions import anime_search
+        from actions.anime import prefs
         data = request.get_json(silent=True) or {}
-        anime_search.set_sfw(bool(data.get("sfw")))
+        prefs.set_sfw(bool(data.get("sfw")))
+        return jsonify({"ok": True})
+
+    @app.route("/api/settings/anime_autoplay")
+    def api_settings_anime_autoplay_get():
+        from actions.anime import prefs
+        return jsonify({"autoplay": prefs.get_autoplay()})
+
+    @app.route("/api/settings/anime_autoplay", methods=["POST"])
+    def api_settings_anime_autoplay_set():
+        from actions.anime import prefs
+        data = request.get_json(silent=True) or {}
+        prefs.set_autoplay(bool(data.get("autoplay")))
+        return jsonify({"ok": True})
+
+    @app.route("/api/settings/anime_autocomplete")
+    def api_settings_anime_autocomplete_get():
+        from actions.anime import prefs
+        return jsonify({"autocomplete": prefs.get_autocomplete()})
+
+    @app.route("/api/settings/anime_autocomplete", methods=["POST"])
+    def api_settings_anime_autocomplete_set():
+        from actions.anime import prefs
+        data = request.get_json(silent=True) or {}
+        prefs.set_autocomplete(bool(data.get("autocomplete")))
         return jsonify({"ok": True})
 
     @app.route("/api/settings/audio_devices")
@@ -1761,7 +2096,7 @@ def _make_app(host_ref):
         from actions import bios, emulator_runtime as er
 
         with tempfile.TemporaryDirectory() as tmp:
-            temp_path = Path(tmp) / f.filename
+            temp_path = Path(tmp) / _safe_upload_name(f.filename)
             f.save(temp_path)
             try:
                 target = bios.import_ps2_bios(temp_path, er.system_dir())
@@ -1873,7 +2208,9 @@ def _make_app(host_ref):
             from actions import rom_catalog as rc
             from actions import game_library as gl
 
-            dest = rc.roms_dir(console_id) / f.filename
+            if console_id not in rc.CONSOLES:
+                return jsonify({"error": "unknown_console_id"}), 400
+            dest = rc.roms_dir(console_id) / _safe_upload_name(f.filename)
             if dest.exists():
                 return jsonify({"error": f"«{f.filename}» ya está en tu biblioteca"}), 409
             f.save(dest)

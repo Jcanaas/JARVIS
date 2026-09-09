@@ -2,8 +2,10 @@
   import { onMount, onDestroy } from 'svelte'
   import {
     searchMusic, getRecommendations, listPlaylists, listPlaylistTracks, musicAction,
+    getArtistDetails, getAlbumDetails,
   } from '../api.js'
   import { playback } from '../stores/sse.js'
+  import NowPlayingPanel from '../lib/NowPlayingPanel.svelte'
 
   // Mirrors ui/panels/music.py's MusicModePanelV2 flow: a persistent search
   // bar, two browse tabs (Recomendaciones/Playlists) while not searching,
@@ -37,6 +39,12 @@
     meta: 'Tu biblioteca de YouTube Music', thumbnail: '',
   })
   let currentPlaylist = $state(null)
+  let artistBio = $state('')
+  // Snapshot stack for artist/album drill-downs opened from the "now
+  // playing" panel or an artist search result — lets "back" (music.py's
+  // filter_row back button) unwind multiple levels (artist -> related
+  // artist -> album -> ...) instead of only ever returning to the root list.
+  let navStack = $state([])
   let listEl = $state()
   let sentinelEl = $state()
   let loadingMore = $state(false)
@@ -94,6 +102,8 @@
     searching = false
     section = 'playlists'
     currentPlaylist = null
+    artistBio = ''
+    navStack = []
     kind = 'playlists'
     header = { type: 'Playlists', title: 'Playlists', meta: 'Tu biblioteca de YouTube Music', thumbnail: '' }
     await load(listPlaylists, setItems)
@@ -103,6 +113,8 @@
     searching = false
     section = 'recommendations'
     currentPlaylist = null
+    artistBio = ''
+    navStack = []
     kind = 'songs'
     header = { type: 'Recomendaciones', title: 'Recomendaciones', meta: 'Hechas para ti según tu actividad', thumbnail: '' }
     await load(getRecommendations, setItems)
@@ -113,6 +125,8 @@
     if (!q) return loadPlaylists()
     searching = true
     currentPlaylist = null
+    artistBio = ''
+    navStack = []
     header = { type: 'Búsqueda', title: `Buscar: ${q}`, meta: 'Filtra por canciones, playlists o artistas', thumbnail: '' }
     await load(() => searchMusic(q), (res) => {
       searchResults = res
@@ -130,10 +144,16 @@
     if (e.key === 'Enter') doSearch()
   }
 
+  function pushSnapshot() {
+    navStack = [...navStack, { kind, header, items, currentPlaylist, artistBio, searching, section }]
+  }
+
   async function openPlaylist(playlist) {
     const pid = playlist.playlistId || playlist.browseId
     if (!pid) return
+    pushSnapshot()
     currentPlaylist = playlist
+    artistBio = ''
     kind = 'playlist_tracks'
     header = {
       type: 'Lista',
@@ -163,9 +183,62 @@
   }
 
   function backToList() {
+    if (navStack.length) {
+      const prev = navStack[navStack.length - 1]
+      navStack = navStack.slice(0, -1)
+      kind = prev.kind
+      header = prev.header
+      setItems(prev.items, { keepScroll: false })
+      currentPlaylist = prev.currentPlaylist
+      artistBio = prev.artistBio
+      searching = prev.searching
+      section = prev.section
+      return
+    }
     if (searching) applySearchFilter('playlists')
     else if (section === 'recommendations') loadRecommendations()
     else loadPlaylists()
+  }
+
+  // Artist detail page — old UI's _open_artist_page (music.py:2719):
+  // shows the artist's bio/photo plus their top songs, reached from the
+  // now-playing panel's artist link or an artist row in search results.
+  async function openArtist(browseId, name) {
+    if (!browseId && !name) return
+    pushSnapshot()
+    currentPlaylist = null
+    kind = 'songs'
+    artistBio = 'Cargando…'
+    header = { type: 'Artista', title: name || 'Artista', meta: 'Cargando…', thumbnail: '' }
+    await load(() => getArtistDetails(name || '', browseId || ''), (artist) => {
+      header = {
+        type: 'Artista',
+        title: artist.name || name || 'Artista',
+        meta: [artist.subscribers, artist.monthlyListeners].filter(Boolean).join(' · '),
+        thumbnail: artist.thumbnail || '',
+      }
+      artistBio = artist.description || ''
+      setItems(artist.top_songs || [])
+    })
+  }
+
+  // Album detail page — old UI's _open_album_page (music.py:2697).
+  async function openAlbum(browseId, name) {
+    if (!browseId && !name) return
+    pushSnapshot()
+    currentPlaylist = null
+    artistBio = ''
+    kind = 'playlist_tracks'
+    header = { type: 'Álbum', title: name || 'Álbum', meta: 'Cargando…', thumbnail: '' }
+    await load(() => getAlbumDetails(name || '', browseId || ''), (album) => {
+      header = {
+        type: 'Álbum',
+        title: album.title || name || 'Álbum',
+        meta: [album.artists, album.year].filter(Boolean).join(' · '),
+        thumbnail: album.thumbnail || '',
+      }
+      setItems(album.tracks || [])
+    })
   }
 
   // Payload shape follows music.py's _audio_tracks_from_items — only
@@ -230,6 +303,7 @@
   onMount(loadPlaylists)
 </script>
 
+<div class="layout">
 <div class="panel">
   <div class="search-row">
     <input
@@ -246,7 +320,7 @@
       <button class:active={section === 'recommendations'} onclick={loadRecommendations}>Recomendaciones</button>
       <button class:active={section === 'playlists'} onclick={loadPlaylists}>Playlists</button>
     </div>
-  {:else if kind !== 'playlist_tracks'}
+  {:else if kind !== 'playlist_tracks' && !navStack.length}
     <div class="tabs">
       <button class:active={searchFilter === 'songs'} onclick={() => applySearchFilter('songs')}>Canciones</button>
       <button class:active={searchFilter === 'playlists'} onclick={() => applySearchFilter('playlists')}>Playlists</button>
@@ -255,7 +329,7 @@
   {/if}
 
   <div class="hero">
-    {#if kind === 'playlist_tracks'}
+    {#if navStack.length || kind === 'playlist_tracks'}
       <button class="back" onclick={backToList} title="Volver">←</button>
     {/if}
     {#if header.thumbnail}
@@ -272,6 +346,10 @@
       <button class="shuffle" onclick={shufflePlaylist}>Aleatorio</button>
     {/if}
   </div>
+
+  {#if artistBio}
+    <p class="artist-bio">{artistBio}</p>
+  {/if}
 
   {#if error}
     <div class="error">{error}</div>
@@ -302,7 +380,7 @@
       {/each}
     {:else if kind === 'artists'}
       {#each visibleItems as a, i (i)}
-        <button class="row">
+        <button class="row" onclick={() => openArtist(a.browseId, a.name || a.title)}>
           {#if a.thumbnail}
             <img src={a.thumbnail} alt="" class="row-thumb round" width="40" height="40" loading="lazy" decoding="async" />
           {:else}<div class="row-thumb round thumb-fallback"></div>{/if}
@@ -342,15 +420,34 @@
     {/if}
   </div>
 </div>
+<NowPlayingPanel onOpenArtist={openArtist} onOpenAlbum={openAlbum} />
+</div>
 
 <style>
+  .layout {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+  }
+
   .panel {
+    flex: 1;
+    min-width: 0;
     height: 100%;
     min-height: 0;
     display: flex;
     flex-direction: column;
     padding: 16px;
     gap: 10px;
+  }
+
+  .artist-bio {
+    flex-shrink: 0;
+    color: var(--text-med);
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0;
+    padding: 0 2px;
   }
 
   .search-row {

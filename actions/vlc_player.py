@@ -147,7 +147,8 @@ def _send_command(cmd: dict, timeout: float) -> dict:
 
 
 def start_streaming(magnet: str, title: str = "", file_index: int = -1,
-                    progress_hook: Optional[Callable[[int, int], None]] = None) -> str:
+                    progress_hook: Optional[Callable[[int, int], None]] = None,
+                    episode: int = 0) -> str:
     """Start (or switch to) a WebTorrent HTTP stream for a magnet link.
 
     Args:
@@ -155,7 +156,11 @@ def start_streaming(magnet: str, title: str = "", file_index: int = -1,
         title: Optional title (unused, kept for API compatibility)
         file_index: Index of the video file to serve inside the torrent
             (Torrentio's fileIdx). Essential for season/batch torrents where
-            the requested episode is not the largest file. -1 = pick largest.
+            the requested episode is not the largest file. -1 = unknown.
+        episode: Episode number, used to pick the right file out of a batch
+            by matching filenames when no file_index is known. AnimeTosho
+            gives no index, so without this a season batch served whatever
+            file happened to be largest.
         progress_hook: Optional callback(peers, elapsed_seconds) invoked every
             few seconds while waiting for metadata. Metadata for real-world
             (esp. Spanish tracker) swarms legitimately takes 45-65s — without
@@ -174,7 +179,8 @@ def start_streaming(magnet: str, title: str = "", file_index: int = -1,
         try:
             result = _send_command(
                 {"cmd": "play", "id": str(uuid.uuid4()), "magnet": magnet,
-                 "fileIndex": file_index if file_index is not None else -1},
+                 "fileIndex": file_index if file_index is not None else -1,
+                 "episode": int(episode or 0)},
                 _READY_TIMEOUT,
             )
         finally:

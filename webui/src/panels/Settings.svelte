@@ -253,6 +253,24 @@
     api.setAnimeSfw(v).catch((e) => (saveNote = e.message))
   }
 
+  let animeAutoplay = $state(true)
+  let animeAutocomplete = $state(true)
+  async function loadAnimePlaybackPrefs() {
+    try {
+      const [ap, ac] = await Promise.all([api.getAnimeAutoplay(), api.getAnimeAutocomplete()])
+      animeAutoplay = ap.autoplay
+      animeAutocomplete = ac.autocomplete
+    } catch { /* keep defaults */ }
+  }
+  function onAnimeAutoplay(v) {
+    animeAutoplay = v
+    api.setAnimeAutoplay(v).catch((e) => (saveNote = e.message))
+  }
+  function onAnimeAutocomplete(v) {
+    animeAutocomplete = v
+    api.setAnimeAutocomplete(v).catch((e) => (saveNote = e.message))
+  }
+
   // -- Rendimiento --
   function onPerformancePlan(v) {
     set('performance_plan', v)
@@ -291,6 +309,7 @@
     loadApiKeys()
     loadGeneral()
     loadAnimeSfw()
+    loadAnimePlaybackPrefs()
     api.getAbout().then((r) => (about = r)).catch(() => {})
   })
 </script>
@@ -440,6 +459,18 @@
         <h3>CONTENIDO</h3>
         <label class="row"><span>Modo seguro (SFW)</span>
           <input type="checkbox" checked={animeSfw} onchange={(e) => onAnimeSfw(e.target.checked)} />
+        </label>
+      </section>
+
+      <section class="card">
+        <h3>REPRODUCCIÓN</h3>
+        <label class="row"><span>Siguiente episodio automático</span>
+          <input type="checkbox" checked={animeAutoplay}
+                 onchange={(e) => onAnimeAutoplay(e.target.checked)} />
+        </label>
+        <label class="row"><span>Marcar visto y sincronizar con MyAnimeList al 85%</span>
+          <input type="checkbox" checked={animeAutocomplete}
+                 onchange={(e) => onAnimeAutocomplete(e.target.checked)} />
         </label>
       </section>
 

@@ -102,7 +102,42 @@ function destroyCurrent(cb) {
   }
 }
 
-function handlePlay(id, magnet, fileIndex) {
+// Pick the file inside a multi-episode torrent that IS the requested
+// episode, by reading the filenames.
+//
+// This is the ground truth we were throwing away: the torrent's own file
+// list. Without it a season batch fell back to "largest file", which for
+// "give me episode 1" happily returned some other episode — the reported
+// "me pone capitulos de otras temporadas" bug. Torrentio supplies a fileIdx
+// we can trust; AnimeTosho does not, so batches from it were unusable until
+// this existed.
+//
+// Matches the episode number only as a delimited token, so "01" does not
+// match the "01" inside "1080p", a "[A1B2C301]" CRC, or a year. Ordered
+// most-specific first; anything ambiguous falls back to the old behaviour
+// rather than guessing.
+function findEpisodeFile(videoFiles, episode) {
+  if (!episode || videoFiles.length < 2) return null;
+  const n = String(episode);
+  const alts = [...new Set([n, n.padStart(2, "0"), n.padStart(3, "0")])];
+
+  const patterns = [
+    (e) => new RegExp(`(?:^|[^0-9a-z])s\\d{1,2}\\s*e${e}(?![0-9])`, "i"),
+    (e) => new RegExp(`(?:^|[^0-9a-z])(?:ep|episode)?[ _.-]${e}(?![0-9])`, "i"),
+    (e) => new RegExp(`\\[${e}\\]`, "i"),
+  ];
+
+  for (const makeRe of patterns) {
+    for (const e of alts) {
+      const re = makeRe(e);
+      const hits = videoFiles.filter((f) => re.test(f.name.replace(/\.[^.]+$/, "")));
+      if (hits.length === 1) return hits[0];
+    }
+  }
+  return null;
+}
+
+function handlePlay(id, magnet, fileIndex, episode) {
   clearActiveReq();
   destroyCurrent(() => {
     const startedAt = Date.now();
@@ -136,12 +171,15 @@ function handlePlay(id, magnet, fileIndex) {
           return;
         }
 
+        // Trust an explicit index first (Torrentio gives a reliable one),
+        // then the filename match, then the old largest-file guess.
         let file;
         if (fileIndex >= 0 && fileIndex < t.files.length &&
             VIDEO_EXT.test(t.files[fileIndex].name)) {
           file = t.files[fileIndex];
         } else {
-          file = pool.reduce((a, b) => (b.length > a.length ? b : a));
+          file = findEpisodeFile(pool, episode) ||
+                 pool.reduce((a, b) => (b.length > a.length ? b : a));
         }
         t.files.forEach((f) => f.deselect());
         file.select();
@@ -196,7 +234,9 @@ rl.on("line", (line) => {
   }
   const { cmd, id } = msg;
   if (cmd === "play") {
-    handlePlay(id, msg.magnet, Number.isInteger(msg.fileIndex) ? msg.fileIndex : -1);
+    handlePlay(id, msg.magnet,
+               Number.isInteger(msg.fileIndex) ? msg.fileIndex : -1,
+               Number.isInteger(msg.episode) ? msg.episode : 0);
   } else if (cmd === "stop") {
     handleStop(id);
   } else if (cmd === "shutdown") {

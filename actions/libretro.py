@@ -1156,16 +1156,18 @@ class LibretroCore:
             self._gl_read_pixels(0, 0, w, h, _GL_BGRA, _GL_UNSIGNED_BYTE,
                                  ct.cast(self._hw_readback_buffer, c_void_p))
             # glReadPixels always returns bottom-up rows (OpenGL's window-space
-            # origin is bottom-left); QImage expects top-down.  np.copyto writes
-            # into the persistent bytearray without creating a frame-sized
-            # temporary bytes object.
-            source = np.frombuffer(
-                self._hw_readback_buffer, dtype=np.uint8
-            ).reshape(h, w, 4)
-            target = np.frombuffer(
-                self._hw_frame_buffer, dtype=np.uint8
-            ).reshape(h, w, 4)
-            np.copyto(target, source[::-1])
+            # origin is bottom-left); QImage expects top-down.  Copy each row
+            # directly into the persistent bytearray: this also keeps the
+            # readback path usable in test/headless imports where PyQt6 (and
+            # therefore the optional NumPy import above) is unavailable.
+            row_bytes = w * 4
+            source_address = ct.addressof(self._hw_readback_buffer)
+            for source_row in range(h):
+                dest_row = h - source_row - 1
+                dest = (ct.c_ubyte * row_bytes).from_buffer(
+                    self._hw_frame_buffer, dest_row * row_bytes,
+                )
+                ct.memmove(dest, source_address + source_row * row_bytes, row_bytes)
         except Exception:
             return
         with self._lock:

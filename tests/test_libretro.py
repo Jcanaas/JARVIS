@@ -107,15 +107,18 @@ class LibretroEnvironmentTests(unittest.TestCase):
 
         core = LibretroCore.__new__(LibretroCore)
         messages = []
-        callback_type = ct.CFUNCTYPE(None, ct.c_int, ct.c_char_p)
+        callback_type = ct.CFUNCTYPE(
+            None, ct.c_int, ct.c_char_p, ct.c_void_p, ct.c_void_p,
+            ct.c_void_p, ct.c_void_p,
+        )
         core._cb_log = callback_type(
-            lambda level, message: messages.append((level, message)))
+            lambda level, message, *_: messages.append((level, message)))
         interface = LogInterface()
 
         self.assertTrue(core._on_environment(27, ct.byref(interface)))
         self.assertTrue(interface.log)
 
-        callback_type(interface.log)(1, b"LRPS2 log")
+        callback_type(interface.log)(1, b"LRPS2 log", None, None, None, None)
         self.assertEqual(messages, [(1, b"LRPS2 log")])
 
     def test_legacy_core_variables_store_defaults_and_keep_user_choices(self):

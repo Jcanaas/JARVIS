@@ -37,6 +37,33 @@ from actions.trackers import magnet_tracker_suffix
 # not (e.g. "Dual Japanese/English"), so it's excluded to avoid false positives.
 _SPANISH_RE = re.compile(r"castellano|español|espanol|🇪🇸|latino", re.IGNORECASE)
 
+# A release spanning several seasons of a long-running franchise ("Complete
+# Collection S01-S04+Movies") is real and often has the most seeders, but
+# Torrentio's own file_idx pick inside it is unreliable: for kitsu:7442:1
+# (Attack on Titan S1 ep1) three DIFFERENT file_idx values came back tied at
+# the same seeder count for the same "Complete Collection" torrent — each
+# season restarts its own internal "01", "02"... numbering inside the batch,
+# so matching "episode 1" against it is ambiguous in a way a single-season
+# release never is. Verified live against real Torrentio responses before
+# writing this (2026-09-04) — this isn't a hunch, the ambiguity is real and
+# reproducible. Deprioritized rather than dropped: still shown, just sorted
+# behind unambiguous single-season sources so auto-pick (which takes the
+# first result) and a first-glance manual pick land on the safe option.
+_MULTI_SEASON_RE = re.compile(
+    r"s0?\d+\s*[-–~]\s*s?0?\d+"          # S01-S04, S1-S4, S01~S04, S01-04 (real-world: the
+                                          # second "S" is frequently dropped by uploaders)
+    r"|seasons?\s+\d+\s*[-–~]\s*\d+"     # Season 1-4, Seasons 1-4
+    r"|seasons?\s+\d+\s+to\s+\d+"        # Season 1 to 4
+    r"|all\s*seasons"                    # ALL SEASONS
+    r"|complete\s+(collection|series)"   # Complete Collection/Series
+    r"|season\s*\d+(\s*\+\s*\d+){2,}",   # Season 1+2+3+4 (3+ seasons joined by "+")
+    re.IGNORECASE,
+)
+
+
+def _is_multi_season_batch(title: str) -> bool:
+    return bool(_MULTI_SEASON_RE.search(title))
+
 
 class TorrentioError(RuntimeError):
     """Raised when the Torrentio lookup fails."""
@@ -195,7 +222,12 @@ def search_by_id(video_id: str, stream_type: str = "series",
     if not streams:
         raise TorrentioError(f"No Torrentio streams for '{video_id}'.")
 
-    streams.sort(key=lambda s: s.seeders, reverse=True)
+    # Unambiguous single-season sources first, ties broken by seeders — see
+    # _is_multi_season_batch's docstring for why multi-season batches sink
+    # here instead of being excluded outright (still a legitimate choice,
+    # just not the safe default).
+    streams.sort(key=lambda s: (not _is_multi_season_batch(s.title), s.seeders),
+                reverse=True)
     return streams[:limit]
 
 

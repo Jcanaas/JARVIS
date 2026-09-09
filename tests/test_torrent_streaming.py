@@ -365,6 +365,104 @@ class TorrentioTests(unittest.TestCase):
         with self.assertRaises(tio.TorrentioError):
             tio.search("tt0000000")
 
+    # -- Multi-season batch de-ranking (search_by_id, anime path) -----------
+    # Regression coverage for a real bug: Torrentio's file_idx pick inside a
+    # multi-season "Complete Collection" batch is unreliable — verified live
+    # against kitsu:7442:1 (Attack on Titan S1 ep1), where the same
+    # "Complete Collection S01-S04+OVA+Movies" torrent came back with three
+    # DIFFERENT file_idx values tied at the same seeder count, because each
+    # season restarts its own internal episode numbering inside the batch.
+
+    def test_is_multi_season_batch_detects_dash_range_with_s_prefix(self):
+        self.assertTrue(tio._is_multi_season_batch(
+            "[Anime Time] Attack On Titan (Complete Collection) (S01-S04+OVA+Movies)"))
+
+    def test_is_multi_season_batch_detects_dash_range_without_second_s(self):
+        # Real-world naming: the second "S" is frequently dropped.
+        self.assertTrue(tio._is_multi_season_batch(
+            "[Trix] Shingeki no Kyojin (S01-04 + OVAs) (COMPLETE)"))
+
+    def test_is_multi_season_batch_detects_season_word_range(self):
+        self.assertTrue(tio._is_multi_season_batch(
+            "Attack on Titan 2013 Season 1-4 S01-S04 1080p Mixed x265"))
+
+    def test_is_multi_season_batch_detects_season_to_range(self):
+        self.assertTrue(tio._is_multi_season_batch(
+            "Attack on Titan 2013 Seasons 1 to 4 Complete 1080p WEB x264"))
+
+    def test_is_multi_season_batch_detects_all_seasons(self):
+        self.assertTrue(tio._is_multi_season_batch(
+            "Attack on Titan/Shingeki no Kyojin ALL SEASONS 1080p WEBRip"))
+
+    def test_is_multi_season_batch_detects_complete_collection(self):
+        self.assertTrue(tio._is_multi_season_batch(
+            "[Anime Time] One Piece (Complete Collection) (BD)"))
+
+    def test_is_multi_season_batch_detects_plus_joined_seasons(self):
+        self.assertTrue(tio._is_multi_season_batch(
+            "[EMBER] Shingeki no Kyojin (2013-2021) (Season 1+2+3+4 {Part 1}) [BDRip]"))
+
+    def test_is_multi_season_batch_false_for_single_season(self):
+        self.assertFalse(tio._is_multi_season_batch(
+            "[Salieri] Attack on Titan - Shingeki No Kyojin S1 BD (1080p) (HDR) [Dual Audio]"))
+
+    def test_is_multi_season_batch_false_for_plain_episode_range(self):
+        # An episode range within ONE season ("01~25") must not be confused
+        # with a season range ("S01-S04") — same dash/tilde separator style.
+        self.assertFalse(tio._is_multi_season_batch(
+            "[Erai-raws] Shingeki no Kyojin - 01 ~ 25 [1080p][BATCH]"))
+
+    def test_is_multi_season_batch_false_for_ordinary_title(self):
+        self.assertFalse(tio._is_multi_season_batch(
+            "Attack on Titan (2013) Season 1 S01 (1080p BluRay x265 HEVC 10bit AAC 5.1)"))
+
+    @patch("actions.torrentio.requests.get")
+    def test_search_by_id_sinks_multi_season_batches_below_single_season(self, mock_get):
+        response = {
+            "streams": [
+                {
+                    "title": "[Anime Time] Attack On Titan (Complete Collection) (S01-S04+OVA+Movies)\n👤 836",
+                    "infoHash": "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+                    "fileIdx": 1,
+                },
+                {
+                    "title": "[Salieri] Attack on Titan - Shingeki No Kyojin S1 BD (1080p)\n👤 150",
+                    "infoHash": "1111aaaa2222bbbb3333cccc4444dddd5555eeee",
+                    "fileIdx": 20,
+                },
+            ]
+        }
+        mock_get.return_value = MagicMock(
+            status_code=200, json=lambda: response, raise_for_status=lambda: None)
+        streams = tio.search_by_id("kitsu:7442:1", stream_type="series")
+        # Lower seeders (150 < 836), but single-season and unambiguous —
+        # this is the one auto-pick (which takes streams[0]) must land on.
+        self.assertEqual(streams[0].seeders, 150)
+        self.assertIn("S1 BD", streams[0].title)
+        self.assertEqual(streams[1].seeders, 836)
+
+    @patch("actions.torrentio.requests.get")
+    def test_search_by_id_ranks_by_seeders_within_each_tier(self, mock_get):
+        response = {
+            "streams": [
+                {"title": "Complete Collection S01-S04\n\U0001f464 50",
+                 "infoHash": "a" * 40, "fileIdx": 0},
+                {"title": "Complete Collection S01-S04\n\U0001f464 200",
+                 "infoHash": "b" * 40, "fileIdx": 0},
+                {"title": "Attack on Titan S01 BD\n\U0001f464 10",
+                 "infoHash": "c" * 40, "fileIdx": 0},
+                {"title": "Attack on Titan S01 BD\n\U0001f464 90",
+                 "infoHash": "d" * 40, "fileIdx": 0},
+            ]
+        }
+        mock_get.return_value = MagicMock(
+            status_code=200, json=lambda: response, raise_for_status=lambda: None)
+        streams = tio.search_by_id("kitsu:7442:1", stream_type="series")
+        seeders = [s.seeders for s in streams]
+        # Both single-season entries (90, 10) sort before both batch entries
+        # (200, 50), and each tier is itself seeder-sorted.
+        self.assertEqual(seeders, [90, 10, 200, 50])
+
 
 # --------------------------------------------------------------------------- #
 # Peerflix addon (Spanish-focused Stremio source)                           #

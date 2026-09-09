@@ -1533,7 +1533,7 @@ class SettingsModePanel(QWidget):
         platform_runtime.apply_performance_plan(plan)
 
     def _build_anime_page(self) -> QWidget:
-        from actions.anime_search import get_sfw, set_sfw
+        from actions.anime.prefs import get_sfw, set_sfw
         w = QWidget()
         w.setStyleSheet("QWidget { border: none; background: transparent; }")
         l = QVBoxLayout(w)
