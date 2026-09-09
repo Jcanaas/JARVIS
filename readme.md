@@ -6,6 +6,13 @@
 
 **Tu asistente personal de IA, siempre a tu lado**
 
+**[Descargar instalador para Windows](https://github.com/Jcanaas/JARVIS/releases)**
+
+En la versión publicada, abre **Assets** y descarga `Jarvis-Setup-1.0.0.exe`.
+Ejecuta el instalador e introduce tu clave de Gemini en el primer arranque.
+Las versiones preliminares se publican cuando GitHub Actions supera la prueba
+de instalación y arranque; no necesitas instalar Python ni Node.
+
 [![Python](https://img.shields.io/badge/Python-3.11%2B-38BDF8?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-UI-7DD3FC?style=flat-square)](https://pypi.org/project/PyQt6/)
 [![Gemini](https://img.shields.io/badge/Gemini-API-4ADE80?style=flat-square&logo=google)](https://ai.google.dev)
