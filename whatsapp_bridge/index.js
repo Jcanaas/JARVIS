@@ -176,16 +176,101 @@ function findSystemChrome() {
   return undefined;
 }
 
+// --- WhatsApp Web build pinning ---
+// We used to hardcode one build ('2.3000.1043180520-alpha') and fetch its HTML
+// from wppconnect-team/wa-version on every launch. That archive only keeps
+// builds for ~2 months (versions.json carries an `expire` date) and deletes
+// them afterwards: once ours was pruned the fetch 404'd, wwebjs silently fell
+// back to whatever live build web.whatsapp.com served, and the bridge went
+// back to exactly what pinning was meant to prevent — self-update reloads
+// detaching the page, QR re-scans, and "r: r" getChats failures. A flaky
+// network at boot (EAI_AGAIN) triggered the same fallback.
+//
+// Now: pick the archive's current build, keep its HTML in a local cache under
+// DATA_DIR so boot never depends on the network, and only move to a newer
+// build when the pinned one is close to expiring.
+const WA_CACHE_DIR = path.join(DATA_DIR, '.wwebjs_cache');
+const WA_PIN_FILE = path.join(WA_CACHE_DIR, 'pinned_version.json');
+const WA_ARCHIVE = 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main';
+const WA_RENEW_BEFORE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+
+function readPinnedWebVersion() {
+  try {
+    const pin = JSON.parse(fs.readFileSync(WA_PIN_FILE, 'utf8'));
+    if (!pin || !pin.version) return null;
+    if (!fs.existsSync(path.join(WA_CACHE_DIR, `${pin.version}.html`))) return null;
+    return pin;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchText(url, timeoutMs = 15000) {
+  const doFetch = globalThis.fetch || require('node-fetch');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await doFetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function downloadCurrentWebVersion() {
+  const index = JSON.parse(await fetchText(`${WA_ARCHIVE}/versions.json`));
+  const version = index && index.currentVersion;
+  if (!version) throw new Error('versions.json has no currentVersion');
+  const entry = (index.versions || []).find(v => v.version === version) || {};
+  const html = await fetchText(`${WA_ARCHIVE}/html/${version}.html`);
+  if (!html || !html.includes('<html')) throw new Error(`unexpected HTML for ${version}`);
+  fs.mkdirSync(WA_CACHE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(WA_CACHE_DIR, `${version}.html`), html);
+  fs.writeFileSync(WA_PIN_FILE, JSON.stringify({ version, expire: entry.expire || null }));
+  return { version, expire: entry.expire || null };
+}
+
+// Returns the build to pin, or undefined to let wwebjs load the live one (only
+// when there is no cached build at all and the archive is unreachable).
+async function resolveWebVersion() {
+  const pinned = readPinnedWebVersion();
+  const expireMs = pinned && pinned.expire ? Date.parse(pinned.expire) : NaN;
+  const fresh = pinned && (!Number.isFinite(expireMs)
+    || expireMs - Date.now() > WA_RENEW_BEFORE_EXPIRY_MS);
+  if (fresh) return pinned.version;
+  try {
+    const next = await downloadCurrentWebVersion();
+    if (!pinned || pinned.version !== next.version) {
+      console.log(`Pinned WhatsApp Web ${next.version} (expires ${next.expire || 'unknown'})`);
+    }
+    return next.version;
+  } catch (e) {
+    const why = e && e.message ? e.message : e;
+    if (pinned) {
+      console.warn(`could not refresh WhatsApp Web build (${why}); keeping cached ${pinned.version}`);
+      return pinned.version;
+    }
+    console.warn(`could not pin a WhatsApp Web build (${why}); using the live one`);
+    return undefined;
+  }
+}
+
+// Set the pin on the client right before each initialize(): wwebjs reads
+// options.webVersion at initialize time, and a bridge left running for weeks
+// must still rotate off a build before it expires.
+async function initializeClient() {
+  client.options.webVersion = await resolveWebVersion();
+  return client.initialize();
+}
+
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: path.join(DATA_DIR, '.wwebjs_auth') }),
   takeoverOnConflict: true,   // keep this session instead of getting kicked out
   takeoverTimeoutMs: 10000,
-  // Pin the WhatsApp Web build. Two reasons: (1) it stops WhatsApp Web's
-  // periodic self-update reload, which detaches the puppeteer frame the
-  // injected Store lives in; (2) the stored session is bound to the web build
-  // it was linked on — changing the version forces a QR re-scan, so keeping a
-  // stable pin lets the session resume across restarts. Must stay recent enough
-  // that WhatsApp still accepts it for login (an old build forces re-link).
+  // Pin the WhatsApp Web build (resolved by resolveWebVersion() above). It
+  // stops WhatsApp Web's periodic self-update reload, which detaches the
+  // puppeteer frame the injected Store lives in.
   //
   // NOTE: pinning alone did not fix the getChats "r: r" error seen on this
   // (LID-migrated) account — root cause was WhatsApp Web renaming a message
@@ -199,10 +284,10 @@ const client = new Client({
   // so a single bad chat doesn't blank the whole list — see profile
   // pictures/pictureUrl (only populated by a working getChats) and message
   // read-receipts, which both depend on this.
-  webVersion: '2.3000.1043180520-alpha',
+  webVersion: undefined,
   webVersionCache: {
-    type: 'remote',
-    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
+    type: 'local',
+    path: WA_CACHE_DIR,
     strict: false,
   },
   puppeteer: {
@@ -406,34 +491,43 @@ async function reconnect(reason) {
   // destroy() can leave the browser alive (detached-frame state); make sure
   // nothing keeps the profile locked before we try to launch again.
   killBrowserTree();
-  const attempt = () => {
-    // If puppeteer.launch() itself throws (e.g. "already running"), it does
-    // so *before* assigning client.pupBrowser — killBrowserTree() has no PID
-    // to act on, so it can't clean up the orphan that caused the failure.
-    // killOrphanChromeForProfile() finds it independently by matching the
-    // profile path in `ps` output, regardless of whether this client ever
-    // held a handle to it. Without repeating this on every retry (only the
-    // very first attempt, above, did it), "already running" repeats every
-    // 10s forever instead of self-healing.
-    killBrowserTree();
-    try {
-      killOrphanChromeForProfile();
-    } catch (e) {
-      // best effort
-    }
-    try {
-      clearStaleChromiumLocks();
-    } catch (e) {
-      // best effort
-    }
-    armInitWatchdog();
-    client.initialize().catch((err) => {
-      console.error('initialize failed, retrying in 10s:', err && err.message ? err.message : err);
-      setState('starting', 'Reintentando iniciar el navegador…');
-      setTimeout(attempt, 10000);
-    });
-  };
-  setTimeout(() => { reconnecting = false; attempt(); }, 3000);
+  setTimeout(() => { reconnecting = false; startClient('initialize'); }, 3000);
+}
+
+// Launch the client, retrying every 10s until initialize() resolves. Every
+// attempt — including the very first boot and its retries — starts by
+// clearing whatever a previous attempt left behind:
+//   * a failed initialize() (e.g. "Navigating frame was detached") can leave
+//     its Chrome running; without killing it the next launch fails with
+//     "The browser is already running" forever.
+//   * if puppeteer.launch() itself throws, it does so *before* assigning
+//     client.pupBrowser, so killBrowserTree() has no PID to act on;
+//     killOrphanChromeForProfile() finds it independently by matching the
+//     profile path in `ps` output.
+let startGeneration = 0;
+function startClient(label) {
+  // A retry scheduled by an older attempt must not launch a second client
+  // alongside one started since (e.g. by reconnect()).
+  const generation = ++startGeneration;
+  killBrowserTree();
+  try {
+    killOrphanChromeForProfile();
+  } catch (e) {
+    // best effort
+  }
+  try {
+    clearStaleChromiumLocks();
+  } catch (e) {
+    // best effort
+  }
+  armInitWatchdog();
+  initializeClient().catch((err) => {
+    console.error(`${label} failed, retrying in 10s:`, err && err.message ? err.message : err);
+    setState('starting', 'Reintentando iniciar el navegador…');
+    setTimeout(() => {
+      if (generation === startGeneration && !reconnecting && !isReady) startClient(label);
+    }, 10000);
+  });
 }
 
 // Page-health watchdog: the detached-frame state emits no 'disconnected'
@@ -1718,29 +1812,19 @@ process.on('SIGTERM', gracefulExit);
 
 const PORT = process.env.PORT || 3000;
 loadState();
-app.listen(PORT, '127.0.0.1', () => {
+const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`WhatsApp bridge listening on 127.0.0.1:${PORT}`);
-  // We own the port → no other bridge is live → safe to clear stale locks that
-  // a previous abrupt shutdown may have left behind. Sweep any orphaned
-  // Chrome from that same abrupt shutdown first, or it'll just recreate the
-  // locks we're about to delete.
-  try {
-    killOrphanChromeForProfile();
-  } catch (e) {
-    // best effort
+  // We own the port → no other bridge is live → safe to sweep orphaned Chrome
+  // and stale locks a previous abrupt shutdown may have left behind.
+  startClient('initial initialize');
+});
+// Another bridge already owns the port. Leave immediately: the global
+// uncaughtException guard used to swallow this, leaving a second, idle node
+// process alive next to the real one on every duplicate launch.
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.warn(`port ${PORT} already in use — another bridge is running, exiting`);
+    process.exit(0);
   }
-  try {
-    clearStaleChromiumLocks();
-  } catch (e) {
-    // best effort
-  }
-  const boot = () => {
-    armInitWatchdog();
-    client.initialize().catch((err) => {
-      console.error('initial initialize failed, retrying in 10s:', err && err.message ? err.message : err);
-      setState('starting', 'Reintentando iniciar el navegador…');
-      setTimeout(boot, 10000);
-    });
-  };
-  boot();
+  console.error('HTTP server error:', err && err.message ? err.message : err);
 });

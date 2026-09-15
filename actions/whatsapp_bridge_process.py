@@ -126,8 +126,19 @@ def _attach_windows_job(process: subprocess.Popen) -> bool:
 def start_bridge(wait_seconds: float = 15.0) -> bool:
     """Start the bridge when needed and wait until its HTTP server responds."""
     global _process
-    if bridge_running():
+    if bridge_running(timeout=2.0):
         return True
+    # A bridge we already spawned can be alive but slow to answer /status
+    # (Node's event loop busy with a chat sync). Spawning another one there
+    # only produced a duplicate process fighting for port 3000 and the Chrome
+    # profile — wait on the existing one instead.
+    if _process is not None and _process.poll() is None:
+        deadline = time.monotonic() + max(0.1, wait_seconds)
+        while time.monotonic() < deadline and _process is not None and _process.poll() is None:
+            if bridge_running(timeout=2.0):
+                return True
+            time.sleep(0.5)
+        return bridge_running(timeout=2.0)
     if not BRIDGE_DIR.is_dir() or not (BRIDGE_DIR / "index.js").is_file():
         return False
     node = _locate_node()
